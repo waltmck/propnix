@@ -1,0 +1,394 @@
+--- a/Source/Tools/LinuxEmulation/VDSO_Emulation.cpp
++++ b/Source/Tools/LinuxEmulation/VDSO_Emulation.cpp
+@@ -820,6 +820,12 @@
+       auto PageSize = sysconf(_SC_PAGESIZE);
+       PageSize = PageSize > 0 ? PageSize : FEXCore::Utils::FEX_PAGE_SIZE;
+ 
++      // propnix 16K-host: MAP_FIXED_NOREPLACE requires a host-page-aligned address, and
++      // VDSOSize/VDSOHint are only 4K-aligned. On a 16K host every attempt EINVALs and the
++      // top-down scan spins for ~2^33 iterations (the hang). Snap both to the host page.
++      Mapping.VDSOSize = (Mapping.VDSOSize + PageSize - 1) & ~(static_cast<uint64_t>(PageSize) - 1);
++      VDSOHint &= ~(static_cast<uint64_t>(PageSize) - 1);
++
+       // Scan top down and try to allocate a location
+       void* VDSOPointerBase {};
+       do {
+--- a/External/jemalloc_glibc/pregen/include/jemalloc/internal/jemalloc_internal_defs.h
++++ b/External/jemalloc_glibc/pregen/include/jemalloc/internal/jemalloc_internal_defs.h
+@@ -190,7 +190,7 @@
+ /* #undef LG_QUANTUM */
+ 
+ /* One page is 2^LG_PAGE bytes. */
+-#define LG_PAGE 12
++#define LG_PAGE 16
+ 
+ /* Maximum number of regions in a slab. */
+ /* #undef CONFIG_LG_SLAB_MAXREGS */
+--- a/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
++++ b/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
+@@ -8,6 +8,7 @@
+ #include <stdlib.h>
+ #include <malloc.h>
+ #include <sys/mman.h>
++#include <unistd.h>
+ #else
+ #define NTDDI_VERSION 0x0A000005
+ #include <memoryapi.h>
+@@ -138,7 +139,33 @@
+     prot |= PROT_EXEC;
+   }
+ 
+-  return ::mprotect(Ptr, Size, prot) == 0;
++  // propnix 16K-host support: the kernel rejects mprotect on a region not aligned to the
++  // host page size, so a 4K-granular guest/JIT request (e.g. a code-buffer guard page)
++  // fails on a 16K host. Widen down/up to the enclosing host page(s): fail-open, the
++  // "most lenient" behaviour for mixed-permission host pages. Sub-host-page permission
++  // granularity is not enforced (acceptable: guest guard/W^X within a host page is lost).
++  static const size_t HostPageSize = [] {
++    long p = ::sysconf(_SC_PAGESIZE);
++    return p > 0 ? static_cast<size_t>(p) : size_t(4096);
++  }();
++  const uintptr_t Base = reinterpret_cast<uintptr_t>(Ptr);
++  const uintptr_t End = Base + Size;
++  if (options == ProtectOptions::None) {
++    // Removing access (a guard page): only protect FULLY-CONTAINED host pages, so a 4K
++    // guard sharing a 16K host page with live data does not clobber that data. If no host
++    // page is fully contained, skip: the tripwire is dropped (fail-open) but nothing breaks.
++    const uintptr_t A = (Base + HostPageSize - 1) & ~(HostPageSize - 1);
++    const uintptr_t E = End & ~(HostPageSize - 1);
++    if (A >= E) {
++      return true;
++    }
++    return ::mprotect(reinterpret_cast<void*>(A), E - A, prot) == 0;
++  }
++  // Adding access: widen to the enclosing host page(s) so the whole requested region gets at
++  // least the requested access (fail-open / most-lenient; sub-host-page W^X/NX not enforced).
++  const uintptr_t A = Base & ~(HostPageSize - 1);
++  const size_t L = (End - A + HostPageSize - 1) & ~(HostPageSize - 1);
++  return ::mprotect(reinterpret_cast<void*>(A), L, prot) == 0;
+ }
+ 
+ inline void VirtualTHPControl(const void* Ptr, size_t Size, THPControl Control) {
+--- a/Source/Tools/FEXInterpreter/ELFCodeLoader.h
++++ b/Source/Tools/FEXInterpreter/ELFCodeLoader.h
+@@ -134,60 +134,59 @@
+     const bool DynELF = Elf.ehdr.e_type == ET_DYN;
+     const bool NeedsLateBRKMap = BrkBase && !DynELF;
+ 
++    // propnix 16K-host ELF loader: a 16K host cannot MAP_FIXED a segment whose vaddr is
++    // 4K-aligned-but-not-16K-aligned (the common case). Instead of mapping each PT_LOAD
++    // file-backed at its exact vaddr, reserve the whole image span as ONE RWX anonymous
++    // region (only its base needs host alignment) and pread each segment's bytes into it.
++    // pread has no alignment constraint. Permissions are left RWX: fail-open / most-lenient,
++    // so sub-16K W^X/NX is not enforced (acceptable for compatibility on this host).
++    static const uintptr_t HostPage = [] { long p = ::sysconf(_SC_PAGESIZE); return p > 0 ? (uintptr_t)p : (uintptr_t)4096; }();
++
++    uintptr_t MinV = ~0ULL, MaxV = 0;
++    for (const auto& h : Elf.phdrs) {
++      if (h.p_type != PT_LOAD) continue;
++      MinV = std::min<uintptr_t>(MinV, h.p_vaddr);
++      MaxV = std::max<uintptr_t>(MaxV, h.p_vaddr + h.p_memsz);
++    }
++    const uintptr_t SpanBase = MinV & ~(HostPage - 1);
++    const uintptr_t SpanEnd = (MaxV + HostPage - 1) & ~(HostPage - 1);
++    const size_t SpanSize = (SpanEnd - SpanBase) + (BrkBase ? BRK_SIZE : 0);
++
+     if (DynELF) {
+-      // Allocate a base address plus BRK padding.
+-      auto TotalSize = CalculateDYNELFSize(Elf.phdrs) + (BrkBase ? BRK_SIZE : 0);
+-      LoadBase =
+-        (uintptr_t)Handler->GuestMmap(Thread, reinterpret_cast<void*>(LoadHint), TotalSize, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
++      LoadBase = (uintptr_t)Handler->GuestMmap(Thread, reinterpret_cast<void*>(LoadHint), SpanSize,
++                                               PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+       if (FEX::HLE::HasSyscallError(LoadBase)) {
+         return {};
+       }
+-
+-      // fprintf(stderr, "elf %d: %lx-%lx\n", Elf.fd, LoadBase, LoadBase + TotalSize);
+       if (BrkBase) {
+-        BrkLoadBase = LoadBase + (TotalSize - BRK_SIZE);
++        BrkLoadBase = LoadBase + (SpanSize - BRK_SIZE);
++      }
++    } else {
++      auto rv = Handler->GuestMmap(Thread, reinterpret_cast<void*>(SpanBase), SpanEnd - SpanBase,
++                                   PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
++      if (FEX::HLE::HasSyscallError((uintptr_t)rv)) {
++        LogMan::Msg::EFmt("propnix: failed to reserve ELF image span @ {:x}", SpanBase);
++        return {};
+       }
++      LoadBase = 0;
+     }
+ 
+     for (const auto& Header : Elf.phdrs) {
+       if (Header.p_type != PT_LOAD) {
+         continue;
+       }
+-
+-      int MapProt = MapFlags(Header);
+-      int MapType = MAP_PRIVATE | MAP_DENYWRITE | MAP_FIXED;
+-
+-      if (!MapFile(Elf, LoadBase, Header, MapProt, MapType, Handler, Thread)) {
+-        return {};
+-      }
+-
+-      if (Header.p_memsz > Header.p_filesz) {
+-        // clear bss
+-        auto BSSStart = LoadBase + Header.p_vaddr + Header.p_filesz;
+-        auto BSSPageStart = PAGE_ALIGN(BSSStart);
+-        auto BSSPageEnd = PAGE_ALIGN(LoadBase + Header.p_vaddr + Header.p_memsz);
+-
+-        // Only clear padding bytes if the section is writable
+-        if (Header.p_flags & PF_W) {
+-          memset((void*)BSSStart, 0, BSSPageStart - BSSStart);
+-        }
+-
+-        if (BSSPageStart != BSSPageEnd) {
+-          auto bss = Handler->GuestMmap(Thread, (void*)BSSPageStart, BSSPageEnd - BSSPageStart, MapProt, MapType | MAP_ANONYMOUS, -1, 0);
+-          if (FEX::HLE::HasSyscallError(bss)) {
+-            LogMan::Msg::EFmt("Failed to allocate BSS @ {}, {}\n", fmt::ptr(bss), errno);
+-            return {};
+-          }
++      if (Header.p_filesz) {
++        ssize_t r = ::pread(Elf.fd, reinterpret_cast<void*>(LoadBase + Header.p_vaddr), Header.p_filesz, Header.p_offset);
++        if (r < 0 || static_cast<size_t>(r) != Header.p_filesz) {
++          LogMan::Msg::EFmt("propnix: pread of PT_LOAD failed {} fd {}", errno, Elf.fd);
++          return {};
+         }
+       }
+-
++      // BSS (p_memsz > p_filesz) is already zero: the reservation is anonymous memory.
+       if (NeedsLateBRKMap) {
+-        // Keep track of highest address for BRK in the case of non-dynamic ELF files.
+         auto memend = LoadBase + Header.p_vaddr + Header.p_memsz;
+-
+-        // track elf_brk
+         if (memend > BrkLoadBase) {
+-          BrkLoadBase = FEXCore::AlignUp(memend, FEXCore::Utils::FEX_PAGE_SIZE);
++          BrkLoadBase = (memend + HostPage - 1) & ~(HostPage - 1);
+         }
+       }
+     }
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+@@ -59,8 +59,15 @@
+     auto FaultBase = FEXCore::AlignDown(FaultAddress, FEXCore::Utils::FEX_PAGE_SIZE);
+ 
+     auto UnprotectRegionCallback = [](uintptr_t Start, uintptr_t Length) {
+-      auto rv = mprotect((void*)Start, Length, PROT_READ | PROT_WRITE);
+-      LogMan::Throw::AFmt(rv == 0, "mprotect({}, {}) failed", Start, Length);
++      // propnix 16K-host: the guest tracks 4K-granular permissions, but the host kernel can only
++      // mprotect on 16K boundaries. Snap the range out to the enclosing host page(s) and grant the
++      // most-lenient (RW) permission for the whole host page. This is the sub-page permission
++      // fail-open: a 16K host page that contains any writable 4K guest page becomes writable.
++      static const size_t HostPage = static_cast<size_t>(sysconf(_SC_PAGESIZE));
++      const uintptr_t A = Start & ~(HostPage - 1);
++      const size_t L = (((Start + Length) - A) + HostPage - 1) & ~(HostPage - 1);
++      auto rv = mprotect((void*)A, L, PROT_READ | PROT_WRITE);
++      LogMan::Throw::AFmt(rv == 0, "mprotect({}, {}) failed", A, L);
+     };
+ 
+     if (Entry->second.Flags.Shared) {
+@@ -111,6 +118,21 @@
+   const auto Base = Start & FEXCore::Utils::FEX_PAGE_MASK;
+   const auto Top = FEXCore::AlignUp(Start + Length, FEXCore::Utils::FEX_PAGE_SIZE);
+ 
++  // propnix 16K-host: SMC read-protects code pages so guest writes to code fault and are
++  // re-translated. The host kernel can only mprotect on host-page boundaries, so a code
++  // range that is 4K-granular must be snapped OUT to the enclosing host page(s). This
++  // protects any neighbouring 4K guest pages sharing the host page too, but that is
++  // correctness-safe: a write to such a page faults, and HandleSegfault makes it writable
++  // and drops the code translations there (which are regenerated on next execution). Guest
++  // code emitted by a JIT (e.g. Mono) is placed in its own host-page-aligned executable
++  // allocation, so in practice there is no data collateral.
++  static const size_t HostPage = static_cast<size_t>(sysconf(_SC_PAGESIZE));
++  auto SnapProtectRO = [](uintptr_t A, size_t S) {
++    const uintptr_t Aligned = A & ~(HostPage - 1);
++    const size_t Wide = ((A + S + HostPage - 1) & ~(HostPage - 1)) - Aligned;
++    return ::mprotect(reinterpret_cast<void*>(Aligned), Wide, PROT_READ);
++  };
++
+   {
+     if (SMCChecks != FEXCore::Config::CONFIG_SMC_MTRACK) {
+       return;
+@@ -154,13 +176,13 @@
+               const auto MirroredBase = std::max(VMAOffsetBase, OffsetBase);
+               const auto MirroredSize = std::min(OffsetTop, VMAOffsetTop) - MirroredBase;
+ 
+-              auto rv = mprotect((void*)(MirroredBase - VMAOffsetBase + VMABase), MirroredSize, PROT_READ);
++              auto rv = SnapProtectRO(MirroredBase - VMAOffsetBase + VMABase, MirroredSize);
+               LogMan::Throw::AFmt(rv == 0, "mprotect({}, {}) failed", MirroredBase, MirroredSize);
+             }
+           } while ((VMA = VMA->ResourceNextVMA));
+ 
+         } else if (Mapping->second.Prot.Writable) {
+-          int rv = mprotect((void*)ProtectBase, ProtectSize, PROT_READ);
++          int rv = SnapProtectRO(ProtectBase, ProtectSize);
+ 
+           LogMan::Throw::AFmt(rv == 0, "mprotect({}, {}) failed", ProtectBase, ProtectSize);
+         }
+@@ -283,9 +305,68 @@
+       }
+       LOGMAN_THROW_A_FMT(Is64Bit || (Result >> 32) == 0 || (Result >> 32) == 0xFFFFFFFF, "values must fit to 32 bits");
+     } else {
+-      Result = reinterpret_cast<uint64_t>(::mmap(reinterpret_cast<void*>(addr), length, prot, flags, fd, offset));
+-      if (Result == ~0ULL) {
+-        return reinterpret_cast<void*>(-errno);
++      // propnix large-host-page: the guest dynamic linker maps shared-library PT_LOAD
++      // segments with file-backed MAP_FIXED at 4K granularity. On a host whose page is
++      // larger than 4K the kernel rejects any such mapping whose address or file offset
++      // is not host-page-aligned (EINVAL), so no dynamically-linked guest can load its
++      // libc. Emulate those sub-host-page mappings by backing the whole host-page span
++      // with private anonymous memory (always writable, never beyond-EOF) and copying the
++      // segment's bytes in with pread — the file-backed pages the linker leaves under a
++      // segment can extend past the file's end (its whole-object reservation is rounded up),
++      // so we must NOT pread into them directly (that faults). The one or two host pages at
++      // the ends of the span are shared with a neighbouring segment; preserve their bytes
++      // across the anonymous remap with a fault-safe /proc/self/mem read (short read instead
++      // of SIGBUS if the neighbour is itself an unbacked/beyond-EOF page). Protection is left
++      // at the most-lenient R/W — FEX reads guest code to translate it and never host-executes
++      // guest pages, so EXEC is unnecessary and W is harmless. Aligned file/anon mappings and
++      // non-fixed mappings take the kernel path unchanged.
++      static const size_t HostPage = static_cast<size_t>(sysconf(_SC_PAGESIZE));
++      const uintptr_t AddrU = reinterpret_cast<uintptr_t>(addr);
++      const bool FileBacked = fd >= 0 && !(flags & MAP_ANONYMOUS);
++      const bool AnonMap = (flags & MAP_ANONYMOUS) != 0;
++      const bool SubHostPage = (AddrU & (HostPage - 1)) || (static_cast<uint64_t>(offset) & (HostPage - 1));
++      if ((flags & MAP_FIXED) && SubHostPage && AddrU != 0 && (FileBacked || AnonMap)) {
++        const uintptr_t SpanBase = AddrU & ~(HostPage - 1);
++        const uintptr_t SpanEnd = (AddrU + length + HostPage - 1) & ~(HostPage - 1);
++        const size_t LeadLen = AddrU - SpanBase;               // neighbour bytes in the leading page
++        const size_t TrailLen = SpanEnd - (AddrU + length);    // neighbour bytes in the trailing page
++
++        // Fault-safe capture of the neighbouring fragments that share our end pages.
++        static int MemFd = ::open("/proc/self/mem", O_RDONLY | O_CLOEXEC);
++        uint8_t* LeadSave = LeadLen ? reinterpret_cast<uint8_t*>(::malloc(LeadLen)) : nullptr;
++        uint8_t* TrailSave = TrailLen ? reinterpret_cast<uint8_t*>(::malloc(TrailLen)) : nullptr;
++        const ssize_t LeadGot = (LeadSave && MemFd >= 0) ? ::pread(MemFd, LeadSave, LeadLen, SpanBase) : 0;
++        const ssize_t TrailGot = (TrailSave && MemFd >= 0) ? ::pread(MemFd, TrailSave, TrailLen, AddrU + length) : 0;
++
++        bool ok = ::mmap(reinterpret_cast<void*>(SpanBase), SpanEnd - SpanBase, PROT_READ | PROT_WRITE,
++                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) != MAP_FAILED;
++        if (ok) {
++          if (LeadGot > 0) {
++            memcpy(reinterpret_cast<void*>(SpanBase), LeadSave, static_cast<size_t>(LeadGot));
++          }
++          if (TrailGot > 0) {
++            memcpy(reinterpret_cast<void*>(AddrU + length), TrailSave, static_cast<size_t>(TrailGot));
++          }
++          if (FileBacked) {
++            ok = ::pread(fd, reinterpret_cast<void*>(AddrU), length, offset) >= 0;
++          }
++          // Anonymous request: the fresh mapping is already zero-filled.
++        }
++        ::free(LeadSave);
++        ::free(TrailSave);
++        if (ok) {
++          Result = AddrU;
++        } else {
++          Result = reinterpret_cast<uint64_t>(::mmap(reinterpret_cast<void*>(addr), length, prot, flags, fd, offset));
++          if (Result == ~0ULL) {
++            return reinterpret_cast<void*>(-errno);
++          }
++        }
++      } else {
++        Result = reinterpret_cast<uint64_t>(::mmap(reinterpret_cast<void*>(addr), length, prot, flags, fd, offset));
++        if (Result == ~0ULL) {
++          return reinterpret_cast<void*>(-errno);
++        }
+       }
+     }
+ 
+@@ -425,7 +506,16 @@
+ 
+   {
+     auto lk = FEXCore::GuardSignalDeferringSection(VMATracking.Mutex, Thread);
+-    Result = ::mprotect(addr, len, prot);
++    // propnix 16K-host: a 4K-granular guest mprotect fails EINVAL on a 16K host; the guest
++    // then writes to a still-protected page and takes SEGV_ACCERR. Widen to the enclosing
++    // host page(s) so it succeeds (fail-open / most-lenient; sub-host-page perms not enforced).
++    {
++      static const uintptr_t HostPage = [] { long p = ::sysconf(_SC_PAGESIZE); return p > 0 ? (uintptr_t)p : (uintptr_t)4096; }();
++      uintptr_t B = reinterpret_cast<uintptr_t>(addr);
++      uintptr_t A = B & ~(HostPage - 1);
++      size_t L = ((B + len) - A + HostPage - 1) & ~(HostPage - 1);
++      Result = ::mprotect(reinterpret_cast<void*>(A), L, prot);
++    }
+     if (Result == -1) {
+       return -errno;
+     }
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
+@@ -169,7 +169,11 @@
+   pthread_setname_np(pthread_self(), name);
+ }
+ 
+-constexpr size_t CALLRET_STACK_ALLOC_SIZE = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + 2 * FEXCore::Utils::FEX_PAGE_SIZE;
++// propnix 16K-host: guard pages are a full host page each (see ThreadStateObject::CallRetGuardSize),
++// so the total allocation depends on the runtime host page size.
++static size_t CallRetStackAllocSize() {
++  return FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + 2 * FEX::HLE::ThreadStateObject::CallRetGuardSize();
++}
+ 
+ FEX::HLE::ThreadStateObject* ThreadManager::CreateThread(uint64_t InitialRIP, uint64_t StackPointer, const FEXCore::Core::CPUState* NewThreadState,
+                                                          uint64_t ParentTID, FEX::HLE::ThreadStateObject* InheritThread) {
+@@ -185,15 +189,15 @@
+ 
+   // Allocate the call-ret stack with guard pages on both sides
+   auto AllocBase =
+-    reinterpret_cast<uint64_t>(FEXCore::Allocator::mmap(nullptr, CALLRET_STACK_ALLOC_SIZE, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
++    reinterpret_cast<uint64_t>(FEXCore::Allocator::mmap(nullptr, CallRetStackAllocSize(), PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+ 
+-  FEXCore::Allocator::VirtualName("FEXMem_CallRetStacks", reinterpret_cast<void*>(AllocBase), CALLRET_STACK_ALLOC_SIZE);
++  FEXCore::Allocator::VirtualName("FEXMem_CallRetStacks", reinterpret_cast<void*>(AllocBase), CallRetStackAllocSize());
+ 
+   // Disable HUGEPAGE on callret stacks.
+-  FEXCore::Allocator::VirtualTHPControl(reinterpret_cast<void*>(AllocBase), CALLRET_STACK_ALLOC_SIZE, FEXCore::Allocator::THPControl::Disable);
++  FEXCore::Allocator::VirtualTHPControl(reinterpret_cast<void*>(AllocBase), CallRetStackAllocSize(), FEXCore::Allocator::THPControl::Disable);
+ 
+   // Set the base used for invalidation to the start past the guard pages
+-  ThreadStateObject->Thread->CallRetStackBase = reinterpret_cast<void*>(AllocBase + FEXCore::Utils::FEX_PAGE_SIZE);
++  ThreadStateObject->Thread->CallRetStackBase = reinterpret_cast<void*>(AllocBase + FEX::HLE::ThreadStateObject::CallRetGuardSize());
+   ::mprotect(ThreadStateObject->Thread->CallRetStackBase, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE, PROT_READ | PROT_WRITE);
+   Frame->State.callret_sp = ThreadStateObject->GetCallRetStackInfo().DefaultLocation;
+ 
+@@ -295,7 +299,7 @@
+   }
+ 
+   // Free the call-ret stack
+-  FEXCore::Allocator::munmap(reinterpret_cast<void*>(Thread->GetCallRetStackInfo().AllocationBase), CALLRET_STACK_ALLOC_SIZE);
++  FEXCore::Allocator::munmap(reinterpret_cast<void*>(Thread->GetCallRetStackInfo().AllocationBase), CallRetStackAllocSize());
+ 
+   // If the LDT segment exists then deallocate it.
+   if (Thread->ldt_entry_count) {
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
+@@ -8,6 +8,8 @@
+ 
+ #pragma once
+ 
++#include <unistd.h>
++
+ #include "Common/SHMStats.h"
+ 
+ #include "LinuxSyscalls/Types.h"
+@@ -115,10 +117,19 @@
+     uint64_t DefaultLocation;
+   };
+ 
++  // propnix 16K-host: the call-ret stack guard pages must each be a full host page so that
++  // CallRetStackBase (AllocBase + one guard) is host-page-aligned; otherwise the RW mprotect
++  // that commits the stack is rejected with EINVAL on a 16K kernel and every guest CALL faults.
++  static size_t CallRetGuardSize() {
++    static const size_t v = static_cast<size_t>(sysconf(_SC_PAGESIZE));
++    return v;
++  }
++
+   CallRetStackInfo GetCallRetStackInfo() {
+     uint64_t Base = reinterpret_cast<uint64_t>(Thread->CallRetStackBase);
++    const uint64_t Guard = CallRetGuardSize();
+     // Leave some room from the base for the default location to allow for underflows without constant exceptions
+-    return {Base - FEXCore::Utils::FEX_PAGE_SIZE, Base + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + FEXCore::Utils::FEX_PAGE_SIZE,
++    return {Base - Guard, Base + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + Guard,
+             Base + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE / 4};
+   }
+ 

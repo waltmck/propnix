@@ -1,0 +1,118 @@
+{
+  "package": "whatsapp-arm64",
+  "version": "2.2630.101.0",
+  "date": "2026-08-06",
+  "verdict": "partial",
+  "verdictDetail": "The entire propnix pipeline works end to end — Microsoft Store resolution, credential-free fetch, triple-digest verification, MsixBundle unpacking, framework-dependency staging, and wine prefix construction all succeed. The application itself cannot run: WinUI 3's dispatcher statically imports three ntdll functions that wine does not implement at all. That is an upstream wine gap, not a propnix or packaging defect.",
+  "reporter": "waltmck",
+  "source": "preliminaries/poc/whatsapp-arm64.nix",
+
+  "host": {
+    "arch": "aarch64-linux",
+    "kernel": "7.1.5",
+    "pageSize": 16384,
+    "gpuDriver": "asahi",
+    "mesaVersion": "26.1.5",
+    "sessionType": "wayland",
+    "compositor": "Hyprland"
+  },
+
+  "backend": "wine",
+  "backendDetail": "wineWow64Packages.stable (wine-wow64-11.0). NO emulation: box64, FEX and muvm are all absent from this package.",
+  "emulatorVersions": { "wine": "11.0" },
+
+  "payload": {
+    "store": "msstore",
+    "productId": "9NKSQGP7F2NH",
+    "credentialChannel": "none — anonymous FE3 access, no Microsoft account, token or client id",
+    "format": "MsixBundle",
+    "urlPinnable": false,
+    "urlPinnableNote": "Store download URLs are signed and expire in hours. Only the hash is pinned; the FOD re-resolves on every cache miss. This is the fixed-output contract, so nothing is lost.",
+    "files": [
+      {
+        "identity": "5319275A.WhatsAppDesktop_2.2630.101.0_neutral_~_cv1g1gvanyjgm",
+        "size": 355089031,
+        "hash": "sha256-I/MVywKPAIYHPUYmIuhMgpo20O+AjInq5jBMKOiiz0s="
+      },
+      {
+        "identity": "Microsoft.VCLibs.140.00_14.0.33519.0_arm64__8wekyb3d8bbwe",
+        "size": 1570406,
+        "hash": "sha256-xz0PVd2jMfncvvyZ/1pCC2ISB3PSkXOHY5OCqkeFM+4=",
+        "why": "declared PackageDependency; genuinely absent from the app package"
+      },
+      {
+        "identity": "Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_arm64__8wekyb3d8bbwe",
+        "size": 11161325,
+        "hash": "sha256-gxEY8vXKyOKShOTswjv0I2Q2zMLqSnwiXElG+M/SndM=",
+        "why": "supplies msvcp140.dll / vcruntime140.dll"
+      }
+    ],
+    "peMachine": "0xaa64",
+    "peMachineNote": "Asserted at build time on WhatsApp.Root.exe. Also verified for RestartAgent.exe and createdump.exe.",
+    "appModel": "EntryPoint=Windows.FullTrustApplication — a packaged Win32 app, not sandboxed UWP, so extract-and-run applies as in slack-arm64.nix."
+  },
+
+  "proven": [
+    "PLAN2 §3.4 — a Microsoft Store payload can be resolved and fetched from INSIDE a fixed-output derivation, with no credentials of any kind.",
+    "A payload whose URL is unpinnable is still fully reproducible: pin (productId, identity) + hash, resolve at fetch time.",
+    "Multi-payload packaging: the app plus its vendor-published framework dependency closure, all three FODs verified independently.",
+    "fe3.py's triple check (FE3 size + SHA1 + SHA256) ran inside the sandbox for all three payloads and matched, before nix's own outputHash gate.",
+    "Two-level ZIP unpacking: MsixBundle -> per-arch inner MSIX -> tree.",
+    "Framework DLLs staged beside the exe satisfy an MSIX PackageDependency without any AppX deployment.",
+    ".NET 8 self-contained CoreCLR (8.0.15) STARTS under wine on aarch64 — it loads, registers its runtime exception module, and begins executing managed code.",
+    "WindowsAppSDK activates: RoGetActivationFactory succeeded for Microsoft.Windows.AppLifecycle.AppInstance AND for Microsoft.UI.Xaml.Application.",
+    "wine's Wayland driver initialises correctly for this app (winewayland.drv, only a benign xdg_toplevel_icon_manager_v1 warning)."
+  ],
+
+  "notWorking": {
+    "symptom": "Hard abort during WinUI 3 application startup, immediately after AppPolicyGetWindowingModel: `wine: Call from ... to unimplemented function ntdll.dll.NtCreateWaitCompletionPacket, aborting`. CoreCLR then reports `The process was terminated due to an unhandled exception. Exception Info: exception code 80000100` — which is EXCEPTION_WINE_STUB, i.e. the stub abort itself, not a second independent fault.",
+    "rootCause": "CoreMessagingXP.dll (WinUI 3 / CoreMessaging, the DispatcherQueue implementation) STATICALLY imports NtCreateWaitCompletionPacket, NtAssociateWaitCompletionPacket and NtCancelWaitCompletionPacket from ntdll.dll. Confirmed with pefile: all three appear in the static import table, not as delay imports and not via GetProcAddress.",
+    "whyNoWorkaround": "Because they are static imports there is no fallback path for the app to take: wine's loader binds a missing static import to an aborting stub thunk, so the DLL loads and then dies on first call. No environment variable can change this.",
+    "wineGapScope": "The string WaitCompletionPacket does not appear anywhere in the wine 11.0 source tree, and none of the three functions is exported by ntdll.dll in wineWow64Packages.stable (11.0), unstable (11.12) or staging (11.12). Detection method validated against NtCreateFile in the same binary.",
+    "fixCost": "Not a small patch. A real implementation needs wineserver-side support: a new object type whose signalling queues a completion packet onto an IO completion port. Out of scope for propnix.",
+    "upstream": "A WineHQ bug (57367) reports this same unimplemented function; its page is not machine-readable so the report was not confirmed in detail."
+  },
+
+  "measuredAlternatives": {
+    "DOTNET_ThreadPool_UsePortableThreadPoolForIO=0": "no change — identical abort",
+    "DOTNET_ThreadPool_UsePortableThreadPool=0": "no change — identical abort",
+    "DOTNET_ThreadPool_UseWindowsThreadPool=0": "no change — identical abort",
+    "both portable-threadpool knobs together": "no change — identical abort",
+    "knobsWhyUseless": "All four were aimed at .NET's thread pool, on the assumption the CLR was the caller. It is not: the caller is the app's own bundled WinUI CoreMessaging. Establishing the caller first would have skipped these four tests.",
+    "wineWow64Packages.unstable / staging (11.12)": "not run — both lack the exports, so the outcome is determined"
+  },
+
+  "tunables": {
+    "WINEDLLOVERRIDES": {
+      "value": "mshtml=",
+      "reason": "NOT slack-arm64.nix's \"mscoree,mshtml=\". WhatsApp is a .NET app; disabling mscoree makes wine refuse its managed assemblies outright — `err:module:fixup_imports_ilonly mscoree.dll not found, IL-only binary L\"System.Runtime.dll\" cannot be loaded` — followed by a hang. Wine's builtin mscoree exists for aarch64-windows and suffices: the app carries its own CoreCLR, so mscoree only services the IL-only PE fixup path."
+    },
+    "WINEARCH": { "value": "win64", "reason": "never win32; deprecated in wine 11" },
+    "Graphics": { "value": "wayland,x11", "reason": "winewayland.drv verified initialising for this app on this host" },
+    "AeDebug": {
+      "value": { "Debugger": "C:\\windows\\system32\\propnix-debugger-disabled.exe", "Auto": "1" },
+      "reason": "Suppresses wine's automatic crash debugger. Wine's default is `winedbg --auto`, which opens a 'Wine Debugger' console window; the crashed process is already dead, so the window has no working close path and must be killed by PID from outside. This app aborts on every launch, so each launch stranded another one.",
+      "whyNonEmptyAndUnresolvable": "Read from wine's start_debugger() in dlls/kernelbase/debug.c: `format` is only taken when NtQueryValueKey returns STATUS_BUFFER_TOO_SMALL, which a zero-length value never does — so an EMPTY Debugger value is treated identically to an absent one and wine falls back to its built-in winedbg. A non-empty value is used as the command line, and if CreateProcessW fails, start_debugger returns FALSE with no fallback and the process dies quietly.",
+      "whyAutoIs1": "With Auto=0 wine first tries a MessageBox asking whether to debug — another dialog on the user's desktop.",
+      "verified": "abort still occurs (the wine gap is unchanged), `err:seh:start_debugger Couldn't start debugger ... (2)` appears exactly once, and 0 conhost.exe windows exist afterwards.",
+      "generality": "belongs in EVERY propnix wine package, not just this one — a packaged app crashing is normal, and it is part of D13 sealing since the user's own AeDebug preference must not change a sealed package's behaviour",
+      "measuredWrongApproach": "Setting Debugger to an empty string changed nothing at all — the debugger still launched. That is the STATUS_BUFFER_TOO_SMALL subtlety above."
+    }
+  },
+
+  "correctionsToPlan": [
+    "A network FOD must have pkgs.cacert as a real BUILD INPUT, not merely interpolated into SSL_CERT_FILE. nix already sets SSL_CERT_FILE in a fixed-output sandbox and it points at that very store path, but the path is only mounted if it is in the derivation's input closure. Without it the variable is set and the file is absent, Python silently loads 0 CA certs, and the failure surfaces as `CERTIFICATE_VERIFY_FAILED ... self-signed certificate in certificate chain` — which reads like a proxy or server problem. PoC 1 got this right only incidentally.",
+    "All prefix mutation must happen inside ONE headless block that ends with `wineserver -w`. A wineserver started headless (to suppress wineboot's config dialog) otherwise outlives its subshell, the app attaches to that same server, and every window creation fails with `err:winediag:nodrv_CreateWindow Application tried to create a window, but no driver could be loaded` — which looks like a broken display server rather than a leftover daemon.",
+    "WINEDLLOVERRIDES is per-package data, not a shared default. The slack-arm64.nix value actively breaks any .NET app."
+  ],
+
+  "nixpkgs": { "narHash": null, "version": "26.11" },
+  "propnixRev": null,
+
+  "notMeasured": [
+    "whether the x64 WhatsApp build behaves differently under wine (would require x86 emulation; FEX rendering is separately blocked by muvm #240)",
+    "whether any wine fork or out-of-tree patch implements the wait-completion-packet family",
+    "whether a non-WinUI Store app runs — this PoC establishes the ACQUISITION path works, and only one app's UI stack was tried",
+    "any performance figure — the app never rendered"
+  ]
+}

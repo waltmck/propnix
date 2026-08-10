@@ -1,0 +1,86 @@
+{
+  "package": "slack-arm64",
+  "version": "4.51.180",
+  "date": "2026-08-06",
+  "verdict": "partial",
+  "verdictDetail": "The wine-on-aarch64 path is fully validated; the application itself never creates a window. Every architectural claim under test passed. Slack fails for reasons internal to its own Windows-API assumptions.",
+  "reporter": "waltmck",
+  "source": "preliminaries/poc/slack-arm64.nix",
+
+  "host": {
+    "arch": "aarch64-linux",
+    "kernel": "7.1.5",
+    "pageSize": 16384,
+    "gpuDriver": "asahi",
+    "mesaVersion": "26.1.5",
+    "sessionType": "wayland"
+  },
+
+  "backend": "wine",
+  "backendDetail": "wineWow64Packages.stable (wine-wow64-11.0). NO emulation: box64, FEX and muvm are all absent from this package.",
+  "emulatorVersions": { "wine": "11.0" },
+
+  "payload": {
+    "store": "slack-direct",
+    "url": "https://downloads.slack-edge.com/desktop-releases/windows/arm64/4.51.180/Slack.msix",
+    "hash": "sha256-gDOWfdqgNdDZicK4R+2wouzHslY8ZiO5io8icFnBDao=",
+    "observedSize": 156564477,
+    "credentialChannel": "none — freely downloadable, plain fetchurl",
+    "format": "MSIX",
+    "formatNote": "The ARM64 Windows build is MSIX-ONLY; there is no SlackSetup.exe for arm64 (verified: x64 has both SlackSetup.exe and Slack.msix, arm64 has only the .msix). wine has no AppX/MSIX deployment stack, so the package is extracted rather than installed — MSIX is a plain ZIP with compression method=store.",
+    "peMachine": "0xaa64",
+    "peMachineNote": "Asserted at build time. A silent flip to 0x8664 would void the no-emulation premise, so the build fails loudly instead."
+  },
+
+  "proven": [
+    "PLAN2 §2 (route table) row 3 — an ARM64 Windows PE runs under plain wine on aarch64 with zero emulation. This row was previously marked (unverified).",
+    "The non-credentialed fetch path: plain fetchurl with a pinned hash, no sandbox-path grant, no credential store.",
+    "MSIX extract-and-run as a workaround for wine's missing AppX stack.",
+    "PLAN2 §7.2 state layout: $XDG_STATE_HOME/propnix/<app>/ for the prefix, $XDG_RUNTIME_DIR for ephemera.",
+    "The prefix stamp keyed on the wine store path: wineboot -u runs once, not on every launch.",
+    "Prefix setup with DISPLAY/WAYLAND_DISPLAY unset suppresses wine's 'configuration is being updated' dialog entirely (user-confirmed absent).",
+    "D13 seal (PLAN2 §7) over WINE*/LD_*/DXVK_*."
+  ],
+
+  "notWorking": {
+    "symptom": "No window is ever created. Electron initialises fully, spawns 9 renderer processes and composites a 1200x998 framebuffer, but produces ZERO X11 toplevels and nothing visible under Wayland either.",
+    "isolation": "wine presents windows correctly on this host under BOTH drivers — wine's own notepad produced a visible window under wayland AND under x11 (both user-confirmed). Slack fails under both. Therefore the fault is neither wine's display layer nor the driver choice.",
+    "likelyCause": "Slack's own startup code throws before window creation: `isElectronDebugLoggingSupported: Failed when attempting to detect mount point in log path — TypeError: Cannot read properties of undefined (reading 'isMountPoint')`. Also `WSALookupServiceBegin failed with: 8`. Both are Windows-API surfaces wine does not expose as Slack expects.",
+    "notPursued": "Diagnosing further means reverse-engineering a minified Electron bundle. Poor value for a proof of concept whose architectural questions are already answered."
+  },
+
+  "tunables": {
+    "gameArgs": {
+      "value": [ "--no-sandbox", "--in-process-gpu" ],
+      "reason": "Electron's GPU CHILD process cannot launch under wine (`GPU process launch failed: error_code=40` then `GPU process isn't usable. Goodbye.`). --in-process-gpu folds it into the main process and clears the error."
+    },
+    "WINEDLLOVERRIDES": { "value": "mscoree,mshtml=", "reason": "suppresses the .NET and Gecko install prompts" },
+    "WINEARCH": { "value": "win64", "reason": "never win32; deprecated in wine 11" },
+    "Graphics": {
+      "value": "wayland,x11",
+      "reason": "wineWow64 ships winewayland.drv for aarch64-windows. Driver choice is a runtime registry setting, not a package choice. Wayland is verified working on this host, so there is no reason to prefer x11."
+    }
+  },
+
+  "measuredAlternatives": {
+    "--disable-gpu-sandbox alone": "insufficient — GPU process still failed to launch",
+    "--disable-gpu": "traded the GPU-process error for `DCompositionCreateDevice3 failed: Not implemented` and exit code 5. The blunter fix was worse; keeping acceleration on and avoiding the child process is correct.",
+    "--disable-gpu --disable-gpu-compositing --in-process-gpu": "no GPU error, but still no window",
+    "Graphics=x11 instead of wayland": "no change to the Slack outcome — which is what proves the driver is not the variable"
+  },
+
+  "correctionsToPlan": [
+    "The flock single-instance guard is Unity/box64-specific, NOT a universal wrapper feature. `wineserver` lingers by design and inherits the lock fd, so it kept holding the lock after Slack exited and refused the next launch. Electron implements single-instance itself.",
+    "A wine wrapper's exit code is not meaningful: Slack detaches, so the wrapper returns 0 while the app keeps running. A real wrapper must either wait on wineserver or document that it returns immediately.",
+    "Wine's Wayland driver presents correctly here. An earlier draft of this record concluded 'prefer x11' — that was wrong, drawn from testing notepad only after switching to x11, i.e. an incomplete matrix."
+  ],
+
+  "nixpkgs": { "narHash": "sha256-PlAXr9kpfXhMFU0OQ7qtE8FhLQo21WXFVGqIC85UFyc=", "version": "26.11" },
+  "propnixRev": null,
+
+  "notMeasured": [
+    "whether Slack works at all under wine on any architecture, including x86_64 — the x64 build was never tried, so 'ARM64 is the problem' is NOT established",
+    "whether a newer or older Slack version behaves differently",
+    "any performance figure — the app never rendered"
+  ]
+}

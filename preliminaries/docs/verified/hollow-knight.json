@@ -1,0 +1,144 @@
+{
+  "package": "hollow-knight",
+  "version": "1.5.12620",
+  "date": "2026-08-06",
+  "verdict": "works",
+  "reporter": "waltmck",
+  "source": "preliminaries/poc",
+  "host": {
+    "arch": "aarch64-linux",
+    "kernel": "7.1.5",
+    "pageSize": 16384,
+    "gpuDriver": "asahi",
+    "mesaVersion": "26.1.5",
+    "sessionType": "wayland",
+    "note": "Apple silicon; hardware TSO available but NOT requested by box64, so the CPU runs in weak memory order"
+  },
+  "backend": "box64",
+  "backendReason": "box64 works natively on 16K pages and needs no rootfs or patchelf; FEX would require muvm and is blocked by muvm#240 on this kernel",
+  "emulatorVersions": {
+    "box64": "0.4.2"
+  },
+  "renderer": {
+    "reported": "Apple M2 (G14G B0)",
+    "vendor": "Mesa",
+    "api": "OpenGL 4.6 (Core Profile) Mesa 26.1.5",
+    "note": "bridged natively by box64; the guest never loads an x86_64 GL driver"
+  },
+  "tunables": {
+    "BOX64_PREFER_WRAPPED": {
+      "value": 1,
+      "reason": "Bridge native GL/X11/SDL2 rather than emulate them. Required because every RUNPATH lookup contains a '/', which otherwise makes box64's `precise` check skip the native wrapper."
+    },
+    "BOX64_NORCFILES": {
+      "value": 1,
+      "reason": "Seal (D13, PLAN2 §7). The only way to stop a user's ~/.box64rc from silently section-replacing propnix's tuning. No rcfile exists on this host, so it changes nothing today — it prevents a future surprise."
+    },
+    "SDL_VIDEODRIVER": {
+      "value": "x11",
+      "reason": "Keeps SDL off the Wayland backend. Part of the author's independently-established working configuration, and RE-TESTED 2026-08-07: wayland still fails. See waylandRetest below. This is Unity-specific and NOT a general default — stellaris-x86_64.nix prefers wayland on the same host (RESEARCH §17)."
+    },
+    "gameArgs": {
+      "value": [
+        "-force-opengl"
+      ],
+      "reason": "MANDATORY. Without it Unity selects a renderer that dies during scene load: black screen, audio playing, then SIGILL. Not derivable by any static analysis — this is the single most important hand-found setting."
+    }
+  },
+  "notSet": {
+    "BOX64_UNITY": "Tried and removed. Present in an earlier attempt that crashed; not part of the verified-working configuration, so it is not carried.",
+    "BOX64_DYNAREC_STRONGMEM": "Tried on the hypothesis that weak memory order caused the crash. It did not; the cause was the renderer flag. Left unset rather than kept as cargo cult — but see PLAN2 §7.1: never set it to 0 on the grounds that the hardware has TSO, because box64 never requests TSO.",
+    "patchelf": "Not needed. box64 is the loader and ignores the ELF interpreter."
+  },
+  "libraries": {
+    "model": "union of two sets; neither alone is sufficient",
+    "bridgingNative": [
+      "libgcc",
+      "libx11",
+      "libxext",
+      "libxcursor",
+      "libxinerama",
+      "libxrandr",
+      "libxscrnsaver",
+      "libxi",
+      "libxxf86vm",
+      "libGL",
+      "libglvnd",
+      "vulkan-loader",
+      "libxkbcommon",
+      "wayland",
+      "SDL2",
+      "systemd",
+      "libudev0-shim",
+      "pipewire",
+      "libpulseaudio",
+      "alsa-lib"
+    ],
+    "bridgingNativeReason": "sonames box64 wraps; the NATIVE aarch64 copy must be present for box64 to dlopen and bridge it",
+    "guestOnlyX86": [
+      "glibc",
+      "stdenv.cc.cc.lib",
+      "zlib",
+      "cairo",
+      "pango",
+      "glib",
+      "dbus.lib"
+    ],
+    "guestOnlyX86Reason": "the payload's verified DT_NEEDED closure, which box64 does not wrap",
+    "note": "The author's original hand-written wrapper listed only the bridging set and worked because it APPENDED to an inherited LD_LIBRARY_PATH. Sealing the environment removed that crutch and forced the full list to be explicit — the seal earning its keep."
+  },
+  "payload": {
+    "store": "gog",
+    "productId": 1308320804,
+    "fileId": "en3installer0",
+    "filename": "setup_hollow_knight_1.5.12620.sh",
+    "hash": "sha256-eds/XjOST54jSLwVdi3zbZN2wBVOA2mkaLiVfC3cTc0=",
+    "observedSize": 1214513063,
+    "apiReportedSize": 1214251008,
+    "sizeNote": "GOG's API size is WRONG by 262055 bytes. Never use it as an integrity gate; only the hash is authoritative.",
+    "credentialChannel": "extra-sandbox-paths bind mount at /propnix, granted via `setfacl -m g:nixbld:r`",
+    "unpackedSize": "1.2G",
+    "layout": "data/noarch/game — there is no data/x86_64 tree"
+  },
+  "storePaths": {
+    "payload": "/nix/store/qg70cjgpwjd34birygxi7cliv6myjv4r-setup_hollow_knight_1.5.12620.sh",
+    "wrapper": "/nix/store/5d2jbi33bynjfg3xk9zkalyff19nz95c-hollow-knight"
+  },
+  "nixpkgs": {
+    "narHash": "sha256-PlAXr9kpfXhMFU0OQ7qtE8FhLQo21WXFVGqIC85UFyc=",
+    "version": "26.11"
+  },
+  "propnixRev": null,
+  "propnixRevNote": "not yet a git repository; this record predates version control",
+  "singleInstance": {
+    "mechanism": "flock -n on $XDG_RUNTIME_DIR/propnix/hollow-knight.lock",
+    "reason": "Unity runs in SingleInstance mode and cannot create unity.lock in the read-only store game directory; it logs 'Read-only file system' and continues unprotected",
+    "measured": {
+      "refusalLatencyMs": 18,
+      "exitCode": 1,
+      "staleLockAfterCrash": false
+    }
+  },
+  "knownIssues": [
+    "Every launch logs 'Error opening <store>/unity.lock: Read-only file system'. Cosmetic — the flock guard provides the protection Unity wanted.",
+    "The game runs from the read-only store, so anything expecting a writable game directory would fail. Nothing in Hollow Knight does; saves go to ~/.config/unity3d."
+  ],
+  "notMeasured": [
+    "fps — no frame-rate measurement was taken, so this record cannot support any performance claim",
+    "sustained play — verified reaching gameplay and writing a save, not a long session",
+    "whether the older save that originally failed to load works now; a new game was used instead"
+  ],
+  "waylandRetest": {
+    "date": "2026-08-07",
+    "result": "fails",
+    "observed": "reaches `Renderer: Apple M2 (G14G B0)` and `OPENGL LOG: Creating OpenGL 4.6 graphics device`, loads the physics module, then `a fatal error in the mono runtime or one of the native libraries` and SIGILL (exit 132, core dumped).",
+    "redHerring": "the wayland path additionally loads the payload's bundled libdecor-0.so.0, which x11 never touches, and under BOX64_PREFER_WRAPPED=1 box64 tries to bridge it natively along with libdbus-1 and libz — all three fail because this package supplies no native copy of them. Supplying native libdecor, dbus and zlib removed every `Error initializing native` line and produced the IDENTICAL Mono SIGILL, so the bridge failures are a symptom, not the cause.",
+    "conclusion": "x11 stays. The cause is Unity's Mono under box64 on the wayland path and is unexplained; no library change fixes it, so no library change was carried."
+  },
+  "nativeVsEmulated": {
+    "claim": "on the shipping x11 configuration, every system library the game uses is already native aarch64 — there is nothing left to convert",
+    "method": "ELF machine byte (offset 18) of every file-backed .so mapping in /proc/<pid>/maps, sampled after the renderer came up. box64's `Using native(wrapped)` line at BOX64_LOG=1 is not sufficient: it covers only the initial DT_NEEDED walk, showing 9 libraries where the process actually maps 69.",
+    "measured": "69 file-backed shared objects mapped, ALL AArch64, zero x86-64. Includes libGL/libGLX_mesa/libgallium/libLLVM, libX11/libxcb*, libXcursor/libXext/libXfixes/libXi/libXinerama/libXrandr/libXrender/libXss/libXxf86vm, libpulse*, libdbus-1, libudev, libz, libsystemd, libdrm*.",
+    "emulatedRemainder": "UnityPlayer.so and the bundled Mono runtime — the game's own code, which has no native equivalent. box64 reports these as `Using emulated`."
+  }
+}

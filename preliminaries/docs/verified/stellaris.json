@@ -1,0 +1,275 @@
+{
+  "package": "stellaris",
+  "version": "4.4.6",
+  "gogBuild": "92219",
+  "date": "2026-08-07",
+  "verdict": "works",
+  "reporter": "waltmck",
+  "source": "preliminaries/poc",
+  "configurationsBuilt": {
+    "default (dlc = [ ])": "built and run. Vanilla is the DEFAULT precisely because it is the configuration every owner of Stellaris can reproduce; a default of `all` would have made the default derivation depend on the packager's own entitlements.",
+    "withAllDLC (all 11)": "built and run. This is the configuration the DLC claims below rest on.",
+    "subsets": "evaluated only — `withDLC [ \"nemesis\" \"megacorp\" ]` resolves to a distinct store path, and selection is order-insensitive, but no subset tree was built."
+  },
+  "host": {
+    "arch": "aarch64-linux",
+    "kernel": "7.1.5",
+    "pageSize": 16384,
+    "gpuDriver": "asahi",
+    "mesaVersion": "26.1.5",
+    "sessionType": "wayland",
+    "note": "Apple silicon; hardware TSO available but NOT requested by box64, so the CPU runs in weak memory order"
+  },
+  "backend": "box64",
+  "backendReason": "same as hollow-knight: box64 works natively on 16K pages, needs no rootfs and no patchelf, and bridges GL/X11/audio to native aarch64 libraries. No FEX data point exists for this title on any hardware.",
+  "emulatorVersions": {
+    "box64": "0.4.2"
+  },
+  "renderer": {
+    "reported": "OpenGL 4.6 (Compatibility Profile) Mesa 26.1.5",
+    "vendor": "Mesa",
+    "device": "HARDWARE_VERTEXPROCESSING, fullscreen. Resolution depends on the SDL backend: 2560x1664 under x11 (XWayland reports the physical mode), 1600x1040 under wayland (SDL reports the logical size at compositor scale 1.601562 and the compositor upscales).",
+    "anisotropic": 16,
+    "multisampling": "2x and 4x reported supported; the game chose none",
+    "note": "bridged natively by box64; the guest never loads an x86_64 GL driver. Linux Stellaris is OpenGL-only and has no renderer-selection flag."
+  },
+  "audio": {
+    "stack": "statically-linked SDL2 -> PulseAudio",
+    "measured": "44100 Hz, 2 channels, 1024 samples; drivers enumerated pulseaudio/alsa/dsp/disk/dummy, pulseaudio chosen"
+  },
+  "tunables": {
+    "BOX64_PREFER_WRAPPED": {
+      "value": 1,
+      "reason": "Bridge native GL/X11/audio rather than emulate them (PLAN2 §7). Required, and all-or-nothing."
+    },
+    "BOX64_NORCFILES": {
+      "value": 1,
+      "reason": "Seal (D13, PLAN2 §7). Stops a user's ~/.box64rc from silently section-replacing propnix's tuning."
+    },
+    "SDL_VIDEODRIVER": {
+      "value": "wayland when WAYLAND_DISPLAY is set, else x11; PROPNIX_SDL_VIDEODRIVER overrides",
+      "reason": "MEASURED, not inherited. Hollow Knight's flat x11 is Unity-specific and is not a general default. Both backends reach the frontend on the same OpenGL 4.6 Mesa device; under wayland the process maps native libwayland-{client,cursor,egl} and libxkbcommon. They are not equivalent: on this 2560x1664 panel at compositor scale 1.601562, SDL's wayland backend reports the LOGICAL 1600x1040 and the compositor upscales (2.56x fewer pixels, no XWayland indirection, visibly smoother, softer image), while x11 reports 2560x1664 and renders pixel-exact at full cost with a UI sized for a non-HiDPI display. Choosing from WAYLAND_DISPLAY is a runtime decision about a value, not a dependency, so PLAN2 §5 permits it.",
+      "verified": "default run reported Fullscreen=yes Resolution=1600x1040; PROPNIX_SDL_VIDEODRIVER=x11 reported 2560x1664. Both survived their full runs."
+    },
+    "gameArgs": {
+      "value": [
+        "-gdpr-compliant"
+      ],
+      "reason": "Exactly what the vendor launcher would pass: launcher-settings.json records \"exePath\": \"./stellaris\", \"exeArgs\": [\"-gdpr-compliant\"]. Copied from the payload's own metadata rather than invented."
+    }
+  },
+  "notSet": {
+    "-force-opengl": "Hollow-Knight-specific and not a Stellaris flag. Linux Stellaris is OpenGL-only; there is no renderer-selection flag to pass. Do not copy Unity tuning across engines.",
+    "BOX64_DYNACACHE": "Left at box64's default. `stellaris` is a 103 MB unstripped C++ binary and a persistent dynarec cache is plausibly worth having, but no measurement was taken, so it is not carried (PLAN2 §7.1: do not restate or override a backend default without a reason).",
+    "gtk3 (native, for box64 to bridge)": "Only crash_reporter/binaries/CrashReporter wants GTK3, and only after a crash. Providing the whole native GTK3 closure to render a crash dialog was not justified; the box64 'Error initializing native libgtk-3.so.0' lines appear only on the crash path.",
+    "patchelf": "Not needed. box64 is the loader and ignores the ELF interpreter.",
+    "XDG_DATA_HOME redirection": "Deliberately NOT namespaced under $XDG_STATE_HOME/propnix/ — see stateDirDeviation below."
+  },
+  "libraries": {
+    "model": "union of two sets; neither alone is sufficient",
+    "bridgingNative": [
+      "libgcc",
+      "libx11",
+      "libxext",
+      "libxcursor",
+      "libxrandr",
+      "libxi",
+      "libxfixes",
+      "libxscrnsaver",
+      "libGL",
+      "libglvnd",
+      "vulkan-loader",
+      "libxkbcommon",
+      "wayland",
+      "dbus.lib",
+      "libpulseaudio",
+      "alsa-lib",
+      "libxcb",
+      "zlib"
+    ],
+    "bridgingNativeReason": "sonames box64 wraps; the NATIVE aarch64 copy must be present for box64 to dlopen and bridge it",
+    "guestOnlyX86": [
+      "glibc",
+      "stdenv.cc.cc.lib",
+      "zlib"
+    ],
+    "guestOnlyX86Reason": "the DT_NEEDED closure box64 does not wrap",
+    "derivation": "DT_NEEDED on ./stellaris is libdl libX11 libpthread libnakama-cpp libPDXSDK libGL libstdc++ libm libgcc_s libc, with DT_RUNPATH $ORIGIN for the two bundled ones. SDL2 is STATICALLY LINKED into the executable (843 exported SDL_ symbols), so its dlopen table is what adds libasound, libdbus-1, libEGL, libGLESv2, libpulse-simple, libvulkan, libwayland-{client,cursor,egl}, libX11-xcb, libXcursor, libXext, libXfixes, libXi, libxkbcommon, libXrandr, libXss.",
+    "zlibNote": "zlib appears in BOTH sets, and is the clearest single illustration of the union rule. Without the native copy the run opens with `BOX64: Error initializing native libz.so.1 (last dlerror is libz.so: cannot open shared object file)`; libPDXSDK.so links libz.so.1 as a guest, so the x86_64 copy is needed as well.",
+    "differencesFromHollowKnight": "no SDL2 package (statically linked, so no libSDL2*.so is ever loaded), no libudev0-shim/systemd/pipewire (no udev reference), no cairo/pango/glib (those were Unity's libdecor chain); libXfixes, libxcb, dbus and zlib are new."
+  },
+  "payload": {
+    "store": "gog",
+    "rootProductId": 1508702879,
+    "credentialChannel": "extra-sandbox-paths bind mount at /propnix, granted via `setfacl -m g:nixbld:r`",
+    "base": {
+      "productId": 1508702879,
+      "fileId": "en3installer0",
+      "filename": "stellaris_4_4_6_92219.sh",
+      "hash": "sha256-MMr0rFgGxRDPc+cqbyTJR9kRD66i4FRCq9EgxyX47tU=",
+      "observedSize": 17098086405,
+      "apiReportedSize": 17098080256,
+      "singleFile": true
+    },
+    "dlc": {
+      "plantoids": {
+        "productId": 1999794856,
+        "filename": "stellaris_plantoids_species_pack_4_4_6_92219.sh",
+        "hash": "sha256-MbC7FA0GkfpVuA7+ZH5OYgiEwYjvgcYN00NgAL7hquQ=",
+        "observedSize": 1128537,
+        "dir": "dlc004_plantoid"
+      },
+      "leviathans": {
+        "productId": 1122806862,
+        "filename": "stellaris_leviathans_story_pack_4_4_6_92219.sh",
+        "hash": "sha256-6zPQp0zppCHkBfqrxY6L9k0fuhudlQ+U1jKTkVS/FH4=",
+        "observedSize": 60099796,
+        "dir": "dlc012_leviathans"
+      },
+      "apocalypse": {
+        "productId": 1988097366,
+        "filename": "stellaris_apocalypse_4_4_6_92219.sh",
+        "hash": "sha256-o2jqisqOpEuB8tNR9sMzXjlnpIkyHHrDytC7EzN8ppA=",
+        "observedSize": 39057675,
+        "dir": "dlc017_apocalypse"
+      },
+      "distant-stars": {
+        "productId": 1209094315,
+        "filename": "stellaris_distant_stars_story_pack_4_4_6_92219.sh",
+        "hash": "sha256-itBH4yiKaWGsFt8u3Y7ZPt5C2byiEKqqYgC7URsKz8Y=",
+        "observedSize": 21603590,
+        "dir": "dlc019_distant_stars"
+      },
+      "megacorp": {
+        "productId": 1316465607,
+        "filename": "stellaris_megacorp_4_4_6_92219.sh",
+        "hash": "sha256-s0dNX5Fi04RMPAzRYmFMQTgqMFjl3HCcE8nscHncVcI=",
+        "observedSize": 92845613,
+        "dir": "dlc020_megacorp"
+      },
+      "ancient-relics": {
+        "productId": 2106739867,
+        "filename": "stellaris_ancient_relics_4_4_6_92219.sh",
+        "hash": "sha256-Yowct5o0MsiNvYBPb3eMK7ppDAr/KpKy15caaghiq7k=",
+        "observedSize": 33796723,
+        "dir": "dlc021_ancient_relics"
+      },
+      "lithoids": {
+        "productId": 1420212493,
+        "filename": "stellaris_lithoids_species_pack_4_4_6_92219.sh",
+        "hash": "sha256-M/jMBjF2pZJ+zGxeZejKTsfadqGOBpgtO2+m7EKp6LA=",
+        "observedSize": 26498051,
+        "dir": "dlc022_lithoids"
+      },
+      "federations": {
+        "productId": 1790030450,
+        "filename": "stellaris_federations_4_4_6_92219.sh",
+        "hash": "sha256-RADcSQu3jJlC3qq6Qig11wOfw1atRl6Nc9Z3LZRygF0=",
+        "observedSize": 15049405,
+        "dir": "dlc023_federations"
+      },
+      "necroids": {
+        "productId": 2112845659,
+        "filename": "stellaris_necroids_species_pack_4_4_6_92219.sh",
+        "hash": "sha256-E7RmuGRFbeS2eDypQNnr/zlHv0sODK/xoddFWXuiKYs=",
+        "observedSize": 25750192,
+        "dir": "dlc024_necroids"
+      },
+      "nemesis": {
+        "productId": 1488827509,
+        "filename": "stellaris_nemesis_4_4_6_92219.sh",
+        "hash": "sha256-6vG7S8kptSDw6lNckN9LfKcCeJso87crWw6YfLFhyIU=",
+        "observedSize": 39735304,
+        "dir": "dlc025_nemesis"
+      },
+      "astral-planes": {
+        "productId": 1558204482,
+        "filename": "stellaris_astral_planes_4_4_6_92219.sh",
+        "hash": "sha256-c0xRm7LJ3MPzCIor4imA+wAy74RZoRR6ls+22hqFcsU=",
+        "observedSize": 48183617,
+        "dir": "dlc031_astral_planes"
+      }
+    },
+    "sizeNote": "GOG's API rounds every size down to a whole MiB and is therefore wrong for all twelve files (base: 17,098,080,256 claimed vs 17,098,086,405 actual). The FODs check the observed byte count before the hash so a 302-to-login is a legible error rather than a hash mismatch after a 16 GiB download.",
+    "unpack": "unzip, NOT bsdtar. The base installer's appended archive is ZIP64 and libarchive fails with `Damaged Zip archive`; Info-ZIP warns (`End-of-centdir-64 signature not where expected`) and extracts correctly, exiting 1. The builder tolerates status 1 and nothing else. RESEARCH §8.",
+    "unpackVerified": "42,741 files / 1,107 directories / 29,778,452,123 bytes in the output, matching the archive listing exactly on all three counts. Reproduced identically across two independent extractions (the default tree and the all-DLC tree).",
+    "unpackedSize": "27.7 GiB (29,778,452,123 bytes)",
+    "layout": "data/noarch/game promoted to the tree root; there is no data/x86_64"
+  },
+  "dlcModel": {
+    "composition": "pure directory union. Each DLC installer's data/noarch/game contains only dlc/dlcNNN_<slug>/{dlcNNN.dlc, dlcNNN.zip, thumbnail.png}; the base game's dlc/ holds only dlc.txt. Verified collision-free for all 11.",
+    "enablement": "the .dlc descriptor is the ownership marker; gameplay script for paid DLC already ships in the base install and is gated on that marker. The .zip carries only the DLC-exclusive assets (e.g. dlc025.zip is music/ and nothing else).",
+    "dlcLoadJson": "NOT created by this package. dlc_load.json is written by the Paradox launcher, which is bypassed; with the file absent the game disables nothing. The wrapper deliberately does not seed or rewrite it — the launcher and every third-party mod manager own that file, and overwriting it would destroy a user's playset.",
+    "selectionApi": "`dlc` defaults to [ ]. passthru carries availableDLC, withDLC (selector function or list of names), withAllDLC, withoutDLC, override, unwrapped, basePayload, selectedDLC.",
+    "selectionIsASet": "the requested list is sorted and deduplicated before it reaches the builder, so `[ \"nemesis\" \"megacorp\" ]` and `[ \"megacorp\" \"nemesis\" ]` are the same store path. Without the sort the merge order differs and nix hands back two paths with byte-identical contents.",
+    "defaultRationale": "Eleven DLC are owned on the packaging account, and the default still selects none. Defaulting to the catalogue would make `nix-build stellaris-x86_64.nix` fail at rung 4 for anyone owning a different subset, and every store path quoted in this record would be one most readers cannot produce.",
+    "confirmedByTheGame": "the game's own crash metadata (crashes/<ts>/meta.yml) lists DLC_1..DLC_11 by title — Ancient Relics, Apocalypse, Astral Planes, Distant Stars, Federations, Leviathans, Lithoids, Megacorp, Necroids, Nemesis, Plantoids. That is the engine reporting what it loaded, independent of the packaging."
+  },
+  "gameTreeModel": {
+    "shape": "one derivation: extract the base payload into $out, then merge the selected DLC directories into $out/dlc.",
+    "whyFused": "A symlink farm over a shared unpacked base DOES NOT WORK. Stellaris serves content through PhysFS (__PHYSFS_Archiver_{DIR,ZIP,7Z} and \"Failed to mount %s with error %s\" are in the binary), and PhysFS refuses to traverse a symlink unless PHYSFS_setSymbolicLinksPermitted(1) is called, which Clausewitz never does. Measured with top-level directories symlinked: `[virtualfilesystem_physfs.cpp:795] File 'gfx/loadingscreens/init.bmp' does not exist : symlinks are forbidden`, then `terminate called after throwing an instance of 'std::logic_error'` before any window. box64 is not involved — PhysFS lstat()s the path components itself.",
+    "whyNotTwoStage": "Given real files are mandatory, a shared `unpacked` plus a per-selection copy costs the same wall clock (copying 27.7 GiB is no cheaper than extracting it) and twice the store. Fusing makes each DLC selection exactly one 27.7 GiB tree.",
+    "assertion": "the builder fails if any symlink survives in $out, because the runtime failure mode is a crash rather than an error message.",
+    "diskCost": "a first build needs ~45 GiB of free store (15.9 GiB payload + 27.7 GiB tree). A SECOND selection is a second 27.7 GiB NAR but not a second 27.7 GiB of disk: nix's store optimiser hardlinks identical files across paths. Measured with auto-optimise-store=true — the vanilla and all-11 trees each report 28 GiB standalone, share the 103 MB stellaris binary at inode 8257304 (nlink 6), and occupy 16.9 GiB together, so the second selection costs ~375 MB. Without optimisation, `nix-store --optimise` collapses it after the fact.",
+    "sharingMechanism": "nix's content-addressed dedup, not a package-level device. That is strictly better than the symlink farm it replaces: invisible to the application, no privileges and no runtime indirection (PLAN2 §4), and each tree stays an independent store path that can be collected on its own rather than holding a reference to a shared base."
+  },
+  "launcher": {
+    "bypassed": true,
+    "reason": "GOG's start.sh runs `cd game && ./dowser`; dowser (a Go binary) bootstraps pdx_launcher, an Electron app, whose installer ships in-tree as launcher-installer-linux_2024.14. launcher-settings.json records what that launcher would exec, so the wrapper runs it directly and no Chromium stack has to survive emulation.",
+    "cost": "the launcher's UI for mods, playsets, per-DLC toggles, language selection and updates. Not needed to run with every owned DLC enabled, which is the default state."
+  },
+  "stateDirDeviation": {
+    "decision": "XDG_DATA_HOME is NOT redirected; state lands at ~/.local/share/Paradox Interactive/Stellaris as it would for any other install.",
+    "reason": "This deviates from D13-3's $XDG_STATE_HOME/propnix/<app>/ namespacing, and does so deliberately. Paradox's path is already a stable, install-independent user-data key shared with any Steam or native install; redirecting it would orphan an existing player's saves, mods and dlc_load.json. D13-3's own rule that user data is keyed by stable pname so 'concurrently-installed versions see the same saves' points the same way. The measured host already had a December 2025 install with 21 enabled mods at that path.",
+    "ephemeralStateStillNamespaced": "$XDG_RUNTIME_DIR/propnix/stellaris.lock",
+    "gameDirIsReadOnly": "confirmed — nothing was written into the store tree during the run; every file the game created is under the data home."
+  },
+  "storePaths": {
+    "payload": "/nix/store/vws6bk6x3w4n3vd9qdvl76qmxgqvvz5w-stellaris_4_4_6_92219.sh",
+    "gameTreeDefault": "/nix/store/pl3gyf1cjkx4qqx4c7n1iy3ws9kqrr9s-stellaris-4.4.6",
+    "wrapperDefault": "/nix/store/gnk55c0wics5g1ilks0q0xla5ir6bkz9-stellaris",
+    "gameTreeAllDLC": "/nix/store/bnmfcnszs31k95jn8li2wkx4w4x9iyy1-stellaris-4.4.6-with-11-dlc",
+    "wrapperAllDLC": "/nix/store/1p3xlss9kyyq6vbvig3368ga7jkjf2fl-stellaris"
+  },
+  "nixpkgs": {
+    "narHash": "sha256-PlAXr9kpfXhMFU0OQ7qtE8FhLQo21WXFVGqIC85UFyc=",
+    "version": "26.11"
+  },
+  "propnixRev": null,
+  "propnixRevNote": "not yet a git repository; this record predates version control",
+  "singleInstance": {
+    "mechanism": "flock -n on $XDG_RUNTIME_DIR/propnix/stellaris.lock",
+    "reason": "PLAN2 §5.1 places single-instance protection in the shared box64 wrapper. Unlike Hollow Knight, Stellaris was not observed trying to create a lock file of its own in the game directory, so this is belt-and-braces rather than a replacement for lost behaviour.",
+    "measured": {
+      "refusalTested": true,
+      "observed": "a second launch while the first was live exited 1 with `stellaris: already running (lock held on /run/user/1000/propnix/stellaris.lock)`"
+    }
+  },
+  "knownIssues": [
+    "`Failed to mount .../dlc/dlc004_plantoid/dlc004.zip with error unsupported` on every launch. This is upstream data, not a packaging defect: GOG ships dlc004.zip as a 22-byte empty-zip EOCD record (verified byte-for-byte), because the Plantoids portraits are already in the base build and the .dlc file is purely an ownership marker. Do not treat a tiny DLC zip as a corrupt download — the FOD size check on the installer is the real gate.",
+    "error.log carries `No UGC backend available for current platform.` and two `No Valid Store Interface.` lines. Expected consequence of bypassing the launcher; nothing depends on them for single-player.",
+    "error.log carries one missing-texture line, `gfx/interface/frontend/gamesetup_delete_mask.dds`. Present in the payload's own file list as absent; a vanilla asset gap, not a packaging loss.",
+    "If the game does crash, box64 prints a cascade of `Error initializing native lib{gtk-3,gdk-3,pango,cairo,atk,harfbuzz,glib,gobject,gio,gdk_pixbuf}` lines while loading crash_reporter/binaries/CrashReporter, and the upload is skipped. This costs nothing diagnostically: the artifacts that matter — crashes/<ts>/{exception.txt,meta.yml,error.log,system.log} — are written by the GAME, not the reporter, and were all present and sufficient to diagnose a real crash. CrashReporter is a Backtrace UPLOADER (--uploadurl=https://submit.backtrace.io/paradoxinteractive/...), so leaving it unable to start also means no crash data leaves the machine by default. Supplying native GTK3 would enable that upload; that is a privacy decision for the packager, not a bug to fix.",
+    "The launcher stack (launcher-installer-linux_2024.14 at 148 MB and a 126 MB Windows .msi) is kept in the tree for fidelity even though it is never run.",
+    "MODS ARE LOADED, NOT IGNORED — and a stale playset crashes the game. Bypassing the launcher means nothing reconciles dlc_load.json against the installed version, so a playset left by an older install is enabled silently. Measured: 21 Steam Workshop mods from a 3.x-era install produced 582 `Wrong scope` errors (4.x split the planet and colony scopes: has_planet_flag, set_planet_entity, set_planet_flag, planet_event) and then SIGSEGV during galaxy generation; gpm_engine.txt alone threw 10,936. The identical tree with an empty state dir ran clean. The wrapper now WARNS when enabled_mods is non-empty and never rewrites the file, which is the launcher's and every mod manager's to own."
+  ],
+  "notMeasured": [
+    "fps — no frame-rate measurement was taken, so this record cannot support any performance claim. Stellaris is CPU-bound late-game and emulated CPU cost is the obvious risk.",
+    "sustained play — verified reaching the frontend over a 180 s run with all 11 DLC and a 120 s run vanilla; not a full game, not a save, not a load.",
+    "starting and running an actual campaign, and whether late-game tick rate is playable",
+    "multiplayer, which needs a Paradox account regardless of packaging",
+    "whether BOX64_DYNACACHE shortens the 103 MB binary's JIT warm-up",
+    "a build with a DLC subset — only vanilla and all-11 were built; subsets were evaluated, not realised",
+    "reproducibility across machines. `nixpkgs ? builtins.getFlake \"flake:nixpkgs\"` resolves through the caller's MUTABLE flake registry, so two people running the same command can get different nixpkgs. That is a repo-wide PoC convention, not specific to this file, but it is the largest remaining gap between these derivations and a bit-reproducible build.",
+    "frame rate under either backend. 'Smoother on wayland' is a reporter observation plus a pixel-count argument (2.56x), not a measurement.",
+    "whether any mod works under this packaging. Mods load, but the only playset tested was a stale 3.x one, which crashed. A 4.4-compatible mod has not been tried."
+  ],
+  "nativeVsEmulated": {
+    "claim": "every system library the game uses is native aarch64; nothing from pkgsX86 is mapped at runtime",
+    "method": "ELF machine byte (offset 18: 183=AArch64, 62=x86-64) of every file-backed .so mapping in /proc/<pid>/maps, sampled at the frontend. box64's `Using native(wrapped)` log line at BOX64_LOG=1 is NOT sufficient — it covers only the initial DT_NEEDED walk and misses every runtime dlopen.",
+    "measured": "65 file-backed shared objects mapped: 64 AArch64, 1 x86-64. The one x86-64 object is the vendor-bundled libnakama-cpp.so. No pkgsX86 store path appears at all.",
+    "nativeIncludes": "libGL/libGLX_mesa/libgallium/libLLVM, libX11/libX11-xcb/libxcb*, libXcursor/libXext/libXfixes/libXi/libXrandr/libXrender/libXss/libXxf86vm, libpulse/libpulse-simple/libpulsecommon, libdbus-1, libz, libsystemd, libdrm*, libxkbcommon and libwayland-* on the wayland path",
+    "emulatedRemainder": "the stellaris executable itself plus its two bundled libraries (libnakama-cpp.so, libPDXSDK.so) and the guest libstdc++/libgcc_s that box64 deliberately does not wrap. None has a native equivalent, so this is the practical maximum.",
+    "note": "the x86_64 set stays on LD_LIBRARY_PATH even though none of it is mapped. It is the union rule's other half (PLAN2 §7): it is the fallback if a bridge is ever unavailable, and removing it would make the package's correctness depend on box64's wrapped-soname list not regressing."
+  }
+}

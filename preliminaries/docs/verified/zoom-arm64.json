@@ -1,0 +1,188 @@
+{
+  "package": "zoom-arm64",
+  "version": "7.1.5.43453",
+  "date": "2026-08-06",
+  "verdict": "works",
+  "verdictDetail": "First PoC where a Store-acquired ARM64 Windows app actually runs and presents a usable, correctly-scaled UI under wine on aarch64, with zero emulation and no VM — and it JOINS AND STAYS IN A REAL MEETING. User-confirmed: the Zoom Workplace window renders correctly and DPI scaling reads correctly on a fractional-scaled monitor; the user appeared as a participant in a live meeting. Reaching that required two payload fixups (16K-page shared section, EL0 PMU access) and wine-staging. Caveats are feature-level: screen capture and Zoom Assistant hit wine gaps, the camera needs a libv4l2-enabled wine (deliberately not pursued), sign-in does not work (joining by link needs no account), and the 16K-page fixup breaks one file's Authenticode signature so Zoom shows a one-time 'unknown publisher' dialog.",
+  "reporter": "waltmck",
+  "source": "preliminaries/poc/zoom-arm64.nix",
+
+  "host": {
+    "arch": "aarch64-linux",
+    "kernel": "7.1.5",
+    "pageSize": 16384,
+    "gpuDriver": "asahi",
+    "mesaVersion": "26.1.5",
+    "sessionType": "wayland",
+    "compositor": "Hyprland",
+    "monitor": "eDP-1 2560x1664 scale=1.6 (fractional)"
+  },
+
+  "backend": "wine",
+  "backendDetail": "wineWow64Packages.STAGING (wine-wow64-staging-11.12). NO emulation and NO muvm: box64, FEX and muvm are all absent.",
+  "emulatorVersions": { "wine": "staging-11.12" },
+
+  "payload": {
+    "store": "msstore-win32",
+    "productId": "XP99J3KP4XZ4VV",
+    "credentialChannel": "none — public manifest, unauthenticated CDN",
+    "acquisitionPath": "Store WIN32 listing via winget manifests, NOT MSIX/FE3. DisplayCatalog 404s on XP-class product ids and the FE3 chain does not apply at all.",
+    "manifestEndpoint": "https://storeedgefd.dsx.mp.microsoft.com/v9.0/packageManifests/XP99J3KP4XZ4VV",
+    "whyEasierThanFE3": "Plain public JSON over ordinary WebPKI with an authoritative InstallerSha256 per architecture. No SOAP, no cookie, no fixpoint SyncUpdates, no pinned private CA.",
+    "urlPinnable": true,
+    "urlPinnableNote": "The CDN URL is CONTENT-ADDRESSED — the sha256 is a path component — so unlike an FE3 signed URL it does not expire. Plain fetchurl suffices; no resolver inside the FOD. The manifest endpoint stays the discovery mechanism for a future updateScript.",
+    "size": 115538048,
+    "hash": "sha256-E8B7lGzhmN1qGAM+Y/suh/e880zUI/m/vt7h07hw8t4=",
+    "sha256Hex": "13c07b946ce198dd6a18033e63fb2e87f7bcf34cd423f9bfbedee1d3b870f2de",
+    "format": "7z SFX -> Installer.exe + ZoomFull_Sip.cab (CAB) -> 248-file flat app tree",
+    "installerNotRun": "bsdtar reads both nesting levels, so this stays a pure extraction like the MSIX PoCs. Running the installer under wine would need a mutable prefix at build time and a registry the store path cannot hold.",
+    "peMachine": "0xaa64",
+    "peMachineNote": "Asserted at build time for EVERY .exe, not just the entry point — 16 of 16 are ARM64.",
+    "versionDiscrepancy": {
+      "manifestLabel": "6.6.11 (23272)",
+      "actualPeVersion": "7.1.5.43453",
+      "note": "The Store manifest files this arm64 installer under PackageVersion 6.6.11 (23272), which is simply wrong — Zoom.exe's PE version resource says 7.1.5.43453. Same class of problem as DisplayCatalog vs FE3: Store metadata is not authoritative about its own payload. The package is named after the bytes."
+    },
+    "alternativeRejected": "zoom.us direct CDN (https://cdn.zoom.us/prod/7.1.5.84650/arm64/...) returns 403 'forbidden' even following the official zoom.us/client/latest redirect with a browser UA — token/geo protected. The Store path needs no such workaround."
+  },
+
+  "proven": [
+    "A THIRD Store acquisition path: winget manifests for Win32 listings, distinct from FE3/MSIX and strictly simpler.",
+    "A content-addressed vendor CDN URL means plain fetchurl is enough — no build-time resolver, and the URL cannot expire.",
+    "An INSTALLER payload can be unpacked rather than executed: 7z SFX -> CAB -> tree, all via bsdtar.",
+    "Per-package wine VARIANT selection is a real necessity, not a preference (staging vs stable — see tunables).",
+    "The RESEARCH §11 import-triage rule works predictively: it cleared Zoom (0 wait-completion-packet imports) before any packaging effort, and correctly predicted the three feature-level gaps.",
+    "wine's D3D path initialises on Asahi (wined3d PolygonOffset detection, then a rendering window).",
+    "A correctly-scaled UI on a fractional-scaled monitor via runtime DPI detection."
+  ],
+
+  "sixteenKPageFinding": {
+    "symptom": "err:virtual:map_file_into_view unaligned shared mapping 0x...-0x... not supported / err:module:map_image_into_view Could not map zCrashReport64.dll shared section .PROPSEC / err:module:import_dll ... failed (error c000007b) / err:module:loader_init Importing dlls for Zoom.exe failed, status c0000135. Exit 53, no window.",
+    "rootCause": "zCrashReport64.dll's .PROPSEC section is READ|WRITE|SHARED (0xd0000040) at VA 0x065000 with SectionAlignment 0x1000. The host has 16K pages. From dlls/ntdll/unix/virtual.c: map_addr is rounded with page_mask (4K) but host_addr with host_page_mask (16K); mmap is only attempted when host_addr == map_addr && host_size == map_size. The fallback (mprotect + pread, i.e. COPY the bytes) is only taken when the region is not writable — for a writable shared mapping wine errors with STATUS_INVALID_PARAMETER rather than silently breaking cross-process visibility.",
+    "notAWineVersionProblem": "We are on wine 11.0/11.12, well past 10.5's large-page work. Large-page support is present and working — it is why page_mask and host_page_mask exist as separate concepts and why the other 152 binaries load. The remaining hole is narrow and deliberate: writable + shared + not host-page-aligned.",
+    "whyNTs64KGranularityDoesNotHelp": "The 64K figure is dwAllocationGranularity, which aligns VirtualAlloc reservations and image BASES. It says nothing about where sections sit INSIDE an image — those are only guaranteed SectionAlignment (0x1000 here). .PROPSEC is at base+0x65000, and 0x65000 is 0x1000 (mod 0x4000), so NO 64K-aligned base can make it 16K-aligned.",
+    "whyWoAIsUnaffected": "Windows on ARM64 uses 4K pages. A 4K-aligned writable shared section is perfectly valid there and Zoom never hits this on real hardware. So WoA does not need large-page support — it has small pages, and the mismatch is manufactured entirely by the 16K-page Linux host. Had Windows used 16K pages, the toolchain would have forced 16K section alignment and this bug class would not exist.",
+    "scope": "EXACTLY ONE writable+shared section in the entire 153-binary payload.",
+    "fixApplied": "Clear IMAGE_SCN_MEM_SHARED (0x10000000) on that one section at unpack time: 0xd0000040 -> 0xc0000040. It becomes private/copy-on-write and wine's ordinary path maps it. Cost: Zoom's processes no longer share crash-reporter state.",
+    "fixCost": "Patching the bytes BREAKS the file's Authenticode signature, and Zoom verifies its own DLLs (zSafeChecker.exe ships in the payload). The user sees a one-time dialog: 'Zoom.exe is using zCrashReport64.dll from an unknown publisher. Are you sure you want to run this software?' Clicking yes proceeds. This is a real, user-visible cost of the fixup and was observed, not predicted.",
+    "alternativeNotTaken": "Running under muvm (4K-page guest) would fix the mapping with no payload modification and no signature break. Not used, by explicit direction, and independently risky on this host: muvm rendering is broken here (issue #240, proven earlier with native aarch64 vkcube — Vulkan enumeration works, rendering kills the VM).",
+    "guardrails": "The build fails if the section is absent, already unshared, or if any OTHER writable+shared section appears in a future version — that would need its own decision rather than silent inclusion."
+  },
+
+  "el0PmuFinding": {
+    "symptom": "Zoom crashed a few seconds after joining a meeting, every time. The user appeared as a participant first, so the meeting itself connected before the crash.",
+    "diagnosis": "Zoom's OWN crash report named it exactly — logs/zoomcrash_*/crashrpt.xml: ExceptionModule zlt.dll, ExceptionModuleBase 0x6fffea610000, ExceptionAddress 0x6fffea8edd68, ExceptionCode 0xc000001d (STATUS_ILLEGAL_INSTRUCTION). Offset 0x2ddd68 disassembles to `mrs x22, pmccntr_el0`. The .dmp FILENAMES also carry the module: ssbcrash_..._Zoom.exe_448_zlt.dll_NA_NA.dmp.",
+    "rootCause": "PMCCNTR_EL0 is the PMU cycle counter. Windows on ARM64 permits EL0 reads of it and MSVC emits it for __rdtsc-style timing intrinsics. Linux does NOT enable EL0 PMU access by default, so the instruction traps. Corroborating detail in the same report: <CPU>Unknown CPU</CPU> — Zoom's CPU identification gets nothing useful from wine.",
+    "hostRouteUnavailable": "arm64 Linux >= 6.1 can grant EL0 PMU access via /proc/sys/kernel/perf_user_access, but that file does not exist on this kernel (7.1.5, Asahi) — Apple's PMU driver does not implement it. Checked, not assumed.",
+    "fixApplied": "Rewrite the instruction at unpack time: `mrs Xt, pmccntr_el0` (0xd53b9d00 | Rt) -> `mrs Xt, cntvct_el0` (0xd53be040 | Rt). CNTVCT_EL0 is the virtual timer counter, IS EL0-readable on Linux (the vDSO clock reads it), and is a same-width monotonically increasing counter, so it is a drop-in for timing deltas.",
+    "scope": "15 instructions across 6 binaries: airhost.exe (2), aomhost64.exe (4), asproxy.dll (2), zMailRes.dll (1), zlt.dll (2), zmp.dll (4). Scanned 4-byte aligned only, since every A64 instruction is a naturally aligned word.",
+    "verified": "The faulting word now disassembles to `d53be056 mrs x22, cntvct_el0`; zero pmccntr_el0 reads remain in the payload; a subsequent meeting ran with 0 illegal-instruction faults and produced NO new crash dump (the 3 remaining dumps all predate the fix).",
+    "caveat": "CNTVCT ticks at the architectural timer frequency (~24 MHz here), not the CPU clock, so code interpreting the delta as CPU CYCLES reads low by roughly two orders of magnitude. Harmless for elapsed-time measurement; wrong for deriving a CPU frequency. Chosen over `mov Xt, #0` because a frozen counter invites division by zero and unbounded spin loops.",
+    "generality": "Any Windows-on-ARM64 binary using __rdtsc-style timing can hit this on Linux. It belongs in the pre-packaging triage alongside the wait-completion-packet check."
+  },
+
+  "meetingResult": {
+    "status": "joins and stays in a live meeting",
+    "audio": "microphone works (user-confirmed). 294 audio-subsystem log lines; no audio errors anywhere in the log.",
+    "video": "NOT working. A participant tile with its surrounding UI (e.g. the pin option) renders correctly, but the video area is painted the background colour. Another participant with video on was present, so there was something to display.",
+    "videoEvidence": "err:d3d:wined3d_swapchain_resize_buffers 'Something's still holding back buffer 0' x209 in a single meeting. No decode-related complaints at all, and Zoom imports NO D3D11 video-decode interfaces (it decodes in software), so frames are likely produced and never presented. Only cmmbiz.dll imports DXGI; Zoom.exe and the media DLLs import no D3D11 directly.",
+    "videoRuledOut": "PROPNIX_D3D_RENDERER=vulkan and =gdi both leave video blank, so it is not specific to wined3d's GL swapchain path. Note =gdi disables 3D entirely, so it is a weak test rather than a clean control.",
+    "videoTried": "PROPNIX_D3D_RENDERER=vulkan and =gdi both left video blank (=gdi disables 3D, a weak control). Zoom's own hardware-acceleration policy keys (EnableHardwareAccForVideoReceive/Send=0 under Software\\Policies\\Zoom\\Zoom Meetings\\General) had NO effect. Not resolved; no non-recompile lever found. Open, treated as a wine limitation for this app.",
+    "uiOverflow": "The top of the meeting UI is clipped above the window edge — a CONSTANT offset: independent of DPI (multiple values), unchanged by resizing (user-confirmed), and unchanged under Wayland. Not compositor-imposed (Zoom is a floating window). Consistent with wine misplacing Zoom's custom (WM_NCCALCSIZE-style) caption by a fixed amount. Open.",
+    "hyprlandTilingRefuted": "An earlier hypothesis that Hyprland's dwindle tiling forced the window size (clipping the UI and driving the swapchain resizes) was refuted: the window is floating."
+  },
+
+  "codeSigningFinding": {
+    "problem": "Both byte fixups break the patched files' Authenticode digests. Zoom verifies the modules it loads and shows one modal per bad module ('<dll> from an unknown publisher. Are you sure you want to run this software?'), logging error code 2148098064 = 0x80096010 TRUST_E_BAD_DIGEST to AppData\\Roaming\\Zoom\\appsafecheck.txt. SEVEN files are patched, so several dialogs per launch.",
+    "approachTried": "Re-sign the patched files at build time with a throwaway self-signed code-signing cert (osslsigncode) and make the prefix trust the signer.",
+    "whatWorked": [
+      "osslsigncode signs ARM64 PEs correctly: verify goes from 'Signature verification: failed' to 'ok'.",
+      "Signing PRESERVES the earlier byte fixups — checked explicitly, since signing rewrites PE headers: .PROPSEC still 0xc0000040 and 0 remaining pmccntr_el0 afterwards.",
+      "Installing the trust anchor by writing the registry store directly works, and is the only route: wine's programs/certutil implements only -decodehex and cryptext's PFX functions are stubs.",
+      "DECISIVE RESULT: Zoom's verification error code went 2148098064 -> 0. WinVerifyTrust now SUCCEEDS on the patched modules."
+    ],
+    "theTrap": "The blob must contain CERT_FIRST_USER_PROP_ID (0x8000) holding an `int is_new`, not just CERT_CERT_PROP_ID (32). Without it, wine's rootstore.c check_and_store_certs() logs 'CERT_FIRST_USER_PROP_ID property absent for cert' and skips the certificate — it lands in system.reg/user.reg and is then silently ignored. Storing is_new = 0 marks it already-vetted. This cost one full test round.",
+    "whyDialogsPERSIST": "Zoom pins its PUBLISHER, not merely signature validity. Its binaries embed 'Zoom Communications, Inc.' and 'Zoom Video Communications, Inc.', and the shipped signature's subject is CN=Zoom Communications, Inc. (issuer: DigiCert Trusted G4 Code Signing RSA4096 SHA256 2021 CA1). So the module is rejected even at error code 0.",
+    "howTheCheckWorks": "Determined from imports rather than string proximity. Zoom.exe, Cmmlib.dll, UIBase.dll and CptHost.exe import WinVerifyTrust plus WTHelperProvDataFromStateData -> WTHelperGetProvSignerFromChain -> WTHelperGetProvCertFromChain. So it validates the signature and then inspects the SIGNER CERTIFICATE and compares it against something embedded. Holding a CERT_CONTEXT it can memcmp the encoded subject directly, which is why no binary imports CertGetNameString or CertNameToStr. That explains the log line 'didn't pass the verification, error code 0' — the 0 is WinVerifyTrust succeeding; the rejection is Zoom's own comparison. Wine exports all three WTHelper functions, so this path works under wine.",
+    "mechanismProvenByDisassembly": "sub_249b8 in Zoom.exe walks the signer chain and, for each certificate, calls CertGetNameStringW (flag 4 = simple display name) and strcmps the result against four embedded strings: 'Zoom Communications, Inc.', 'Zoom Video Communications, Inc.', 'DigiCert', 'Entrust Root Certification Authority'. It returns w0=1 (trusted) only if the chain contains BOTH a Zoom-named leaf AND a DigiCert/Entrust-named CA; otherwise w0=0. So the check is on NAMES in a validating chain, and it pins the CA as well as the publisher.",
+    "flipFlopOwned": "This record went: (1) 'pins DigiCert/Entrust' — correct, but from string proximity; (2) retracted to 'only WinVerifyTrust, no name check' — WRONG, over-corrected off the TLS binaries (XmppDll/zNet/tp/zKBCrypto do CertGetCertificateChain for Zoom's SERVER certs, unrelated); (3) disassembly is ground truth and confirms (1). Twice this session a mechanism was asserted from inference and had to be walked back; disassemble before asserting.",
+    "resolvedNotOpen": "The Zoom-named certificate WAS tested (a build with subject O/CN=Zoom Communications, Inc.) and still prompted — consistent with the disassembly: a self-signed cert supplies a Zoom-named leaf but no DigiCert/Entrust-named CA in its chain, so the second required match never occurs. No locally issued certificate can satisfy this without a certificate genuinely issued by DigiCert/Entrust in Zoom's name (impersonating a public CA), which is out of scope.",
+    "decision": "The dialogs are ACCEPTED as-is. They are advisory: click through and the app proceeds, and they recur only when the payload derivation changes. Not worth defeating for that.",
+    "signingRetained": "Re-signing + prefix cert-trust is KEPT as reusable infrastructure (it is the correct fix for apps that check signature VALIDITY, and leaves patched binaries honestly signed) even though it does not silence Zoom specifically. Measured effect on Zoom: error code TRUST_E_BAD_DIGEST -> 0, dialog persists. Tools: mk-codesign-cert.py, wine-trust-cert.py.",
+    "abandonedWorkarounds": "Two dialog-suppression attempts were tried and REMOVED: (a) synthetic dismissal via xdotool — unreliable under Xwayland (xdotool key injects through XTEST to the focused window, and windowactivate does not reliably focus an Xwayland window under wlroots), so the Return landed in the user's focused window; also Zoom's dialog is DuiLib-drawn, not a real MessageBox. (b) binary-patching Zoom's self-check (sub_249b8 -> `mov w0,#1; ret`) — mechanically validated (the finder located it via the WTHelperGetProvCertFromChain call site) but fragile across versions, and it disables an anti-tamper defence. Both walked back.",
+    "certificate": {
+      "subject": "default O=propnix, CN=propnix local code signing (a build argument)",
+      "capabilities": "CA:FALSE + keyUsage=digitalSignature (no keyCertSign) + EKU=codeSigning, all critical and asserted at generation time",
+      "generation": "deterministic, from the subject, via tools/mk-codesign-cert.py — no key committed to the repo. Reproducibility verified with nix-store --realise --check on both the cert derivation and the signed payload. See RESEARCH 12.3."
+    }
+  },
+
+  "tunables": {
+    "wineVariant": {
+      "value": "staging",
+      "reason": "zLooper.dll (pulled in transitively by Cmmlib.dll/ZoomTask.dll, which Zoom.exe imports statically) needs KERNEL32.SetThreadpoolTimerEx. Measured across the three nixpkgs builds: stable 11.0 = no, unstable 11.12 = no, staging 11.12 = YES. On stable the app aborts with `wine: Call from ... to unimplemented function KERNEL32.dll.SetThreadpoolTimerEx`.",
+      "newAxis": "This is the first PoC where the wine VARIANT is per-package tuning data rather than a package-set default."
+    },
+    "Graphics": {
+      "value": "x11",
+      "reason": "NOT the 'wayland,x11' default the other wine PoCs use, and the one place this package disagrees with slack-arm64.nix. Measured — winewayland: 4 mapped windows, the real 'Zoom Workplace' plus THREE blank white ones (~255x247, 254x499, 255x244), user-confirmed twice. winex11: 1 window, blanks gone, user-confirmed correct. Zoom's DuiLib UI uses layered windows for shadows and toasts; winex11 handles them, winewayland maps them as opaque blanks.",
+      "correctsEarlierConclusion": "slack-arm64.json says 'there is no reason to prefer x11'. That was true for Slack/notepad and is NOT a general default — driver choice is per-package."
+    },
+    "LogPixels": {
+      "value": "runtime-detected, PROPNIX_DPI override, default 96",
+      "reason": "Wine takes DPI ONLY from HKCU\\Control Panel\\Desktop\\LogPixels (win32u/sysparams.c: DWORD_ENTRY(LOGPIXELS, 0, DESKTOP_KEY, \"LogPixels\")). winex11.drv contains NO Xft.dpi handling, so nothing auto-detects and the default 96 leaves the UI tiny on a scaled monitor.",
+      "detectionOrder": "PROPNIX_DPI, then Xft.dpi via xrdb (portable X11 convention, advisory only since wine ignores it), then 96.",
+      "verified": "PROPNIX_DPI=154 on a scale=1.6 monitor scaled the window from 546x392 to 876x631 — exactly 1.6x. User-confirmed readable.",
+      "appliedOnChange": "Written only when the value differs from a stamp, so a launch costs no extra wine invocation, and PROPNIX_DPI takes effect immediately rather than requiring a prefix rebuild."
+    },
+    "WINEDLLOVERRIDES": {
+      "value": "mscoree,mshtml=",
+      "reason": "Zoom is native C++ with no managed code, so unlike whatsapp-arm64.nix there is no reason to keep mscoree enabled."
+    },
+    "AeDebug": {
+      "value": { "Debugger": "C:\\windows\\system32\\propnix-debugger-disabled.exe", "Auto": "1" },
+      "reason": "Carried over from whatsapp-arm64.json — a non-empty unresolvable path, since an empty value falls back to the built-in winedbg and strands an unclosable console."
+    },
+    "autoUpdate": {
+      "value": { "EnableClientAutoUpdate": 0, "EnableSilentAutoUpdate": 0, "path": "Software\\Policies\\Zoom\\Zoom Meetings\\General (HKLM+HKCU)" },
+      "reason": "propnix pins the version; auto-update is disabled by default for every packaged app (PLAN2 §7.2). Best-effort — Zoom's documented enterprise GPO, unverified (would need to provoke an update). The real guarantee is architectural: the app runs from the read-only /nix/store path (dr-xr-xr-x root, kernel-enforced) with only the separate wine prefix writable, so an updater cannot overwrite or shadow the pinned binaries regardless."
+    }
+  },
+
+  "knownBroken": {
+    "screenCapture": "CptUwpCapture.dll needs d3d11.CreateDirect3D11DeviceFromDXGIDevice, which wine does not export. Lazily loaded, so it does not block startup — screen sharing via the UWP capture path will fail.",
+    "zoomAssistant": "zAssistant.dll needs KERNEL32.SetThreadpoolWaitEx, missing from all three wine builds. Not a static import of Zoom.exe.",
+    "camera": "err:winediag:v4l_device_create Reading from /dev/video1 requires libv4l2, but Wine was compiled without libv4l2 support. Needs a wine built with libv4l2, i.e. a package-set override rather than a tunable.",
+    "comComponents": "err:ole:com_get_class_object for {47dfbe54-cf76-11d3-b38f-00105a1f473a} and {c2f03a33-21f5-47fa-b4bb-156362a2f239} — unregistered because the app was extracted rather than installed, so nothing ran its COM registration. Not diagnosed further; the UI works without them.",
+    "signatureDialog": "One-time 'unknown publisher' prompt caused by the 16K fixup — see sixteenKPageFinding.fixCost.",
+    "kerberos": "err:kerberos:kerberos_LsaApInitializePackage no Kerberos support — cosmetic here, may matter for SSO logins."
+  },
+
+  "measuredAlternatives": {
+    "wineWow64Packages.stable 11.0": "aborts on KERNEL32.SetThreadpoolTimerEx after the 16K fixup",
+    "wineWow64Packages.unstable 11.12": "same missing export as stable; not run",
+    "Graphics=wayland,x11": "app runs but adds three blank white windows; user-confirmed twice",
+    "empty AeDebug Debugger value": "no effect — falls back to built-in winedbg (see whatsapp-arm64.json)",
+    "muvm": "not attempted, by direction; also blocked by muvm #240 on this host",
+    "zoom.us direct CDN": "403 forbidden, token/geo protected"
+  },
+
+  "correctionsToPlan": [
+    "The wine VARIANT (stable/unstable/staging) is per-package tuning data, not a package-set constant. Zoom needs staging for one export.",
+    "'Prefer wayland' is NOT a general default. slack-arm64.json's 'no reason to prefer x11' held for Slack; Zoom needs x11 because winewayland mishandles layered windows.",
+    "Every wine package needs an explicit DPI story. Wine does not auto-detect scaling from ANY source — not Xft.dpi, not the compositor — so a scaled monitor makes every app tiny unless LogPixels is set.",
+    "Payload modification has a hidden cost: it breaks Authenticode, and apps that verify their own binaries will tell the user. Prefer a host/VM-level fix where one exists and is safe; where it is not, treat the dialog as part of the package's documented behaviour.",
+    "A predictive import/section triage should run BEFORE packaging any Windows app — see tools/wine-import-triage.py. It cleared Zoom in seconds and would have saved four wasted experiments on WhatsApp."
+  ],
+
+  "nixpkgs": { "narHash": null, "version": "26.11" },
+  "propnixRev": null,
+
+  "notMeasured": [
+    "whether a meeting actually connects end-to-end with audio and video (login opened a browser; no call was placed)",
+    "whether screen sharing works via any non-UWP capture path Zoom may fall back to",
+    "whether a wine built with libv4l2 fixes the camera",
+    "whether the signature dialog can be suppressed by a Zoom policy/registry setting",
+    "any performance or CPU-usage figure"
+  ]
+}

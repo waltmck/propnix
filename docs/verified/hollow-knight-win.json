@@ -1,0 +1,136 @@
+{
+  "package": "hollow-knight",
+  "version": "1.5.12620",
+  "date": "2026-08-10",
+  "verdict": "works",
+  "reporter": "waltmck",
+  "source": "production flake (root)",
+  "note": "Windows (wine+FEX) counterpart to hollow-knight.json (box64/Linux). This record is for the PRODUCTION tree: `nix run .#hollow-knight`. USER-CONFIRMED end-to-end on 2026-08-10 — the production launcher booted HK, it rendered fullscreen (2560x1664@60) through native ARM64EC DXVK, and the user closed it via the in-game GUI with a clean teardown (no crash, no orphans). The 60fps figure was measured in the preliminaries POC on the IDENTICAL emulator closure (same DXVK/vkd3d/wine store paths). The launcher store path here reflects a later cosmetic rebuild (portrait splash + INT/TERM signal handling) that post-dates the confirmed run but does not touch the render path.",
+  "host": {
+    "arch": "aarch64-linux",
+    "kernel": "7.1.5",
+    "pageSize": 16384,
+    "gpuDriver": "asahi",
+    "mesaVersion": "26.1.5",
+    "sessionType": "wayland",
+    "note": "Apple M2 (G14G B0). The winefex stack is page-size-agnostic: the Windows FEX/box64 emulator DLLs don't compile jemalloc_glibc, so the 16K/64K walls that dogged the Linux FEX fork don't apply (config/hostcaps.nix)."
+  },
+  "backend": "winefex",
+  "backendReason": "Windows-only x86_64 title path (also the template for BG3). x86_64 code runs as ARM64EC inside native-ARM64 wine (Hangover architecture) under FEX; no 4K Linux guest, no muvm.",
+  "emulatorVersions": {
+    "wine": "wine-hangover 11.15-arm64ec (AndreRH/wine@arm64ec, built by us; ARM64X-hybrid, dontStrip)",
+    "fex": "FEX-2607 (from source): libarm64ecfex.dll 0xA641 + libwow64fex.dll 0xAA64",
+    "wowbox64": "AndreRH/box64@wow64 (Hangover-11.9 pin): wowbox64.dll 0xAA64",
+    "dxvk": "dxvk-arm64ec 2.7.1 (native ARM64EC PE: d3d11/d3d10core/dxgi/d3d9)",
+    "vkd3d": "vkd3d-proton-arm64ec 2.14.1 (native ARM64EC PE: d3d12/d3d12core; reuses DXVK's dxgi)",
+    "llvmMingw": "mstorsjo llvm-mingw 20260616 (arm64ec-w64-mingw32; builtins-archive reindex fix)"
+  },
+  "renderer": {
+    "d3d": "dxvk",
+    "path": "D3D11/9 → native ARM64EC DXVK → Vulkan → Mesa (Asahi)",
+    "measuredFps": 60,
+    "measuredFpsSource": "preliminaries POC on the identical DXVK/vkd3d/wine store paths (RESEARCH §22 / wine-graphics-backend-findings)",
+    "note": "wine's builtin wined3d-Vulkan present-stalls to ~12 fps here (architectural: synchronous present on the render thread, no presenter thread); DXVK's async presenter is the fix. wined3d-GL is also 60 (PROPNIX_WINE_D3D=wined3d fallback).",
+    "d3d12": "ALSO WORKS via vkd3d-proton 2.14.1: `nix run .#hollow-knight -- -force-d3d12` (Unity flag) → vkd3d creates a D3D12 device + swapchain (2560x1664, 60fps target), fully rendering. Not the default (DXVK/D3D11 is the benchmarked path; D3D12 unbenchmarked for this 2D title). Both DXVK and vkd3d DLLs are installed on the dxvk backend, so either is reachable."
+  },
+  "tunables": {
+    "PROPNIX_WINE_D3D": {
+      "value": "dxvk",
+      "reason": "native ARM64EC DXVK → Vulkan (60 fps) vs wined3d-Vulkan's ~12 (RESEARCH §22). Default; override to wined3d."
+    },
+    "PROPNIX_WINE_GRAPHICS": {
+      "value": "wayland",
+      "reason": "HK renders cleanly on winewayland (single native window, native fractional scaling, no Xwayland). Only wart: undersized cursor on a scaled output (RESEARCH §12)."
+    },
+    "dllOverrides": {
+      "value": { "mscoree": "b", "mshtml": "", "winemenubuilder.exe": "" },
+      "reason": "STRUCTURED map (from global winefex-defaults, not per-game): mscoree=builtin (suppress wine-mono prompt without breaking .NET), mshtml=disabled (drop gecko), winemenubuilder.exe=disabled (propnix ships the launcher's own .desktop). The launcher composes WINEDLLOVERRIDES from this and inserts the DXVK/vkd3d d3d*=n natives on the dxvk backend."
+    }
+  },
+  "seal": {
+    "model": "targeted scrub — unset WINE*/FEX_*/BOX64_*/LD_*, keep the rest of the session env, then set the meant vars. NEVER env_clear()+allowlist (prefer-targeted-env-scrub). WINEDLLOVERRIDES is composed by the launcher from the structured dllOverrides map (see tunables.dllOverrides) + the DXVK/vkd3d natives.",
+    "computedEnv": ["WINEPREFIX", "WINEDLLOVERRIDES (composed)", "WINEDEBUG=-all", "USER=propnix", "LOGNAME=propnix", "DXVK_STATE_CACHE_PATH", "VKD3D_SHADER_CACHE_PATH", "DXVK_LOG_PATH=none", "DXVK_LOG_LEVEL=info", "VKD3D_DEBUG=info"],
+    "logging": "DXVK/vkd3d log info to STDERR (no files); the launcher pipes the game's stdout+stderr, drives the splash close on the first-present marker (DXVK `Presenter:` / vkd3d `Creating swapchain`), and forwards to the terminal only under PROPNIX_BENCH/PROPNIX_WINEDEBUG — a plain run has a quiet console."
+  },
+  "prefix": {
+    "model": "symlink farm at $XDG_STATE_HOME/propnix/hollow-knight/prefix (§7.2): read-only content symlinked from the store lower, writable content (HKCU/user.reg, the profile) real + persistent. No overlay/mount/namespace.",
+    "verifiedThisSession": {
+      "regHivesReadOnly": "system.reg/userdef.reg/.update-timestamp → wine-prefix-lower store path",
+      "userRegRealWritable": "user.reg is a real 904KB file in the prefix",
+      "system32RealDir": true,
+      "dxvkDllsSymlinked": "d3d11/d3d10core/dxgi/d3d9 → dxvk store; d3d12/d3d12core → vkd3d store",
+      "dosdevices": "c: → ../drive_c (relative), z: → /",
+      "saveBind": "drive_c/users/propnix/AppData/LocalLow/Team Cherry/Hollow Knight → ~/.config/unity3d/Team Cherry/Hollow Knight (host dir created)"
+    }
+  },
+  "save": {
+    "guestRel": "AppData/LocalLow/Team Cherry/Hollow Knight",
+    "hostDefault": "$HOME/.config/unity3d/Team Cherry/Hollow Knight",
+    "override": "PROPNIX_SAVE_DIR (global root, namespaced per app: $PROPNIX_SAVE_DIR/hollow-knight)",
+    "note": "shares Unity's persistentDataPath with a native Linux build; userN.dat are engine-serialized + platform-independent, so the save game carries across (PlayerPrefs do not)."
+  },
+  "singleInstance": {
+    "mechanism": "flock(LOCK_EX|LOCK_NB) on $XDG_RUNTIME_DIR/propnix/hollow-knight/lock, held by the outer launcher (fd is CLOEXEC → not inherited into wine, §5.1)",
+    "onDuplicate": "exits 0 and attempts EWMH _NET_ACTIVE_WINDOW raise matched by WM_CLASS — X11 only; a documented no-op under Wayland (a client can't activate another's surface). xdg-activation approach is backlog.",
+    "verifiedThisSession": "no-config path exits 2; lock acquired on the --shell smoke run"
+  },
+  "splash": {
+    "mechanism": "GTK4 portrait window, forced BLACK theme (#000000 bg / white text via a CssProvider), showing the extracted app icon above the name + a spinner. Shown during cold start, dismissed the instant the launcher's pipe reader sees a first-present marker for ANY D3D backend — DXVK `Presenter:`, vkd3d `Creating swapchain`, or wined3d `@ approx …fps` (wine's fps channel, enabled via WINEDEBUG=-all,+fps on that backend) — all on STDERR, windowing-agnostic. Falls back to a 180s timeout (pure safety net; was a 20s blind timeout) or dismisses on game exit. Closing it before first-present cancels startup (SIGTERM the game's process group + prefix-scoped teardown).",
+    "icon": "auto-extracted from Hollow Knight.exe PE resources (icoutils) into a freedesktop hicolor theme (16→256px at share/icons/hicolor/<WxH>/apps/org.propnix.hollow-knight.png; found via XDG_DATA_DIRS; .desktop Icon=org.propnix.hollow-knight). Symbolic variant share/icons/hicolor/scalable/apps/org.propnix.hollow-knight-symbolic.svg (currentColor; vendored, CC BY-SA 4.0). Splash loads the largest via share/propnix/<id>.png.",
+    "backendMarkers": {
+      "dxvk": "Presenter: (DXVK_LOG_LEVEL=info)",
+      "vkd3d": "Creating swapchain (VKD3D_DEBUG=info)",
+      "wined3d": "@ approx N.NNfps (WINEDEBUG=-all,+fps) — verified appearing ~23s into a wined3d cold start; the old 20s blind timeout would have dismissed ~3s too early"
+    },
+    "userConfirmed": "the user launched HK (DXVK) and closed it via the in-game GUI; DXVK+vkd3d markers validated interactively; the wined3d @ approx marker verified in the launch stream."
+  },
+  "teardown": "prefix-scoped `WINEPREFIX=$pfx wineserver -k` on exit/cancel — reaps only this prefix's wine tree; NEVER a global process-name kill (would SIGKILL a concurrent wine app's wineserver).",
+  "payload": {
+    "store": "gog-galaxy",
+    "fetcher": "fetchGogGalaxyBuild (gogdl)",
+    "productId": "1308320804",
+    "buildId": "59545516053866453",
+    "outputHash": "sha256-zNs+los9+7taVgCKmFrVrKGFHQMqJkB/Pau6nnE5EkU=",
+    "outputHashMode": "recursive",
+    "unpackedSize": "1.2G",
+    "layout": "the game tree directly (Galaxy content system; no InnoSetup/innoextract)",
+    "credentialChannel": "extra-sandbox-paths bind at /propnix; credentialDir named in /propnix/credentials.toml (never in the store, never printed)",
+    "reproducible": "verified: two independent gogdl downloads + a clean-sandbox FOD build reproduced this recursive hash (RESEARCH §7)"
+  },
+  "storePaths": {
+    "_note": "app/launcher/configFile change on any launcher-source rebuild (expected, volatile); the emulator paths (wine/fexdlls/dxvk/vkd3d/prefixLower) + payload are the stable, cache-hit closure. As of the final build this session:",
+    "app": "/nix/store/j3d6hv9bnwf7vlbha322wi72qq47avfb-hollow-knight",
+    "payload": "/nix/store/9vrw86mnla4w5vc5ya6n4piw1kp3y31s-hollow-knight-win-1.5.12620",
+    "launcher": "/nix/store/80v42p7n27vpmgcsqa4q7z3nrnwrc1wm-propnix-launcher-0.1.0",
+    "wine": "/nix/store/7bvcs6z37acfffcwdy7w6plips1kih34-wine-hangover-11.15-arm64ec",
+    "fexdlls": "/nix/store/d0c01h3rpfpfzs6avd8yhpsacimampj1-fex-wine-dlls-FEX-2607",
+    "dxvk": "/nix/store/sfx7ghnx2yr325kvawc1d2jbpyqg758a-dxvk-arm64ec-2.7.1",
+    "vkd3d": "/nix/store/cs3lmjyaar2ffzq2qs9ks5jcpja4vz01-vkd3d-proton-arm64ec-2.14.1",
+    "prefixLower": "/nix/store/3xjrcqbq0kbv2vl85qczwf9y33cl31s2-wine-prefix-lower",
+    "configFile": "/nix/store/mj1lkqp404y3cjx5d0slx84bsw676ggi-propnix-hollow-knight.json"
+  },
+  "nixpkgs": {
+    "rev": "9bc02893134c733dd85de46ee4fb2fac696b5529",
+    "narHash": "sha256-eoS3KQTO0aPWXZvIaRbRAzSSHW3l5wdMFXtT1ISfoKA=",
+    "version": "26.11"
+  },
+  "propnixRev": null,
+  "propnixRevNote": "not yet a git repository",
+  "thisSessionVerified": [
+    "all emulator/tool packages build from the flake (wine/fexdlls/dxvk/vkd3d/prefixLower/llvmMingw/box64/propnix-prefetch/propnix-launcher) — cache-consistent with the POC-measured closure",
+    "the credentialed payload FOD reproduces its pinned recursive hash (present at the content-addressed path)",
+    ".#hollow-knight builds: bin/hollow-knight wrapper (--config → the baked JSON → the rebuilt launcher) + org.propnix.hollow-knight.desktop",
+    "the config JSON matches the launcher's schema exactly (schema 1; emulators/defaults/save/seal)",
+    "launcher orchestration (via --shell, non-GUI): single-instance lock, symlink-farm prefix assembly, DXVK/vkd3d DLL placement in system32, save bind-out with host-dir creation, targeted env seal",
+    "no-config invocation exits 2",
+    "INTERACTIVE (user-confirmed): `nix run .#hollow-knight` boots HK → Unity → native ARM64EC DXVK (DXVK 2.7.1, Build: aarch64 clang 22.1.8) → Vulkan, reaches Presenter first-present, fullscreen 2560x1664@60; user closed via in-game GUI, clean teardown, no orphans (launcher log had only benign EDID/colorimetry warnings)"
+  ],
+  "notMeasuredThisSession": [
+    "a precise sustained-fps number under the production launcher (the POC measured 60 on the identical closure; the production run rendered fullscreen@60 present mode but no frame counter was logged this session — PROPNIX_BENCH shows the live DXVK HUD)",
+    "single-instance window-FOCUS behaviour on a duplicate launch (the lock + exit-0 path is code-verified; the EWMH raise is X11-only / Wayland no-op)"
+  ],
+  "knownCaveats": [
+    "opening cinematics play audio but no video (wine 11 Media-Foundation video pipeline limitation, not a codec/renderer gap; RESEARCH §18) — skippable, gameplay renders fine",
+    "single-instance window-raise is X11-only; under Wayland the duplicate launch still exits cleanly but does not focus the running window"
+  ]
+}

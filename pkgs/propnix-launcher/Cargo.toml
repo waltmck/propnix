@@ -1,0 +1,29 @@
+[package]
+name = "propnix-launcher"
+version = "0.1.0"
+edition = "2021"
+description = "Per-app launcher for propnix winefex apps: GTK4 splash + single-instance + env-seal + prefix assembly + orchestration"
+
+[[bin]]
+name = "propnix-launcher"
+path = "src/main.rs"
+
+[dependencies]
+# GTK4 for the startup splash. gtk4-rs 0.9 baselines GTK 4.14 API and builds against the newer 4.22 in
+# the pin. Re-exports glib/gio/gdk, so we don't depend on them separately.
+gtk4 = "0.9"
+# The launcher↔wrapper config (a writeText JSON baked by makeAppWinefex).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# flock (single-instance), killpg (teardown backstop), process-group signalling. Tiny, stable, no C build.
+libc = "0.2"
+# Raise-the-running-window for the single-instance guard. X11/Xwayland via EWMH (x11rb); Wayland via the
+# wlr-foreign-toplevel-management protocol (wayland-client + wayland-protocols-wlr) — portable across the
+# wlroots family + COSMIC; a graceful no-op where the compositor doesn't advertise it (GNOME/KDE).
+x11rb = "0.13"
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+[profile.release]
+# The launcher is glue; optimise for a small, quick-to-build binary rather than peak throughput.
+opt-level = "s"

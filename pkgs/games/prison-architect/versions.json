@@ -1,0 +1,19 @@
+{
+  "backends": {
+    "gog-galaxy-windows": {
+      "components": {
+        "base": {
+          "productId": "1441974651",
+          "buildId": "56279155486691846",
+          "version": "The_Jailhouse102_11056",
+          "outputHash": "sha256-9uVHiiUEiau+SoprASP6gOYRxnILM+GAlkIQZIxHxKA=",
+          "outputHashMode": "recursive",
+          "os": "windows",
+          "lang": "en",
+          "kind": "game",
+          "generation": 2
+        }
+      }
+    }
+  }
+}

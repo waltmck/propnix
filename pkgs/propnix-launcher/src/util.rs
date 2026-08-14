@@ -1,14 +1,10 @@
-//! Small shared helpers: `$VAR`/`${VAR}` expansion, XDG base-dir resolution, and the symlink-farm
-//! filesystem primitives (rm_rf / force_symlink / no-clobber recursive copy).
+//! Small shared helpers: `$VAR`/`${VAR}` expansion and XDG base-dir resolution.
 
-use std::fs;
-use std::io;
-use std::os::unix::fs::symlink;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Expand `$VAR` and `${VAR}` references against the process environment (unknown vars → empty, like a
-/// shell with `set -u` off). Used for `save.hostDefault` (e.g. `"$HOME/.config/unity3d/..."`), which is
-/// authored as a shell-style path in the game's tuning.
+/// shell with `set -u` off). Used for PROPNIX_SAVE_DIR and PROPNIX_EXTRA_BINDS host paths, which are
+/// authored shell-style (e.g. `"$HOME/games/saves"`).
 pub fn expand_env(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len());
@@ -54,6 +50,52 @@ pub fn expand_env(input: &str) -> String {
     out
 }
 
+/// Like `expand_env`, but returns `None` if ANY referenced `$VAR`/`${VAR}` is UNSET — so a caller can SKIP
+/// the whole value rather than write one with a blank hole (e.g. an empty REG_DWORD). Used for `fpsUserReg`
+/// values, whose `$PROPNIX_FPS` must resolve or the entry is dropped for this launch. Otherwise identical to
+/// `expand_env` (same `$VAR`/`${VAR}` grammar).
+pub fn expand_env_checked(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() {
+            let (name, next) = if bytes[i + 1] == b'{' {
+                match input[i + 2..].find('}') {
+                    Some(rel) => (&input[i + 2..i + 2 + rel], i + 2 + rel + 1),
+                    None => {
+                        out.push('$');
+                        i += 1;
+                        continue;
+                    }
+                }
+            } else {
+                let start = i + 1;
+                let mut end = start;
+                while end < bytes.len()
+                    && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+                    && !(end == start && bytes[end].is_ascii_digit())
+                {
+                    end += 1;
+                }
+                if end == start {
+                    out.push('$');
+                    i += 1;
+                    continue;
+                }
+                (&input[start..end], end)
+            };
+            out.push_str(&std::env::var(name).ok()?); // unset var → None (caller skips the entry)
+            i = next;
+        } else {
+            let ch = input[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    Some(out)
+}
+
 fn base(xdg: &str, home_rel: &str) -> PathBuf {
     match std::env::var_os(xdg) {
         Some(v) if !v.is_empty() => PathBuf::from(v),
@@ -77,6 +119,12 @@ pub fn cache_home() -> PathBuf {
     base("XDG_CACHE_HOME", ".cache")
 }
 
+/// `$XDG_DATA_HOME` (durable user data) — defaults to `~/.local/share`. Root of the default save location
+/// (`<data_home>/propnix-saves`) when PROPNIX_SAVE_DIR is unset.
+pub fn data_home() -> PathBuf {
+    base("XDG_DATA_HOME", ".local/share")
+}
+
 /// `$XDG_RUNTIME_DIR` (the single-instance lock) — falls back to a per-uid /tmp dir if unset.
 pub fn runtime_dir() -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR") {
@@ -85,47 +133,3 @@ pub fn runtime_dir() -> PathBuf {
     }
 }
 
-/// Remove a path whether it is a symlink, file, or directory — WITHOUT following symlinks (so we never
-/// delete through a link into the store or a save). Missing path is not an error.
-pub fn rm_rf(path: &Path) -> io::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(md) => {
-            if md.file_type().is_dir() {
-                fs::remove_dir_all(path)
-            } else {
-                fs::remove_file(path)
-            }
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-/// `ln -sfn target link`: clear whatever is at `link` (link/file/dir) then create the symlink. Never
-/// `symlink` onto an existing name (that errors) — always clear first.
-pub fn force_symlink(target: &Path, link: &Path) -> io::Result<()> {
-    rm_rf(link)?;
-    symlink(target, link)
-}
-
-/// `cp -an src/. dst/`: recursively copy, NEVER clobbering a file that already exists under dst (host
-/// copies stay authoritative). Directories are merged. Used for the one-time save migration in save.rs.
-pub fn copy_dir_noclobber(src: &Path, dst: &Path) -> io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        let ft = entry.file_type()?;
-        if ft.is_dir() {
-            copy_dir_noclobber(&from, &to)?;
-        } else if ft.is_symlink() {
-            if !to.exists() {
-                symlink(fs::read_link(&from)?, &to)?;
-            }
-        } else if !to.exists() {
-            fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
-}

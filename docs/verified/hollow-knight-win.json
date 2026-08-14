@@ -50,7 +50,7 @@
   "seal": {
     "model": "targeted scrub — unset WINE*/FEX_*/BOX64_*/LD_*, keep the rest of the session env, then set the meant vars. NEVER env_clear()+allowlist (prefer-targeted-env-scrub). WINEDLLOVERRIDES is composed by the launcher from the structured dllOverrides map (see tunables.dllOverrides) + the DXVK/vkd3d natives.",
     "computedEnv": ["WINEPREFIX", "WINEDLLOVERRIDES (composed)", "WINEDEBUG=-all", "USER=propnix", "LOGNAME=propnix", "DXVK_STATE_CACHE_PATH", "VKD3D_SHADER_CACHE_PATH", "DXVK_LOG_PATH=none", "DXVK_LOG_LEVEL=info", "VKD3D_DEBUG=info"],
-    "logging": "DXVK/vkd3d log info to STDERR (no files); the launcher pipes the game's stdout+stderr, drives the splash close on the first-present marker (DXVK `Presenter:` / vkd3d `Creating swapchain`), and forwards to the terminal only under PROPNIX_BENCH/PROPNIX_WINEDEBUG — a plain run has a quiet console."
+    "logging": "DXVK/vkd3d log info to STDERR (no files); the launcher pipes the game's stdout+stderr, drives the splash close on the first-present marker (DXVK `Presenter:` / vkd3d `Creating swapchain`), and tees it to stdout only under PROPNIX_BENCH/PROPNIX_DEBUG/PROPNIX_WINEDEBUG — a plain run has a quiet console."
   },
   "prefix": {
     "model": "symlink farm at $XDG_STATE_HOME/propnix/hollow-knight/prefix (§7.2): read-only content symlinked from the store lower, writable content (HKCU/user.reg, the profile) real + persistent. No overlay/mount/namespace.",
@@ -126,7 +126,7 @@
     "INTERACTIVE (user-confirmed): `nix run .#hollow-knight` boots HK → Unity → native ARM64EC DXVK (DXVK 2.7.1, Build: aarch64 clang 22.1.8) → Vulkan, reaches Presenter first-present, fullscreen 2560x1664@60; user closed via in-game GUI, clean teardown, no orphans (launcher log had only benign EDID/colorimetry warnings)"
   ],
   "notMeasuredThisSession": [
-    "a precise sustained-fps number under the production launcher (the POC measured 60 on the identical closure; the production run rendered fullscreen@60 present mode but no frame counter was logged this session — PROPNIX_BENCH shows the live DXVK HUD)",
+    "a precise sustained-fps number under the production launcher (the POC measured 60 on the identical closure; the production run rendered fullscreen@60 present mode but no frame counter was logged this session — PROPNIX_BENCH shows the live MangoHud overlay via the Vulkan implicit layer)",
     "single-instance window-FOCUS behaviour on a duplicate launch (the lock + exit-0 path is code-verified; the EWMH raise is X11-only / Wayland no-op)"
   ],
   "knownCaveats": [

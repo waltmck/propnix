@@ -1,0 +1,19 @@
+diff --git i/dlls/ntdll/unix/virtual.c w/dlls/ntdll/unix/virtual.c
+index 78434fa4..8473cc92 100644
+--- i/dlls/ntdll/unix/virtual.c
++++ w/dlls/ntdll/unix/virtual.c
+@@ -4418,6 +4418,14 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
+ 
+     size = max( reserve_size, commit_size );
+     if (size < 1024 * 1024) size = 1024 * 1024;  /* Xlib needs a large stack */
++    /* The no-access + guard pages at the bottom (2 * host_page_size) are carved out of the
++     * reservation below, so the usable stack (StackBase - StackLimit) is 'size' minus that
++     * overhead.  On large host pages (e.g. 16K) that overhead is 32K instead of 8K, silently
++     * shrinking every thread's usable stack by ~24K versus a 4K host.  Guest runtimes that
++     * size their threads tightly for a 1MB x86-64 stack (Unity/Mono JIT threads) can then
++     * overflow under emulation.  Add the guard overhead on top so the usable stack matches the
++     * requested reserve independently of the host page size. */
++    if (guard_page) size += 2 * host_page_size;
+     size = ROUND_SIZE( 0, size, granularity_mask );
+ 
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );

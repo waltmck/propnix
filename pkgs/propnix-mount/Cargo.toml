@@ -1,0 +1,16 @@
+[package]
+name = "propnix-mount"
+version = "0.1.0"
+edition = "2021"
+description = "Assemble a layered WINEPREFIX bind/overlay mount table in a private user+mount namespace (library, linked by propnix-launcher)"
+
+[lib]
+name = "propnix_mount"
+path = "src/lib.rs"
+
+[dependencies]
+# unshare(2)/mount(2)/uid maps + spawning `tar` for skeleton extraction. Raw syscalls only, no other deps.
+libc = "0.2"
+
+[profile.release]
+opt-level = "s"

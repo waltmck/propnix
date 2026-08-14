@@ -12,7 +12,13 @@
 }:
 let
   pins = (lib.importJSON ./versions.json).backends.gog-galaxy-windows;
-  tuning = import ./tuning.nix;
+  tuning = (import ./tuning.nix) // {
+    # HK bundles the GOG Galaxy SDK in two spots (both statically imported); stub them (aarch64) via mount rows.
+    galaxyStubDlls = [
+      "Galaxy64.dll"
+      "Hollow Knight_Data/Plugins/x86_64/Galaxy64.dll"
+    ];
+  };
 in
 makeAppWine {
   pname = "hollow-knight";

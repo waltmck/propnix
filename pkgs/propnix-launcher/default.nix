@@ -1,8 +1,9 @@
-# propnix-launcher — the per-app launcher (GTK4 splash + single-instance + env-seal + symlink-farm prefix
-# + orchestration), the Rust port of winefex.nix's backend. Built with rustPlatform.buildRustPackage;
-# deps vendored offline from Cargo.lock (no cargoHash to maintain, like propnix-prefetch). GTK is wrapped
-# at install by wrapGAppsHook4 (sets the GTK/GIO env in the LAUNCHER process only — the wine child's env
-# is the sealed one this program builds, so the two don't collide; PLAN2 §5).
+# propnix-launcher — the per-app launcher (GTK4 splash + single-instance + env-seal + in-process mount-table
+# prefix + orchestration). It LINKS propnix-mount + propnix-prefetch as library crates (path deps) rather
+# than exec'ing them as separate binaries, so the build source is all three crate dirs and cargo builds the
+# launcher crate (which pulls the two libs in). Built with rustPlatform.buildRustPackage; deps vendored
+# offline from Cargo.lock (no cargoHash). GTK is wrapped at install by wrapGAppsHook4 (sets the GTK/GIO env in
+# the LAUNCHER process only — the wine child's env is the sealed one this program builds; PLAN2 §5).
 {
   lib,
   rustPlatform,
@@ -12,19 +13,32 @@
   glib,
   wayland,
 }:
-rustPlatform.buildRustPackage {
-  pname = "propnix-launcher";
-  version = "0.1.0";
-  # Only the crate inputs — exclude local build state and this file so the source hash tracks the code.
+let
+  # Build source = the three sibling crate dirs under pkgs/ (the launcher path-deps propnix-mount +
+  # propnix-prefetch). Exclude local build state so the hash tracks the code.
+  crates = [
+    "propnix-launcher"
+    "propnix-mount"
+    "propnix-prefetch"
+  ];
   src = lib.cleanSourceWith {
-    src = ./.;
+    name = "propnix-rust";
+    src = ../.; # pkgs/
     filter =
       path: _type:
       let
-        base = baseNameOf (toString path);
+        rel = lib.removePrefix (toString ../. + "/") (toString path);
+        top = lib.head (lib.splitString "/" rel);
       in
-      !(base == "target" || base == ".cargo-home" || base == "default.nix");
+      builtins.elem top crates && !(builtins.elem (baseNameOf path) [ "target" ".cargo-home" ]);
   };
+in
+rustPlatform.buildRustPackage {
+  pname = "propnix-launcher";
+  version = "0.1.0";
+  inherit src;
+  # cargo builds the launcher crate; its path deps (../propnix-mount, ../propnix-prefetch) are siblings here.
+  sourceRoot = "propnix-rust/propnix-launcher";
   cargoLock.lockFile = ./Cargo.lock;
 
   nativeBuildInputs = [
@@ -34,9 +48,10 @@ rustPlatform.buildRustPackage {
   buildInputs = [
     gtk4 # gtk4-rs links the system GTK4 (pulls pango/cairo/gdk-pixbuf/graphene/glib as propagated deps)
     glib
-    wayland # wayland-sys links libwayland-client for the wlr-foreign-toplevel focus path (focus.rs)
+    wayland # wayland-sys links libwayland-client for the ext/wlr foreign-toplevel focus path (focus.rs)
   ];
 
-  doCheck = false; # no tests; the launcher is validated by the end-to-end HK run (§9)
-  meta.description = "propnix per-app launcher: GTK4 splash + single-instance + env-seal + symlink-farm prefix orchestration";
+  doCheck = false; # no tests; the launcher is validated by the end-to-end game runs (§9)
+  meta.description = "propnix per-app launcher: GTK4 splash + single-instance + env-seal + in-process mount-table prefix orchestration (links propnix-mount + propnix-prefetch)";
+  meta.mainProgram = "propnix-launcher";
 }

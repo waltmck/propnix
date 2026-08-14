@@ -1,5 +1,7 @@
-//! The GTK4 startup splash. Shown while the game cold-starts; dismissed on DXVK's first-present marker (or
-//! a timeout / game exit). Closing it before first-present cancels startup. The launcher process outlives
+//! The GTK4 startup splash. Shown while the game cold-starts; dismissed on the first-present marker of
+//! whichever backend is active (DXVK, vkd3d, or wined3d) OR when the game window first maps (the compositor
+//! window-watcher, for backends/titles that emit no marker) — or a timeout / game exit. Closing it before
+//! first-present cancels startup. The launcher process outlives
 //! the game (it holds the single-instance lock + drives teardown), so the GTK loop stays alive after the
 //! splash is hidden and quits only when the worker reports the game exited.
 
@@ -12,11 +14,13 @@ use std::rc::Rc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
-pub fn run(name: String, icon: Option<String>, rx: Receiver<Progress>) -> i32 {
+pub fn run(app_id: String, name: String, icon: Option<String>, rx: Receiver<Progress>) -> i32 {
     let app = Application::builder()
-        // NON_UNIQUE: each launcher process is independent — WE own single-instance (the flock in
-        // focus.rs), not GtkApplication's D-Bus registration.
-        .application_id("org.propnix.launcher")
+        // The game's `org.propnix.<appid>` id (also the game's `.desktop` basename): GTK sets it as the
+        // Wayland toplevel app_id, so the compositor maps the splash to the SAME desktop entry — and thus
+        // the same icon — as the game window. NON_UNIQUE: each launcher process is independent — WE own
+        // single-instance (the flock in focus.rs), not GtkApplication's D-Bus registration.
+        .application_id(&app_id)
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
 
@@ -47,7 +51,9 @@ fn build_splash(
     css.load_from_data(concat!(
         "window { background-color: #000000; } ",
         "label { color: #ffffff; } ",
-        "spinner { color: #ffffff; }",
+        "spinner { color: #ffffff; } ",
+        // Rounded corners on the splash icon (clipped via the widget's `overflow: hidden` below).
+        ".splash-icon { border-radius: 16px; }",
     ));
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
@@ -69,8 +75,19 @@ fn build_splash(
     if let Some(path) = icon {
         if std::path::Path::new(path).exists() {
             let img = gtk::Image::from_file(path);
-            img.set_pixel_size(128);
-            vbox.append(&img);
+            // Fixed, contained size: a large extracted PE icon must not overflow/clip the small splash
+            // window (was 128 with no size cap → oversized + truncated on some games).
+            img.set_pixel_size(96);
+            img.set_size_request(96, 96);
+            // Clip the icon to rounded corners: a wrapper Box with `overflow: hidden` + the .splash-icon
+            // border-radius rounds the child image (overflow reliably clips children).
+            let frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            frame.set_halign(gtk::Align::Center);
+            frame.set_size_request(96, 96);
+            frame.add_css_class("splash-icon");
+            frame.set_overflow(gtk::Overflow::Hidden);
+            frame.append(&img);
+            vbox.append(&frame);
         }
     }
 
@@ -122,12 +139,6 @@ fn build_splash(
         loop {
             match rx.try_recv() {
                 Ok(Progress::Presented) => window.set_visible(false),
-                Ok(Progress::Failed(msg)) => {
-                    eprintln!("propnix: {msg}");
-                    exit_code.set(1);
-                    app.quit();
-                    return glib::ControlFlow::Break;
-                }
                 Ok(Progress::Exited(code)) => {
                     exit_code.set(code);
                     app.quit();

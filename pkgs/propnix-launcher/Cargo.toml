@@ -20,9 +20,22 @@ libc = "0.2"
 # Raise-the-running-window for the single-instance guard. X11/Xwayland via EWMH (x11rb); Wayland via the
 # wlr-foreign-toplevel-management protocol (wayland-client + wayland-protocols-wlr) — portable across the
 # wlroots family + COSMIC; a graceful no-op where the compositor doesn't advertise it (GNOME/KDE).
+# The mount + prefetch helpers, LINKED as libraries (compiled in) rather than exec'd as separate binaries:
+# `propnix_mount::enter_and_mount` runs in a Command::pre_exec hook on the mount child; `propnix_prefetch::warm`
+# runs on a detached thread. Path deps in a Cargo workspace (see ../Cargo.toml).
+propnix-mount = { path = "../propnix-mount" }
+propnix-prefetch = { path = "../propnix-prefetch" }
 x11rb = "0.13"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# ext-foreign-toplevel-list-v1 (staging): the portable, cross-compositor way to LIST toplevels — GNOME
+# (Mutter 45+), KDE (KWin 6), AND wlroots. Used as the PRIMARY game-window DETECTION path (splash dismiss +
+# close-to-quit), which must be reliable everywhere; wlr + X11 are fallbacks. Already in Cargo.lock
+# transitively via wayland-protocols-wlr; the `staging` feature only compiles the extra protocol module.
+# `unstable` adds xdg-output-unstable-v1 — the launcher queries it (with core wl_output) for the primary
+# output's current mode + logical position (to pick the primary), deriving the PROPNIX_WIDTH/HEIGHT runtime
+# facts (display.rs).
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
 
 [profile.release]
 # The launcher is glue; optimise for a small, quick-to-build binary rather than peak throughput.

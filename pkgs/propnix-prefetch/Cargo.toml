@@ -2,12 +2,12 @@
 name = "propnix-prefetch"
 version = "0.1.0"
 edition = "2021"
-description = "Warm the ZFS ARC / page cache for given paths via chunked posix_fadvise(WILLNEED) (async dmu_prefetch on ZFS, yields to sync reads), parallelised with tokio. winefex's cold-launch prefetcher."
+description = "Warm the ZFS ARC / page cache for given paths via chunked posix_fadvise(WILLNEED) (library, linked by propnix-launcher)"
 license = "MIT"
 
-[[bin]]
-name = "propnix-prefetch"
-path = "src/main.rs"
+[lib]
+name = "propnix_prefetch"
+path = "src/lib.rs"
 
 # rt-multi-thread + sync only: no net/io/time/macros features, so the vendored dep tree stays tiny
 # (tokio + pin-project-lite) — no mio/libc/syn pulled in.

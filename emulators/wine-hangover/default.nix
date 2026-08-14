@@ -20,7 +20,15 @@
 #   4. `gstreamerSupport = true` — Media Foundation decode backend (RESEARCH §18): winegstreamer.dll
 #      registers the MF byte-stream-handler classes, so HK's cinematic AUDIO decodes (video still absent,
 #      a wine 11 MF video-pipeline limitation, not a codec gap). Kept for MF generally.
-# nixpkgs' own `cert-path.patch` (NixOS cacert path) is kept; NO other patch set — the fork carries the glue.
+#   5. `patches += ./patches/0001-wine-thread-stack-guard-headroom.patch` — restore the bottom guard-page overhead
+#      (2 * host_page_size) ON TOP of a thread's reserve in `virtual_alloc_thread_stack`, so the USABLE
+#      stack matches the requested reserve regardless of host page size. On 16K-page hosts (Asahi) the
+#      guard costs 32K vs 8K on 4K, silently shrinking every thread's usable stack by ~24K — which tips
+#      tightly-sized Unity/Mono JIT worker threads into a stack overflow under FEX emulation (root-caused
+#      via a KSP crash A/B: patched 0/17 vs baseline 3/17). Harmless on 4K hosts (+8K/thread), so it is
+#      applied on both arches (keeping the wine identical across them).
+# nixpkgs' own `cert-path.patch` (NixOS cacert path) is kept, plus the stack patch above; the fork carries
+# all the ARM64EC/WoW64 glue itself.
 #
 # SAME WINE ON BOTH ARCHES (max compatibility; the only difference is arm64ec-specific):
 #   * aarch64-linux host: `--enable-archs=arm64ec,aarch64,x86_64,i386` → ARM64X-hybrid core DLLs that can
@@ -55,6 +63,19 @@ let
     rev = hangoverWineRev;
     sha256 = "1a0icm3m0z14k8fk01k16nd5dsnzmvphi0m6d5n93p1ks83759m8";
   };
+
+  # Every file under ./patches becomes a wine patch — drop a `NNNN-name.patch` in to add one, delete it to
+  # remove it; no code change. Files are applied in NUMERIC-PREFIX order (0001-, 0002-, …) via naturalSort,
+  # so ordering is controlled by the filename. `builtins.path` pins the dir to a CONTENT-ADDRESSED store path
+  # (keyed only by the patches' bytes, not the flake source), so unrelated repo edits never perturb this
+  # ~1 h wine build — only touching ./patches does.
+  patchesDir = builtins.path {
+    path = ./patches;
+    name = "wine-hangover-patches";
+  };
+  extraPatches = map (f: "${patchesDir}/${f}") (
+    lib.naturalSort (builtins.attrNames (builtins.readDir patchesDir))
+  );
 in
 (wineWow64Packages.unstable.override { gstreamerSupport = true; }).overrideAttrs (old: {
   pname = "wine-hangover";
@@ -66,8 +87,10 @@ in
     f: if lib.hasPrefix "--enable-archs=" f then "--enable-archs=${archs}" else f
   ) old.configureFlags;
 
-  # Keep nixpkgs' patches (cert-path.patch); the fork supplies all ARM64EC/WoW64 glue itself.
-  # (No `import ./wine-patches` — that cherry-pick-onto-11.12 approach is retired.)
+  # Keep nixpkgs' patches (cert-path.patch) + everything under ./patches (currently the thread-stack
+  # guard-headroom fix, header §5); the fork supplies all ARM64EC/WoW64 glue itself. (No `import
+  # ./wine-patches` — the cherry-pick-onto-11.12 approach is retired.)
+  patches = (old.patches or [ ]) ++ extraPatches;
 
   dontStrip = isAarch64;
 })

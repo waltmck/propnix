@@ -87,7 +87,9 @@
   generation ? 2, # GOG content-system generation (builds API ?generation=…); provenance only here
   manifestId ? null, # optional manifest pin for future manifest-level reproducibility; unused this pass
 }:
-runCommand "${pname}-${version}"
+# GOG `version` strings are free-form (spaces, parens, dates, e.g. "1.0(A)"); sanitize for the store name.
+# The download is determined by buildId, not this string — it's provenance / the derivation name only.
+runCommand (lib.strings.sanitizeDerivationName "${pname}-${version}")
   {
     inherit outputHash outputHashMode outputHashAlgo;
 

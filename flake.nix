@@ -43,16 +43,15 @@
         in
         {
           inherit (scope)
-            hollow-knight
             wine
             dxvk
             vkd3d
             prefixLower
             propnix-launcher
-            propnix-prefetch
             ;
-          default = scope.hollow-knight;
+          # No `default` — a game is chosen explicitly (`.#hollow-knight`); the flake default is left blank.
         }
+        // scope.games # every auto-discovered game (pkgs/games/*) exposed as `.#<name>`
         # aarch64-only: the ARM64EC toolchain + FEX/box64 emulators (absent on x86_64).
         // lib.optionalAttrs (system == "aarch64-linux") {
           inherit (scope) fexdlls llvmMingw box64;
@@ -60,16 +59,14 @@
       );
 
       # `nix run .#hollow-knight` on either host arch — emulation handled transparently below the launcher.
-      apps = forAllSystems (system: {
-        hollow-knight = {
+      # One app per auto-discovered game (`nix run .#<name>`). No `default` — the flake default is blank.
+      apps = forAllSystems (
+        system:
+        lib.mapAttrs (_: pkg: {
           type = "app";
-          program = "${scopes.${system}.hollow-knight}/bin/hollow-knight";
-        };
-        default = {
-          type = "app";
-          program = "${scopes.${system}.hollow-knight}/bin/hollow-knight";
-        };
-      });
+          program = lib.getExe pkg;
+        }) scopes.${system}.games
+      );
 
       # Arch-agnostic helpers (pure lib / data), usable without picking a system. The arch-specific builders
       # (makeAppWine, fetchGogGalaxyBuild) live under legacyPackages.<system>.
@@ -78,9 +75,17 @@
           mkSeal
           flattenTuning
           mergeTuning
+          resolveTuning
           defaultScrub
           ;
-        winefexDefaults = import ./lib/winefex-defaults.nix;
+        wineDefaults = import ./lib/wine-defaults.nix;
+      };
+
+      # Host wiring: `services.propnix.enable` binds the credential dir into the build sandbox and loads
+      # ntsync. Arch-agnostic; adds no game packages. See nixos/propnix.nix.
+      nixosModules = rec {
+        propnix = import ./nixos/propnix.nix;
+        default = propnix;
       };
     };
 }

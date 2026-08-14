@@ -4,9 +4,9 @@
 #
 # A fully-initialized, read-only wine "system" prefix: `wineboot -u` output (system32/syswow64, the
 # default registry hives, DLL registration) + the FEX emulator DLLs dropped into system32 + the Wow64
-# registry keys that point wine at them. The launcher symlinks THIS store path's contents directly into
-# each per-app prefix — the store is read-only, exactly what the symlink-farm prefix wants for the
-# immutable system tree, and its store-path hash keys a wine/FEX bump (new path → the next launch relinks).
+# registry keys that point wine at them. The launcher bind-mounts THIS store path's contents (read-only)
+# into each per-app prefix view — the store is read-only, exactly what the bind-mounted prefix wants for
+# the immutable system tree, and its store-path hash keys a wine/FEX bump (new path → the next launch rebinds).
 #
 # Why build-time (vs. provisioning lazily on first launch):
 #   * It removes the entire ~22 s first-launch `wineboot` cost measured in RESEARCH §19 — cold launch
@@ -17,10 +17,11 @@
 #     x86 code runs, so no FEX JIT and no /dev/kvm), so it runs headless in the Nix build sandbox exactly
 #     as nixpkgs already runs wine's own test suite.
 #
-# Username: the prefix is built for a FIXED user (`wineUser`) and the launcher pins USER/LOGNAME to the
-# same value at runtime, so the store-built profile (drive_c/users/<wineUser>) is found as-is rather than
-# re-created for the (differing) real user. A post-wineboot rename makes this robust regardless of what
-# name wineboot picks in the sandbox.
+# Username: the prefix is built for the FIXED user `propnix` and the launcher pins USER/LOGNAME to it at
+# runtime, so the store-built profile (drive_c/users/propnix) is found as-is rather than re-created for the
+# (differing) real user. A post-wineboot rename makes this robust regardless of what name wineboot picks in
+# the sandbox. It is a hardcoded constant (not an option) — game tuning hardcodes `drive_c/users/propnix/…`
+# in its save mount targets, and `passthru.wineUser` exposes it as the single source of truth.
 #
 # Registry split (§7.2): this tree ships system.reg (HKLM) + userdef.reg (HKU\.Default) but deliberately
 # does NOT ship user.reg (HKCU). HKLM/.Default are Admin-only/system hives that games never write, so the
@@ -30,7 +31,7 @@
 # fresh WRITABLE user.reg as a REAL file in the per-app prefix on first launch (~+0.1 s — built-in defaults
 # + font list, not a wineboot), where it persists. propnix's HKCU DEFAULTS (e.g. the black pre-render
 # window background) are NOT baked here; the launcher re-applies them into user.reg on every launch from a
-# configurable attrset (winefex-defaults.nix `userReg`), so they always win and update without a reset.
+# configurable attrset (wine-defaults.nix `userReg`), so they always win and update without a reset.
 #
 # Determinism: BIT-REPRODUCIBLE — `nix-store --realise --check` passes. `wineboot` otherwise bakes
 # non-deterministic state into the output (wall-clock key timestamps, /dev/urandom GUIDs —
@@ -48,8 +49,10 @@
   gnused,
   wine,
   fexdlls ? null, # aarch64: the FEX emulator DLLs to install as the WoW64 backends. x86_64: null (native).
-  wineUser ? "propnix",
 }:
+let
+  wineUser = "propnix"; # FIXED — not an option; game tuning hardcodes drive_c/users/propnix/…
+in
 runCommand "wine-prefix-lower"
   {
     nativeBuildInputs = [
@@ -103,13 +106,11 @@ runCommand "wine-prefix-lower"
       done
     fi
 
-    # Drop HKCU (user.reg): the launcher symlinks the store's hives read-only, and a symlinked user.reg
-    # would be clobbered by wine's save — so HKCU is NOT shipped. wine regenerates a fresh, WRITABLE
-    # user.reg as a real file in the per-app prefix on first launch, where the user's settings then
-    # persist; propnix re-applies its HKCU overrides (e.g. the black window colors, from winefex-defaults)
-    # on every launch (§ userReg). HKLM (system.reg, incl. the Wow64/FEX keys above) and HKU\.Default
-    # (userdef.reg) stay: symlinked read-only.
-    rm -f "$WINEPREFIX/user.reg"
+    # KEEP user.reg (HKCU): it is the BASE for each game's declarative user.reg — mkWineReg applies the
+    # game's userReg overrides + display driver on top of it, and the launcher mounts the result as the CoW
+    # lower of the root overlay (reads fall back to this store base; the app's writes persist to $STATE). So
+    # HKCU is no longer regenerated at runtime — it ships here like system.reg/userdef.reg. (It is normalized
+    # for reproducibility alongside the other hives, below.)
 
     # Freeze the prefix: the special value `disable` in .update-timestamp tells wine to NEVER auto-run
     # wineboot against this prefix at runtime — correct here since the lower is read-only and already
@@ -124,7 +125,7 @@ runCommand "wine-prefix-lower"
     # enumeration (MachineId, VideoID, ContainerId). These identify sandbox placeholder devices, not real
     # hardware (wine re-enumerates the host's devices at runtime), and no game reads them — so a fixed
     # value per read-only-served hive is correct. Value-name-anchored so only these lines change.
-    for _h in system.reg userdef.reg; do
+    for _h in system.reg userdef.reg user.reg; do
       sed -i -E '
         s/^(\[.*\]) [0-9]+$/\1 0/
         /^#time=/ s/=.*/=0/

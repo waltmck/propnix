@@ -1,0 +1,125 @@
+winewayland: emit WM_MOUSEWHEEL for continuous (touchpad) scroll
+
+STATUS: UNTESTED reminder patch — NOT yet in emulators/wine-hangover/patches/ (drop it there,
+git-add it, and rebuild wine to activate; that is a ~1h wine rebuild). Verify trackpad scrolling
+works in a windowed game (e.g. prison-architect, iron-nest) and tune WAYLAND_AXIS_STEP if the
+scroll speed feels off.
+
+Root cause: winewayland's wl_pointer `axis` callback (continuous smooth scroll) was an empty stub, so
+only the discrete `axis_value120`/`axis_discrete` paths produced Windows wheel events. A mouse wheel
+sends value120/discrete and works; a touchpad (finger source) has no detents and sends ONLY the
+continuous `wl_pointer.axis` event, which was dropped -> no scrolling from the trackpad.
+
+Fix: track `axis_source`; accumulate continuous scroll for finger/continuous sources; flush it as
+WM_MOUSEWHEEL / WM_MOUSEHWHEEL on `frame`, carrying the sub-detent remainder across frames and
+clearing it on `axis_stop`. Wheel sources keep using the value120 path (no double-counting).
+WAYLAND_AXIS_STEP (surface units per detent) sets the touchpad scroll speed.
+
+diff --git i/dlls/winewayland.drv/wayland_pointer.c w/dlls/winewayland.drv/wayland_pointer.c
+index 0c190a9a..2cfecddb 100644
+--- i/dlls/winewayland.drv/wayland_pointer.c
++++ w/dlls/winewayland.drv/wayland_pointer.c
+@@ -270,25 +270,87 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
+     NtUserSendHardwareInput(hwnd, SEND_HWMSG_RAWINPUT, &input, 0);
+ }
+ 
++/* Surface-space length of continuous scroll that equals one wheel detent (WHEEL_DELTA). This is the
++ * legacy per-detent wl_pointer.axis value; it sets how fast finger/touchpad scrolling feels. */
++#define WAYLAND_AXIS_STEP 10.0
++
+ static void pointer_handle_axis(void *data, struct wl_pointer *wl_pointer,
+                                 uint32_t time, uint32_t axis, wl_fixed_t value)
+ {
++    struct wayland_pointer *pointer = &process_wayland.pointer;
++
++    /* Discrete wheels deliver scroll via axis_value120/axis_discrete (handled below) — this continuous
++     * axis event is the ONLY scroll signal for finger/continuous sources (touchpads), which have no
++     * detents. Accumulate those and flush them as WM_MOUSEWHEEL on frame. Restricting to non-wheel
++     * sources avoids double-counting the value120 path for hi-res wheels. */
++    if (pointer->axis_source != WL_POINTER_AXIS_SOURCE_FINGER &&
++        pointer->axis_source != WL_POINTER_AXIS_SOURCE_CONTINUOUS)
++        return;
++
++    if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL)
++        pointer->scroll_accum_v += wl_fixed_to_double(value);
++    else if (axis == WL_POINTER_AXIS_HORIZONTAL_SCROLL)
++        pointer->scroll_accum_h += wl_fixed_to_double(value);
+ }
+ 
+ static void pointer_handle_frame(void *data, struct wl_pointer *wl_pointer)
+ {
+-    static const INPUT input = { .type = INPUT_MOUSE, .mi.dwFlags = MOUSEEVENTF_MOVE_NOCOALESCE };
+-    NtUserSendHardwareInput(NULL, SEND_HWMSG_RAWINPUT, &input, 0); /* flush win32u accumulated motion */
++    struct wayland_pointer *pointer = &process_wayland.pointer;
++    static const INPUT motion = { .type = INPUT_MOUSE, .mi.dwFlags = MOUSEEVENTF_MOVE_NOCOALESCE };
++
++    /* Flush accumulated smooth (finger/continuous) scroll as WM_MOUSEWHEEL. One detent = WHEEL_DELTA per
++     * WAYLAND_AXIS_STEP surface units; emit whole+fractional wheel deltas and carry the sub-step remainder
++     * to the next frame so slow drags still scroll. Vertical is negated to match Windows' wheel direction
++     * (same convention as the value120 path). */
++    if (pointer->scroll_accum_v != 0.0 || pointer->scroll_accum_h != 0.0)
++    {
++        HWND hwnd = wayland_pointer_get_focused_hwnd();
++        if (hwnd)
++        {
++            const double per_unit = WHEEL_DELTA / WAYLAND_AXIS_STEP;
++            int dv = (int)(pointer->scroll_accum_v * per_unit);
++            int dh = (int)(pointer->scroll_accum_h * per_unit);
++            if (dv)
++            {
++                INPUT input = { .type = INPUT_MOUSE };
++                input.mi.dwFlags = MOUSEEVENTF_WHEEL;
++                input.mi.mouseData = -dv;
++                NtUserSendHardwareInput(hwnd, SEND_HWMSG_RAWINPUT, &input, 0);
++                pointer->scroll_accum_v -= dv / per_unit;
++            }
++            if (dh)
++            {
++                INPUT input = { .type = INPUT_MOUSE };
++                input.mi.dwFlags = MOUSEEVENTF_HWHEEL;
++                input.mi.mouseData = dh;
++                NtUserSendHardwareInput(hwnd, SEND_HWMSG_RAWINPUT, &input, 0);
++                pointer->scroll_accum_h -= dh / per_unit;
++            }
++        }
++        else
++        {
++            pointer->scroll_accum_v = pointer->scroll_accum_h = 0.0;
++        }
++    }
++
++    NtUserSendHardwareInput(NULL, SEND_HWMSG_RAWINPUT, &motion, 0); /* flush win32u accumulated motion */
+ }
+ 
+ static void pointer_handle_axis_source(void *data, struct wl_pointer *wl_pointer,
+                                        uint32_t axis_source)
+ {
++    process_wayland.pointer.axis_source = axis_source;
+ }
+ 
+ static void pointer_handle_axis_stop(void *data, struct wl_pointer *wl_pointer,
+                                      uint32_t time, uint32_t axis)
+ {
++    struct wayland_pointer *pointer = &process_wayland.pointer;
++
++    /* Gesture ended (fingers lifted): drop any sub-detent remainder so it can't leak into a later,
++     * possibly opposite, gesture. */
++    if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) pointer->scroll_accum_v = 0.0;
++    else if (axis == WL_POINTER_AXIS_HORIZONTAL_SCROLL) pointer->scroll_accum_h = 0.0;
+ }
+ 
+ static void pointer_handle_axis_value120(void *data, struct wl_pointer *wl_pointer,
+diff --git i/dlls/winewayland.drv/waylanddrv.h w/dlls/winewayland.drv/waylanddrv.h
+index 303efce2..76a37785 100644
+--- i/dlls/winewayland.drv/waylanddrv.h
++++ w/dlls/winewayland.drv/waylanddrv.h
+@@ -120,6 +120,9 @@ struct wayland_pointer
+     struct wayland_cursor cursor;
+     double accum_x;
+     double accum_y;
++    uint32_t axis_source;      /* wl_pointer.axis_source of the current scroll sequence */
++    double scroll_accum_v;     /* smooth (finger/continuous) scroll accumulator, vertical */
++    double scroll_accum_h;     /* smooth (finger/continuous) scroll accumulator, horizontal */
+     pthread_mutex_t mutex;
+ };
+ 

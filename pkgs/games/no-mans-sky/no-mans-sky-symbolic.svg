@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  No Man's Sky symbolic icon (monochrome line-art; uses currentColor so it follows the theme's
+  symbolic-icon color). Vendored into propnix as the -symbolic variant.
+
+  Source:  https://svgicons.com/icon/7131/no-mans-sky
+  License: CC BY-SA 4.0  (https://creativecommons.org/licenses/by-sa/4.0/)
+           This icon file remains under CC BY-SA 4.0 (attribution + share-alike); the rest of the
+           repository is not affected. "No Man's Sky" and its marks are property of Hello Games.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" d="M11.466 18.784L24 13.689M24 44.5l12.535-25.716L24 3.5L11.466 18.784zm12.535-25.716L24 13.689M24 3.5v41"/><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" d="M24 24.45a5.666 5.666 0 0 0 4.698-8.834"/>
+</svg>

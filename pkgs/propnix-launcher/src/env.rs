@@ -37,7 +37,9 @@ impl ChildEnv {
             }
         }
 
-        push("WINEPREFIX", paths.prefix.to_string_lossy().into_owned());
+        // WINEPREFIX is the ephemeral view (assembled by propnix-mount); the persistent state is the upper
+        // bound in as its base. Set inside the namespace, where the view is live.
+        push("WINEPREFIX", paths.view.to_string_lossy().into_owned());
         push("WINEDEBUG", settings.winedebug.clone());
 
         // WINEDLLOVERRIDES, composed from the STRUCTURED map: the baked per-DLL overrides
@@ -79,19 +81,30 @@ impl ChildEnv {
             push("DXVK_LOG_LEVEL", "info".to_string());
             push("VKD3D_DEBUG", "info".to_string());
 
-            // PROPNIX_FPS: cap the frame rate AND force vsync OFF (only when a cap is set; otherwise the
-            // game's own vsync/cap are left untouched). DXVK_FRAME_RATE is the timer-paced limiter, honored
-            // by BOTH DXVK and vkd3d-proton (its swapchain reads DXVK_FRAME_RATE and overrides the game's
-            // own target). Vsync must be off for the cap to pace cleanly: FIFO vsync re-imposes vblank
-            // quantization, which turns any frame-time jitter (the FEX-JIT'd game thread, compositor
-            // round-trip) into a bimodal 16.7/33.3 ms stutter — measured on HK as ~50-55 fps vsync-on vs a
-            // steady 60 with the cap. `dxgi.syncInterval=0` forces vsync off for D3D10/11, `d3d9.*` for
-            // D3D9; appended to any inherited DXVK_CONFIG. (vkd3d ignores DXVK_CONFIG, but with the limiter
-            // active it presents via its unlocked, non-FIFO mode.) wined3d has no such knob → PROPNIX_FPS
-            // is a no-op there (it is not DXVK).
-            if let Some(fps) = settings.fps {
-                push("DXVK_FRAME_RATE", fps.to_string());
-                let forced = "dxgi.syncInterval=0;d3d9.presentInterval=0";
+            // PROPNIX_FPS policy (three-state; resolved in settings.rs). DXVK_FRAME_RATE is the timer-paced
+            // limiter honored by BOTH DXVK and vkd3d-proton (its swapchain reads it and overrides the game's
+            // own target); `dxgi.syncInterval` / `d3d9.presentInterval` force the swapchain's vsync (0=off for
+            // D3D10/11 and D3D9 respectively, 1=on). The forced knob is appended to any inherited DXVK_CONFIG
+            // (vkd3d ignores DXVK_CONFIG but honors the limiter, presenting unlocked when uncapped). wined3d
+            // has no such knob, so every mode is a no-op there (it is not DXVK).
+            //   Fixed(N): cap at N AND force vsync OFF. The cap must pace, not FIFO: FIFO vsync re-imposes
+            //             vblank quantization, turning any frame-time jitter (FEX-JIT'd game thread,
+            //             compositor round-trip) into a bimodal 16.7/33.3 ms stutter — measured on HK as
+            //             ~50-55 fps vsync-on vs a steady 60 with the cap.
+            //   Vrr:      no cap + force vsync ON. On a VRR output the compositor varies the refresh to follow
+            //             the GPU (true VRR); on a fixed output it degrades to plain vsync capped at refresh.
+            //             Never tears.
+            //   Unmanaged: touch neither knob — the game's own present mode / cap stand.
+            use crate::settings::FpsMode;
+            let forced_sync = match settings.fps {
+                FpsMode::Fixed(fps) => {
+                    push("DXVK_FRAME_RATE", fps.to_string());
+                    Some("dxgi.syncInterval=0;d3d9.presentInterval=0")
+                }
+                FpsMode::Vrr => Some("dxgi.syncInterval=1;d3d9.presentInterval=1"),
+                FpsMode::Unmanaged => None,
+            };
+            if let Some(forced) = forced_sync {
                 let combined = match std::env::var("DXVK_CONFIG") {
                     Ok(base) if !base.is_empty() => format!("{base};{forced}"),
                     _ => forced.to_string(),
@@ -99,14 +112,32 @@ impl ChildEnv {
                 push("DXVK_CONFIG", combined);
             }
 
-            // PROPNIX_BENCH → DXVK's on-screen HUD (upper-left): fps + frametime graph, GPU load, GPU
-            // name/driver, DXVK version, D3D feature level. Respect an inherited DXVK_HUD if the user set
-            // one (DXVK_* is outside the scrub namespaces, so it survives to here).
-            if settings.bench && std::env::var_os("DXVK_HUD").is_none() {
+            // PROPNIX_BENCH → on-screen overlay via MangoHud's Vulkan implicit layer. DXVK (d3d9/10/11) and
+            // vkd3d (d3d12) are BOTH Vulkan (host-Vulkan via winevulkan), so ONE layer covers the whole
+            // backend — unlike DXVK_HUD, which is DXVK-only and shows nothing for a vkd3d/D3D12 game. Enable
+            // it the SAFE way: MANGOHUD=1 + the layer manifest dir on XDG_DATA_DIRS — NOT the `mangohud`
+            // wrapper / its GL LD_PRELOAD, whose host-GL hook white-screens on this stack (MangoHud's glad
+            // loader is GLX-only, but wine 10.17+ defaults to EGL). The aarch64 manifest has an ABSOLUTE
+            // library_path, so the layer loads despite the seal scrubbing LD_*. On Asahi, GPU load/temp are
+            // blank (driver unsupported by MangoHud) but fps/frametime/CPU/versions render. Respect an
+            // inherited MANGOHUD_CONFIG. (wined3d has no Vulkan swapchain to hook — its bench fps prints to
+            // the console via wine's `+fps` channel; see settings.winedebug.)
+            if settings.bench {
+                push("MANGOHUD", "1".to_string());
+                let base = match std::env::var("XDG_DATA_DIRS") {
+                    Ok(v) if !v.is_empty() => v,
+                    _ => "/usr/share".to_string(),
+                };
                 push(
-                    "DXVK_HUD",
-                    "fps,frametimes,gpuload,devinfo,version,api".to_string(),
+                    "XDG_DATA_DIRS",
+                    format!("{}/share:{base}", cfg.emulators.mangohud),
                 );
+                if std::env::var_os("MANGOHUD_CONFIG").is_none() {
+                    push(
+                        "MANGOHUD_CONFIG",
+                        "fps,frame_timing,cpu_stats,gpu_stats,engine_version,wine".to_string(),
+                    );
+                }
             }
         }
 

@@ -101,6 +101,11 @@ pub enum Entry {
         lower: String,
         upper: Option<String>,
         skeleton: Option<String>,
+        /// Read-only overlay: a lowerdir-only mount (NO upper/work) whose merged tree cannot be written. Use
+        /// it to UNION several read-only lowers (e.g. a base game payload + DLC trees, all colon-joined into
+        /// `lower`) with no writable layer at all. Distinct from `upper = None`, which means an EPHEMERAL
+        /// writable tmpfs upper — here there is no upper, so writes are rejected rather than discarded.
+        ro: bool,
     },
 }
 
@@ -368,9 +373,11 @@ pub fn enter_and_mount(root: &str, entries: &[Entry], tar_bin: &str) -> Result<(
                     lower,
                     upper,
                     skeleton,
+                    ro,
                 } => {
+                    // A read-only overlay ignores `upper` (lowerdir-only); otherwise `upper = None` → ephemeral.
                     if let Err(msg) = mount_overlay(
-                        i, target, lower, upper.as_deref(), false, skeleton.as_deref(), cs, tar_bin,
+                        i, target, lower, upper.as_deref(), *ro, skeleton.as_deref(), cs, tar_bin,
                     ) {
                         return Err(format!("overlay {lower} -> {target}: {msg}"));
                     }

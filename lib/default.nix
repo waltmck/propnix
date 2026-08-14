@@ -43,12 +43,14 @@ pkgs.lib.makeScope pkgs.newScope (
     # The launcher LINKS the mount + prefetch helpers as library crates (path deps), so it's the single build;
     # propnix-mount / propnix-prefetch are no longer separate packages.
     propnix-launcher = callPackage ../pkgs/propnix-launcher { }; # per-app launcher (splash + seal + in-process mount/prefetch + orchestration)
+    propnix-cli = callPackage ../pkgs/propnix-cli { }; # the `propnix` CLI (propnix cred …: credential management)
 
     # ── lib helpers (arch-agnostic) ──
     sealing = import ./sealing.nix { inherit (pkgs) lib; }; # §7 env-seal data model (pure lib, not a derivation)
     wineDefaults = import ./wine-defaults.nix; # global tuning base every game inherits (§5/§6)
     mkPropnixDesktopItem = callPackage ./desktop-item.nix { }; # §5 .desktop + symbolic icon
     extractPeIcon = callPackage ./extract-pe-icon.nix { }; # PE .exe icon → freedesktop hicolor theme
+    mkAppIcon = callPackage ./mk-app-icon.nix { }; # high-res raster icon → autocropped/recentred hicolor theme
     fetchGogGalaxyBuild = callPackage ./fetchers/fetchGogGalaxyBuild { }; # GOG Galaxy depot FOD (gogdl; arch-independent NAR)
     mkStoreSkeleton = callPackage ./mkStoreSkeleton.nix { }; # data-only overlay skeleton (sparse stubs+xattrs → tar)
     mkWineReg = callPackage ./mkWineReg.nix { }; # declarative per-game reg hive (wine-gen base + overrides)

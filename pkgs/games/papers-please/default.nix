@@ -5,7 +5,7 @@
 # rendering D3D11 → DXVK → Vulkan; NOT the original custom engine, and NOT Mono — so no managed-assembly
 # overlay issue). Payload = the pinned GOG Galaxy build fetched with gogdl (D15), the game tree directly.
 #
-#   nix run .#papers-please --extra-sandbox-paths /propnix=/var/tmp/propnix   # aarch64-linux or x86_64-linux
+#   nix run .#papers-please --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64-linux or x86_64-linux
 {
   lib,
   makeAppWine,

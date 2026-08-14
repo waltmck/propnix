@@ -1,0 +1,25 @@
+[package]
+name = "propnix-cli"
+version = "0.1.0"
+edition = "2021"
+description = "propnix CLI — credential management (propnix cred …) for the credentialed game fetchers"
+
+[[bin]]
+name = "propnix"
+path = "src/main.rs"
+
+[dependencies]
+# Subcommand CLI + help/usage. Derive keeps the account-type/subcommand surface declarative + easy to extend.
+clap = { version = "4", features = ["derive"] }
+# Blocking HTTP client with bundled rustls + webpki roots (no system OpenSSL/CA dep, no async runtime) — used
+# for the OAuth code/refresh exchange and the userData lookup. Secrets go in the request, never in argv (a
+# curl subprocess would leak the auth code / refresh token via `ps`).
+ureq = { version = "2", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# geteuid + access(W_OK): decide whether a store write needs sudo (write /var/lib as root, but run the
+# browser login as the invoking user).
+libc = "0.2"
+
+[profile.release]
+opt-level = "s"

@@ -37,14 +37,17 @@
 #   logged: jq writes straight to a file, and we never run `gogdl auth` (which prints tokens to stdout).
 #
 # BUILDER REQUIREMENTS (what must be bind-mounted / present):
-#   * /propnix (read-only) via:  nix build --extra-sandbox-paths /propnix=/var/tmp/propnix ...
-#       - /propnix/credentials.toml   (holds `credentialDir = "..."`; a pointer, not a secret)
-#       - <credentialDir>/galaxy_tokens.json   (the ONLY file we read from credentialDir)
+#   * /propnix (read-only) via `services.propnix.enable` (nixos), or manually:
+#       nix build --extra-sandbox-paths /propnix=/var/lib/propnix ...
+#       - /propnix/credentials.toml         (holds `credentialDir = "/propnix"`; a pointer, not a secret)
+#       - /propnix/gog/<username>/galaxy_tokens.json   (one per GOG account; populate via `propnix cred add gog`)
+#         (backward-compat: an older single-account layout with the token directly at
+#          <credentialDir>/galaxy_tokens.json is also accepted.)
 #     MINIMAL CONTENTS: `extra-sandbox-paths` bypasses the reproducibility sandbox, so the bind must carry
-#     ONLY auth — credentialDir should contain EXACTLY `galaxy_tokens.json` and nothing else (NO
-#     lgogdownloader config.cfg / cookies.txt: config.cfg holds language/DLC/platform/thread settings that
+#     ONLY auth — the store holds ONLY the credentials.toml pointer + per-account galaxy_tokens.json files
+#     (NO lgogdownloader config.cfg / cookies.txt: config.cfg holds language/DLC/platform/thread settings that
 #     could steer a download). This fetcher never reads them anyway — every download parameter is pinned in
-#     versions.json and the auth-config handed to gogdl is derived SOLELY from galaxy_tokens.json — so the
+#     versions.json and the auth-config handed to gogdl is derived SOLELY from a galaxy_tokens.json — so the
 #     bind can only make a fetch succeed or fail, never change WHAT is fetched. See config/credentials.nix.
 #   * Network: automatic — this is an FOD, so it gets network under sandbox=true (RESEARCH §7).
 #   * pkgs.cacert MUST be a real build input, not just interpolated into SSL_CERT_FILE (RESEARCH §13).
@@ -58,9 +61,10 @@
 #     Drop base defaults to `/propnix/drop` (already inside the bound /propnix), overridable by the impure
 #     env var PROPNIX_DROP_DIR (declared in impureEnvVars so an FOD may read it without changing the hash;
 #     the override path must itself be bind-mounted into the sandbox).
-#   * Rung-2 — gogdl download (below). The owned-products 3-way pre-flight (bad-credential / not-owned /
-#     stale-pin) is STUBBED this pass: we keep the legible missing/expired-credential errors and leave a
-#     TODO for the future Rust credential helper (plan §Backlog).
+#   * Rung-2 — gogdl download (below). Multi-account: try each stored GOG token until one fetches the pinned
+#     build (i.e. the account that OWNS it) — a not-owned/expired account fails at manifest resolution, before
+#     any bulk download, and we fall through to the next; if none succeed we emit a legible combined error
+#     (not-owned / expired token / stale pin).
 #
 # The versions.json COMPONENT (UPDATE-AUTOMATION §2) is passed straight in; the signature lists every
 # schema key explicitly (no `...`, PLAN2 §9). `kind`/`generation`/`manifestId` are carried for provenance
@@ -86,6 +90,24 @@
   kind ? "game", # provenance only (game | dlc); not consumed by the download
   generation ? 2, # GOG content-system generation (builds API ?generation=…); provenance only here
   manifestId ? null, # optional manifest pin for future manifest-level reproducibility; unused this pass
+  # gogdl download parallelism = `--max-workers` (its ONLY throughput knob — gogdl has no bandwidth throttle,
+  # unlike the official Galaxy client). gogdl defaults this to the CPU thread count (~8 here), which badly
+  # under-uses the link because GOG's CDN throttles EACH connection: aggregate speed ≈ per-connection cap ×
+  # workers, so more parallel workers ≈ "unlimited bandwidth". Default it absurdly high (64, ~8× the CPU
+  # default) to saturate the pipe; a build-time constant only, so it never affects the content-addressed
+  # output (identical bytes at any worker count → same `outputHash`, existing payloads are NOT re-fetched).
+  maxWorkers ? 64,
+  # DLC-only fetch: when set to a GOG DLC id, download ONLY that DLC's depot files (gogdl `--dlc-only
+  # --with-dlcs --dlcs <id>`) from THIS product's build, instead of the base game (`--skip-dlcs`). Both DLC
+  # flags are load-bearing: `--dlcs <id>` names WHICH dlc, but gogdl also gates the whole DLC path on the
+  # `--with-dlcs` boolean (`dlcs_should_be_downloaded`) — which, absent `--with-dlcs`, defaults to False (its
+  # store_true arg is registered first, so it wins the shared-dest default), making gogdl short-circuit to
+  # "Owned dlcs []" and download NOTHING *before ever checking ownership*. `--with-dlcs` opens the gate;
+  # `--dlcs <id>` then filters the owned set down to just this DLC. The result is the DLC's
+  # overlay tree — game-relative paths (e.g. `data/<mod>/…`), no base-game exe — consumed by a game's `dlc`
+  # set + makeAppWine's runtime overlay (`withDlc`). null → the normal base-game fetch. The DLC rides the same
+  # base `buildId`/`productId` (GOG bundles DLC depots into the base build), so pin those + this `dlcId`.
+  dlcId ? null,
 }:
 # GOG `version` strings are free-form (spaces, parens, dates, e.g. "1.0(A)"); sanitize for the store name.
 # The download is determined by buildId, not this string — it's provenance / the derivation name only.
@@ -129,42 +151,75 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}-${version}")
       # ── Rung-2: gogdl download ────────────────────────────────────────────────────────────────────
       if [ ! -r /propnix/credentials.toml ]; then
         echo "propnix: no credentials at /propnix/credentials.toml" >&2
-        echo "  nix build --extra-sandbox-paths /propnix=/var/tmp/propnix ..." >&2
-        echo "  (or stage a drop at \$PROPNIX_DROP_DIR/$buildId to fetch offline)" >&2
+        echo "  Add a GOG account:  propnix cred add gog   (populates /var/lib/propnix)" >&2
+        echo "  and enable the sandbox bind (services.propnix.enable, or" >&2
+        echo "  --extra-sandbox-paths /propnix=/var/lib/propnix)." >&2
+        echo "  (Or stage a drop at \$PROPNIX_DROP_DIR/$buildId to fetch offline.)" >&2
         exit 1
       fi
-      # credentialDir is a filesystem path, not a secret. Never printed.
+      # credentialDir is a filesystem path (the in-sandbox credential root, normally /propnix), not a secret.
       creddir=$(grep -oP 'credentialDir\s*=\s*"\K[^"]+' /propnix/credentials.toml)
-      if [ ! -r "$creddir/galaxy_tokens.json" ]; then
-        echo "propnix: galaxy_tokens.json not found under credentialDir" >&2
-        # TODO(backlog): the future Rust credential helper distinguishes the 3 failure modes here —
-        # bad/expired credential vs. product-not-owned vs. stale buildId pin — via an owned-products
-        # pre-flight against the GOG API. This pass keeps the single legible "missing credential" error.
+
+      # Collect every GOG account token the store offers. The `propnix cred` CLI writes the multi-account
+      # layout <root>/gog/<username>/galaxy_tokens.json; the second glob keeps backward-compat with the older
+      # single-file model (credentialDir naming the dir that directly holds galaxy_tokens.json). Non-matching
+      # globs expand to their literal pattern, which the `-r` test drops. Token PATHS/usernames are never
+      # printed (nor the token contents).
+      tokens=()
+      for _t in "$creddir"/gog/*/galaxy_tokens.json "$creddir"/galaxy_tokens.json; do
+        [ -r "$_t" ] && tokens+=("$_t")
+      done
+      if [ "''${#tokens[@]}" -eq 0 ]; then
+        echo "propnix: no GOG account tokens found under the credential store" >&2
+        echo "  Add one with:  propnix cred add gog" >&2
         exit 1
       fi
 
       export HOME="$TMPDIR/home"
       export GOGDL_CONFIG_PATH="$TMPDIR/gogdl-cfg"   # -> manifest cache lands OUTSIDE the game tree
       install -d -m700 "$HOME" "$GOGDL_CONFIG_PATH"
-      mkdir -p "$TMPDIR/dl"
-
-      # Build gogdl's auth-config by a PURE file->file transform. No token value ever reaches stdout.
-      #   * key it by GOG's Galaxy client id (gogdl's CLIENT_ID) so gogdl finds the tokens
-      #   * loginTime:0 forces gogdl to treat the stored access_token as expired and refresh it from the
-      #     (non-rotating) refresh_token on first use — robust regardless of the stored token's age.
       authcfg="$TMPDIR/gogdl_auth.json"   # MUST be writable: gogdl writes the refreshed token back here
-      jq '{ "46899977096215655": (. + {loginTime: 0}) }' \
-        "$creddir/galaxy_tokens.json" > "$authcfg"
-      chmod 600 "$authcfg"
 
-      # Download the pinned build. NEVER `gogdl auth` (auth.py handle_cli prints tokens to stdout).
-      gogdl --auth-config-path "$authcfg" \
-        download "$productId" \
-        --platform "$platform" \
-        --build "$buildId" \
-        --lang "$lang" \
-        --skip-dlcs \
-        --path "$TMPDIR/dl"
+      # Try each account until one can fetch the pinned build — i.e. the account that OWNS the title. This
+      # makes multiple GOG accounts transparent (no per-game account selection): a not-owned/expired account
+      # fails at manifest resolution (before any bulk download) and we fall through to the next. The output is
+      # content-addressed, so WHICH account fetched it never affects the hash.
+      fetched=0
+      for _tok in "''${tokens[@]}"; do
+        rm -rf "$TMPDIR/dl"; mkdir -p "$TMPDIR/dl"
+        # Build gogdl's auth-config by a PURE file->file transform (no token value ever reaches stdout):
+        #   * key it by GOG's Galaxy client id (gogdl's CLIENT_ID) so gogdl finds the tokens
+        #   * loginTime:0 forces gogdl to refresh the access_token from the (non-rotating) refresh_token on
+        #     first use — robust regardless of the stored token's age.
+        jq '{ "46899977096215655": (. + {loginTime: 0}) }' "$_tok" > "$authcfg"
+        chmod 600 "$authcfg"
+        # Download the pinned build. NEVER `gogdl auth` (auth.py handle_cli prints tokens to stdout).
+        # `--max-workers` = parallel download threads: set high (see `maxWorkers` above) so many concurrent
+        # connections beat GOG's per-connection CDN throttle. Content-invariant → FOD hash unchanged.
+        # Success = gogdl exits 0 AND produced files. The second check is load-bearing for DLC: when an
+        # account does NOT own the requested DLC, gogdl logs "Owned dlcs []" and exits 0 with an EMPTY tree
+        # ("Nothing to do") — so a bare exit-code check would wrongly count a not-owned DLC as fetched. A
+        # base-game download always yields files, so this is a no-op there. (`--with-dlcs` is required to even
+        # reach the ownership check — see the `dlcId` arg doc for the gogdl gate.)
+        if gogdl --auth-config-path "$authcfg" \
+            download "$productId" \
+            --platform "$platform" \
+            --build "$buildId" \
+            --lang "$lang" \
+            ${if dlcId != null then "--dlc-only --with-dlcs --dlcs ${dlcId}" else "--skip-dlcs"} \
+            --max-workers ${toString maxWorkers} \
+            --path "$TMPDIR/dl" \
+          && [ -n "$(find "$TMPDIR/dl" -mindepth 1 -type f -print -quit)" ]; then
+          fetched=1
+          break
+        fi
+        echo "propnix: this account could not fetch ${if dlcId != null then "DLC ${dlcId} of " else ""}build $buildId; trying the next configured account" >&2
+      done
+      if [ "$fetched" -ne 1 ]; then
+        echo "propnix: no configured GOG account could fetch ${if dlcId != null then "DLC ${dlcId} of " else ""}build $buildId of product $productId" >&2
+        echo "  (none owns it, all tokens are expired/invalid, or the pinned buildId is stale)." >&2
+        exit 1
+      fi
 
       echo "=====PROPNIX-LAYOUT-BEGIN====="
       find "$TMPDIR/dl" -maxdepth 2 | sort | head -80
@@ -191,8 +246,9 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}-${version}")
       -o -name '*.delta' \
       \) -prune -exec rm -rf {} + 2>/dev/null || true
 
-    # Sanity: a windows build must contain the game executable, else the tree was truncated.
-    if [ "$os" = "windows" ]; then
+    # Sanity: a windows BASE-game build must contain the game executable, else the tree was truncated. A
+    # DLC-only fetch (dlcId set) has no exe — it's an overlay tree — so skip this check for a DLC.
+    if [ "$os" = "windows" ] && [ "${if dlcId != null then "1" else "0"}" = "0" ]; then
       test -n "$(find "$out" -iname '*.exe' -print -quit)" \
         || { echo "install truncated: no .exe in tree" >&2; exit 1; }
     fi

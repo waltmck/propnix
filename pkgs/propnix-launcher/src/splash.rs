@@ -14,6 +14,16 @@ use std::rc::Rc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
+/// Fixed splash window width (px). The window is FORCED to this width via `set_size_request`, so its size
+/// no longer tracks the title's length: a long title WRAPS onto multiple lines (see `SPLASH_WRAP_CHARS`)
+/// and grows the window TALLER, never wider. Comfortably fits the current short titles on one line.
+const SPLASH_WIDTH: i32 = 300;
+/// Wrap cap for the title, in characters. Tuned so a wrapped title fits within `SPLASH_WIDTH` minus the
+/// vbox's 32px start/end margins (~236px of content). Without a cap a wrapping label still *requests* its
+/// full single-line width, and the non-resizable window would grow to fit it — so this is what actually
+/// forces the wrap. Kept conservative so the title's natural width can never exceed the window.
+const SPLASH_WRAP_CHARS: i32 = 16;
+
 pub fn run(app_id: String, name: String, icon: Option<String>, rx: Receiver<Progress>) -> i32 {
     let app = Application::builder()
         // The game's `org.propnix.<appid>` id (also the game's `.desktop` basename): GTK sets it as the
@@ -79,10 +89,15 @@ fn build_splash(
             // window (was 128 with no size cap → oversized + truncated on some games).
             img.set_pixel_size(96);
             img.set_size_request(96, 96);
+            // Centre the icon within its frame explicitly (don't rely on the default fill alignment), so the
+            // glyph sits mid-frame regardless of its source aspect ratio.
+            img.set_halign(gtk::Align::Center);
+            img.set_valign(gtk::Align::Center);
             // Clip the icon to rounded corners: a wrapper Box with `overflow: hidden` + the .splash-icon
             // border-radius rounds the child image (overflow reliably clips children).
             let frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
             frame.set_halign(gtk::Align::Center);
+            frame.set_valign(gtk::Align::Center);
             frame.set_size_request(96, 96);
             frame.add_css_class("splash-icon");
             frame.set_overflow(gtk::Overflow::Hidden);
@@ -96,6 +111,16 @@ fn build_splash(
         "<span size='x-large' weight='bold'>{}</span>",
         glib::markup_escape_text(name)
     ));
+    // Constant-width splash: a long title WRAPS onto multiple lines (the window grows taller) rather than
+    // widening the window. `set_max_width_chars` caps the label's natural width so it wraps — a bare
+    // `set_wrap(true)` label still requests its full single-line width, which the non-resizable window
+    // would grow to fit. `hexpand` lets the label fill the fixed-width column so the centred, wrapped text
+    // sits mid-window.
+    title.set_wrap(true);
+    title.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    title.set_justify(gtk::Justification::Center);
+    title.set_max_width_chars(SPLASH_WRAP_CHARS);
+    title.set_hexpand(true);
     vbox.append(&title);
 
     let spinner = gtk::Spinner::new();
@@ -112,10 +137,14 @@ fn build_splash(
         .title(name)
         .resizable(false)
         .decorated(false)
-        .default_width(260)
+        .default_width(SPLASH_WIDTH)
         .default_height(360)
         .build();
     window.set_child(Some(&vbox));
+    // Pin the width: a non-resizable window sizes to its content's natural size, so without this floor the
+    // width would still track the title. With the title's natural width capped (above), forcing the window
+    // minimum width to SPLASH_WIDTH makes the width CONSTANT across title lengths — only the height grows.
+    window.set_size_request(SPLASH_WIDTH, -1);
 
     // Closing the splash before first-present cancels startup: flag the worker, hide the window, and keep
     // it (return Stop) so the app stays alive until the worker's Exited(130) drives the quit.

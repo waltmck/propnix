@@ -3,7 +3,7 @@
 # emulator set, and the SAME Windows payload (a content-addressed FOD) is shared across arches. Payload =
 # the pinned GOG Galaxy build fetched with gogdl (D15), the game tree directly (no InnoSetup).
 #
-#   nix run .#baby-steps --extra-sandbox-paths /propnix=/var/tmp/propnix   # aarch64-linux or x86_64-linux
+#   nix run .#baby-steps --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64-linux or x86_64-linux
 {
   lib,
   makeAppWine,

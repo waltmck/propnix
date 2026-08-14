@@ -4,7 +4,7 @@
 # content-addressed FOD) is shared across arches. Payload = the pinned GOG Galaxy build fetched with gogdl
 # (D15), delivered as the game tree directly (no InnoSetup).
 #
-#   nix run .#hollow-knight-silksong --extra-sandbox-paths /propnix=/var/tmp/propnix   # aarch64/x86_64-linux
+#   nix run .#hollow-knight-silksong --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64/x86_64-linux
 {
   lib,
   makeAppWine,

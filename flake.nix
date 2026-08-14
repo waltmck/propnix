@@ -7,7 +7,7 @@
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/9bc02893134c733dd85de46ee4fb2fac696b5529";
 
   outputs =
-    { self, nixpkgs }:
+    { self, nixpkgs }: 
     let
       lib = nixpkgs.lib;
 
@@ -48,6 +48,7 @@
             vkd3d
             prefixLower
             propnix-launcher
+            propnix-cli
             ;
           # No `default` — a game is chosen explicitly (`.#hollow-knight`); the flake default is left blank.
         }
@@ -59,13 +60,20 @@
       );
 
       # `nix run .#hollow-knight` on either host arch — emulation handled transparently below the launcher.
-      # One app per auto-discovered game (`nix run .#<name>`). No `default` — the flake default is blank.
+      # One app per auto-discovered game (`nix run .#<name>`), plus `nix run .#propnix -- cred …` (the CLI).
+      # No `default` — the flake default is blank.
       apps = forAllSystems (
         system:
         lib.mapAttrs (_: pkg: {
           type = "app";
           program = lib.getExe pkg;
         }) scopes.${system}.games
+        // {
+          propnix = {
+            type = "app";
+            program = lib.getExe scopes.${system}.propnix-cli;
+          };
+        }
       );
 
       # Arch-agnostic helpers (pure lib / data), usable without picking a system. The arch-specific builders

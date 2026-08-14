@@ -1,0 +1,31 @@
+{
+  "backends": {
+    "gog-galaxy-windows": {
+      "components": {
+        "base": {
+          "productId": "1238653230",
+          "buildId": "59928886516479116",
+          "version": "2.1.14",
+          "outputHash": "sha256-Iau/7eFqExe/Bs1CMLrD2X1dvHk2lLKHcAxuOIb9fyY=",
+          "outputHashMode": "recursive",
+          "os": "windows",
+          "lang": "en",
+          "kind": "game",
+          "generation": 2
+        },
+        "space-age": {
+          "productId": "1238653230",
+          "buildId": "59928886516479116",
+          "version": "2.1.14",
+          "dlcId": "1831417704",
+          "outputHash": "sha256-cONGL99TkivYumfG+EwmWiUP4trOSTiCTZJ8FHLQJeU=",
+          "outputHashMode": "recursive",
+          "os": "windows",
+          "lang": "en",
+          "kind": "dlc",
+          "generation": 2
+        }
+      }
+    }
+  }
+}

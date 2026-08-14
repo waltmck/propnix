@@ -26,6 +26,14 @@ pub struct Config {
     pub payload: String,
     /// The executable to run, relative to `payload` (e.g. "Hollow Knight.exe").
     pub exe: String,
+    /// Optional launch working directory, RELATIVE to the game dir (drive_c/game). Some engines resolve
+    /// their asset/data root from the CWD (not the exe path) and expect the CWD to be the exe's subdirectory
+    /// — the goggame.info `workingDir`. E.g. Don't Starve's exe is `bin/dontstarve.exe`, it expects cwd =
+    /// `bin`, and finds its data at `../data`; with cwd = the payload root it fails with a missing-shader
+    /// assert. Null (the default) → cwd = drive_c/game (the payload root), the historical behaviour, so no
+    /// existing game's launch directory changes.
+    #[serde(rename = "workingDir", default)]
+    pub working_dir: Option<String>,
     /// Baked command-line arguments passed to `exe` on every launch (before any runtime `-- <args>`
     /// passthrough). Per-game engine flags, e.g. a Unity title's `["-screen-fullscreen", "1"]`.
     #[serde(rename = "exeArgs", default)]
@@ -117,11 +125,14 @@ pub enum MountSpec {
     },
     /// A COW overlay: reads fall through to the read-only `lower`; writes go to `upper` — or, when `upper`
     /// is null, an EPHEMERAL per-launch tmpfs upper (cleared every launch). The persistent form (upper set)
-    /// is how store-shipped defaults become writable without copying.
+    /// is how store-shipped defaults become writable without copying. With `readOnly` set it is instead a
+    /// lowerdir-only merge of several read-only lowers (no writable layer at all).
     Overlay {
-        /// The read-only lower layer (an env-expandable path).
+        /// The read-only lower layer(s), an env-expandable path — or several colon-joined into one string
+        /// (`a:b:c`) to UNION them (overlayfs `lowerdir`). Multi-lower is how a base payload + DLC trees merge.
         lower: String,
-        /// The writable upper layer (an env-expandable path); null → ephemeral per-launch tmpfs upper.
+        /// The writable upper layer (an env-expandable path); null → ephemeral per-launch tmpfs upper. Ignored
+        /// when `readOnly` is set (a read-only overlay has no upper).
         #[serde(default)]
         upper: Option<String>,
         /// Optional store path to a TAR of a data-only METADATA skeleton (sparse stubs sized to each
@@ -130,6 +141,11 @@ pub enum MountSpec {
         /// and preserves data. Null → a plain overlay over a user-owned/ephemeral `lower`.
         #[serde(default)]
         skeleton: Option<String>,
+        /// Read-only overlay: mount the (possibly multi-`lower`) union with NO upper/work layer, so the merged
+        /// tree cannot be written. Unlike `upper = null` (ephemeral writable tmpfs upper), there is no upper at
+        /// all. Used for merging a base game with DLC trees into a strictly read-only game dir. Default false.
+        #[serde(rename = "readOnly", default)]
+        read_only: bool,
     },
 }
 

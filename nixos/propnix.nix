@@ -26,13 +26,14 @@ in
       # A plain string (a host path/id), deliberately NOT `types.path`: a `types.path` would copy the
       # credential dir into the world-readable store. The value is only ever used as a sandbox bind target.
       type = lib.types.str;
-      default = "/var/tmp/propnix";
+      default = "/var/lib/propnix";
       example = "/var/lib/propnix";
       description = ''
-        Host directory holding the propnix credential config (`credentials.toml`, which in turn names the
-        GOG token dir). When {option}`services.propnix.enable` is set, this is bound into the Nix build
-        sandbox as `/propnix` via {option}`nix.settings.extra-sandbox-paths`, so credentialed fetches can
-        read it. Make it `nixbld`-readable. Never copied into the Nix store.
+        Host directory holding the propnix credential store — the `credentials.toml` pointer plus the
+        per-account tokens under `<type>/<username>/` (populated by `propnix cred add <type>`). When
+        {option}`services.propnix.enable` is set, this is bound into the Nix build sandbox as `/propnix`
+        via {option}`nix.settings.extra-sandbox-paths`, so credentialed fetches can read it. `propnix cred`
+        makes the token files `nixbld`-readable (group-owned, mode 0640). Never copied into the Nix store.
       '';
     };
   };

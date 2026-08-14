@@ -4,7 +4,7 @@
 # arches. Payload = the pinned GOG Galaxy build fetched with gogdl (D15), delivered as the game tree
 # directly (no InnoSetup). Prison Architect (Introversion) is a 2D management sim on a custom engine.
 #
-#   nix run .#prison-architect --extra-sandbox-paths /propnix=/var/tmp/propnix   # aarch64-linux or x86_64-linux
+#   nix run .#prison-architect --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64-linux or x86_64-linux
 {
   lib,
   makeAppWine,

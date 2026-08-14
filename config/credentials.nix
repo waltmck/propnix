@@ -1,54 +1,58 @@
-# config/credentials.nix — the single-user credential model (PLAN2 §3 / §7), as documentation + helpers.
+# config/credentials.nix — the credential model (PLAN2 §3 / §7), as documentation + helpers.
 #
 # propnix's credentialed fetchers (fetchGogGalaxyBuild) are FODs that need a GOG token at build time. The
-# token is NEVER copied into the nix store and NEVER printed. Instead:
+# token is NEVER copied into the nix store and NEVER printed. The model:
 #
-#   1. The token file (lgogdownloader's `galaxy_tokens.json`) lives in a normal directory on the host,
-#      identified by an *id/path string* — a `types.str`, NEVER a `types.path` (a `types.path` would copy
-#      the secret into the world-readable store; a `types.str` just names where it lives).
+#   1. A credential STORE on the host (default `/var/lib/propnix`), managed by the `propnix cred` CLI:
+#          propnix cred add gog          # browser login → mints + stores a token
+#          propnix cred list             # accounts, grouped by type, labelled by username
+#          propnix cred rm <username>
+#      Layout (multi-account, multi-type):
+#          /var/lib/propnix/credentials.toml                        # a pointer, not a secret
+#          /var/lib/propnix/gog/<username>/galaxy_tokens.json       # one per GOG account (OAuth token)
+#      Each token file is the flat `galaxy_tokens.json` (lgogdownloader/gogdl format). The store path is an
+#      *id/path string* — a `types.str`, NEVER a `types.path` (a `types.path` would copy the secret into the
+#      world-readable store; a `types.str` just names where it lives).
 #
-#   2. A pointer file `/propnix/credentials.toml` holds only that path:
-#          credentialDir = "/var/tmp/propnix/gog"
-#      It contains no secret itself — just the location. Nothing else belongs in this file.
+#   2. `credentials.toml` names the IN-SANDBOX credential root (where the store is bound, `/propnix`):
+#          credentialDir = "/propnix"
+#      It contains no secret — just the location. `propnix cred` writes it automatically.
 #
-#   3. `/propnix` is bind-mounted into the build sandbox for the fetch:
-#          nix build --extra-sandbox-paths /propnix=/var/tmp/propnix .#hollow-knight
-#      (`extra-sandbox-paths` requires a trusted user.) Point the bind at a dir holding the
-#      credentials.toml + the credentialDir, readable by the build user.
+#   3. The store is bind-mounted into the build sandbox at `/propnix` for the fetch — either by the NixOS
+#      module (`services.propnix.enable`, `credentialsPath = "/var/lib/propnix"`), or manually:
+#          nix build --extra-sandbox-paths /propnix=/var/lib/propnix .#hollow-knight
+#      (`extra-sandbox-paths` requires a trusted Nix user.)
 #
 #   MINIMAL CONTENTS (load-bearing). `extra-sandbox-paths` is an ESCAPE VALVE AROUND REPRODUCIBILITY — the
 #   sandbox normally forbids host paths precisely so a build can't depend on un-pinned host state. So the
 #   bind must carry ONLY authentication, and nothing that could otherwise steer a download:
-#     * credentialDir must contain EXACTLY ONE file — `galaxy_tokens.json` (the OAuth token). It must NOT
-#       contain lgogdownloader's `config.cfg` (download settings: language/DLC/platform/threads/…),
-#       `cookies.txt`, or any other config. The gogdl fetcher reads ONLY `galaxy_tokens.json` and derives a
-#       throwaway auth-config from it; every download parameter (productId/buildId/os/lang) is PINNED in
-#       the package's versions.json, never taken from the host. Keeping the dir token-only makes it
-#       impossible for stray host config to affect the output — the bind can only make a fetch succeed or
-#       fail, never change WHAT is fetched.
-#     * credentials.toml must contain ONLY `credentialDir = "…"` (the pointer). The fetcher greps just that
-#       key and ignores the rest, but keep it minimal so the intent is unambiguous.
+#     * the store holds ONLY the `credentials.toml` pointer + per-account `galaxy_tokens.json` tokens. It
+#       must NOT contain lgogdownloader's `config.cfg` (download settings: language/DLC/platform/threads/…)
+#       or `cookies.txt`. The fetcher reads ONLY a `galaxy_tokens.json` and derives a throwaway auth-config
+#       from it; every download parameter (productId/buildId/os/lang) is PINNED in the package's
+#       versions.json, never taken from the host. So the bind can only make a fetch succeed or fail, never
+#       change WHAT is fetched.
+#     * The fetcher tries each stored GOG account until one OWNS the pinned build (transparent multi-account).
 #
-#   4. The nix build runs as the `nixbld` group, so the token dir + file must be `nixbld`-readable:
-#          setfacl -R -m g:nixbld:rX "$credentialDir"
-#          setfacl    -m g:nixbld:r  /var/tmp/propnix/credentials.toml
+#   4. nixbld access. The build runs as the `nixbld` group, so the tokens must be `nixbld`-readable —
+#      `propnix cred` does this: token files are group-owned by `nixbld`, mode 0640; store dirs are 0755
+#      (their names aren't secret, so a plain user can `cred list` without privilege).
 #
-# This file is REFERENCE for now (the flake does not wire a NixOS module). A `propnix login` helper +
-# a NixOS module that renders credentials.toml and sets `nix.settings.extra-sandbox-paths` are backlog.
+# `propnix cred` writes a system dir, so `add`/`rm` sudo-escalate the store write while the browser login
+# itself runs as the invoking user. The NixOS module (`nixosModules.propnix`) renders the sandbox bind.
 {
   # Where the fetchers expect the pointer file inside the sandbox.
   credentialsFile = "/propnix/credentials.toml";
 
-  # The bind argument to pass to `nix build`. LHS is the in-sandbox path; RHS is a host dir you populate.
-  sandboxBind = "/propnix=/var/tmp/propnix";
+  # The bind argument to pass to `nix build`. LHS is the in-sandbox path; RHS is the host store dir.
+  sandboxBind = "/propnix=/var/lib/propnix";
 
-  # Render the credentials.toml body. `credentialDir` is a path STRING (an id), not a secret, so producing
-  # this is safe — it copies no token. Write the result to /var/tmp/propnix/credentials.toml yourself.
-  mkCredentialsToml =
-    { credentialDir }:
-    ''
-      # propnix credential pointer — NAMES the directory holding the GOG Galaxy token.
-      # Contains NO secret itself; the token stays in credentialDir, never entering the nix store.
-      credentialDir = "${credentialDir}"
-    '';
+  # Render the credentials.toml body. `credentialDir` is the in-sandbox credential root (a path STRING, an
+  # id — not a secret), so producing this is safe. `propnix cred` writes this automatically; this helper is
+  # for a manual/declarative setup.
+  mkCredentialsToml = ''
+    # propnix credential pointer — NAMES the in-sandbox credential root (bound at /propnix).
+    # Contains NO secret; tokens live under <root>/<type>/<username>/ and never enter the nix store.
+    credentialDir = "/propnix"
+  '';
 }

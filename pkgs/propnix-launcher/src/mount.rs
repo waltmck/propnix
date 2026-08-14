@@ -40,7 +40,8 @@ pub fn make_view(appid: &str) -> io::Result<PathBuf> {
 // A resolved table entry (LITERAL paths only). This is `propnix_mount::Entry` — the SAME type the linked
 // mount code consumes (no JSON, no serialization): `resolve_table` builds a `Vec<Entry>` and hands it
 // straight to `propnix_mount::enter_and_mount` via the mount child's `pre_exec` closure. For an Overlay,
-// `upper = None` means EPHEMERAL (a fresh per-launch tmpfs for the upper+work); a set `upper` is persistent.
+// `upper = None` means EPHEMERAL (a fresh per-launch tmpfs for the upper+work); a set `upper` is persistent;
+// `readOnly` overrides both — a lowerdir-only union (no upper at all), used to merge a base game with DLC.
 use propnix_mount::Entry;
 
 /// Probe in a throwaway child (unshare mutates the caller): can we create a user namespace at all?
@@ -151,14 +152,20 @@ pub fn resolve_table(cfg: &Config, settings: &Settings, paths: &Paths) -> io::Re
                 lower,
                 upper,
                 skeleton,
+                read_only,
             } => {
                 let lower = crate::util::expand_env(lower);
-                let upper = match upper {
-                    None => None, // ephemeral — propnix-mount mounts a fresh per-launch tmpfs
-                    Some(u) => {
-                        let u = crate::util::expand_env(u);
-                        ensure_writable(target, &u, m.create_if_not_exist)?; // an overlay upper is a dir
-                        Some(u)
+                // A read-only overlay has NO upper (lowerdir-only); never touch/create one even if given.
+                let upper = if *read_only {
+                    None
+                } else {
+                    match upper {
+                        None => None, // ephemeral — propnix-mount mounts a fresh per-launch tmpfs
+                        Some(u) => {
+                            let u = crate::util::expand_env(u);
+                            ensure_writable(target, &u, m.create_if_not_exist)?; // an overlay upper is a dir
+                            Some(u)
+                        }
                     }
                 };
                 // The skeleton is a baked store path (a tar); expand_env is a harmless no-op on it.
@@ -168,6 +175,7 @@ pub fn resolve_table(cfg: &Config, settings: &Settings, paths: &Paths) -> io::Re
                     lower,
                     upper,
                     skeleton,
+                    ro: *read_only,
                 }
             }
         };

@@ -79,11 +79,70 @@ runCommand "wine-prefix-lower"
       # aarch64 ONLY: drop the FEX emulator DLLs into system32 and register them as the WoW64 backends:
       #   amd64 = x86_64 guests via ARM64EC (FEX);  x86 = i386 guests (FEX).
       # On an x86_64 host this whole step is skipped — wine's native WoW64 runs i386, and x86_64 is native.
+      #
+      # PLUS wowbox64.dll (box64's WoW64 i386 backend). CRITICAL for 32-bit (i386) Windows apps: Hangover's
+      # wow64.dll loads the x86 CPU emulator by the HARDCODED name "wowbox64.dll" (a UTF-16 literal in
+      # wow64.dll — it does NOT read the `Wow64\x86` registry value below), so an i386 guest aborts at
+      # startup with `err:wow:load_64bit_module failed to load dll c0000135` (STATUS_DLL_NOT_FOUND) if it is
+      # absent. Homeworld Remastered (and its HW1/HW2 Classic exes) are i386, the first 32-bit title in the
+      # suite — every prior game is x86_64 (ARM64EC), which never needed this. box64's wowbox64 is Hangover's
+      # DEFAULT i386 emulator; FEX's libwow64fex.dll is the alternative (would work renamed to wowbox64.dll).
       cp -f "${toString fexdlls}/libarm64ecfex.dll" "${toString fexdlls}/libwow64fex.dll" \
+        "${toString fexdlls}/wowbox64.dll" \
         "$WINEPREFIX/drive_c/windows/system32/"
       wine reg add 'HKLM\Software\Microsoft\Wow64\amd64' /ve /d libarm64ecfex.dll /f
-      wine reg add 'HKLM\Software\Microsoft\Wow64\x86'   /ve /d libwow64fex.dll   /f
+      wine reg add 'HKLM\Software\Microsoft\Wow64\x86'   /ve /d wowbox64.dll      /f
     ''}
+
+    # Populate syswow64 with the i386 (32-bit) builtin modules. `wineboot -u` on this WoW64 build copies the
+    # 64-bit/ARM64EC builtins into system32 but leaves syswow64 EMPTY (verified: 0 files), so a 32-bit (i386)
+    # guest process dies at startup — `wine: could not load kernel32.dll, status c0000135` — because the
+    # loader finds no i386 kernel32/user32/… in the prefix. wine ships every i386 module in
+    # ${wine}/lib/wine/i386-windows; symlink the WHOLE set into syswow64 (only where wineboot created nothing,
+    # so any fake it did write wins). Symlink EVERY module type, not just `*.dll`: the graphics DRIVERS are
+    # `.drv` files (winex11.drv / winewayland.drv), and without them a 32-bit GUI process fails to bind a
+    # display driver → `err:winediag:nodrv_CreateWindow ... The explorer process failed to start` and the game
+    # aborts windowless. (Also brings the i386 .cpl/.exe/.acm/.ocx/.tlb/.drv16 — the full companion set.)
+    # Symlinks resolve inside the launcher's private mount ns (the /nix store stays visible) and point at a
+    # fixed store path → still bit-reproducible. Needed by every 32-bit title (Homeworld RM is the first); on
+    # x86_64 the same i386 tree feeds native WoW64. Symmetric with the 64-bit system32 wineboot populates.
+    for _mod in ${wine}/lib/wine/i386-windows/*; do
+      case "$_mod" in *.a) continue ;; esac   # .a = build-time import libs, never loaded at runtime
+      _t="$WINEPREFIX/drive_c/windows/syswow64/$(basename "$_mod")"
+      [ -e "$_t" ] || ln -s "$_mod" "$_t"
+    done
+
+    # Generate the x86 (32-bit) WinSxS assembly manifests + dirs from the arm64 ones. Same 64-bit-only gap as
+    # syswow64: `wineboot -u` on this ARM64X hybrid emits SxS manifests ONLY for the arm64 arch (verified:
+    # winsxs/manifests has arm64_* but no x86_*). A 32-bit (i386) process that requests a side-by-side
+    # assembly — e.g. Homeworld's DCWindow.dll pulls in comdlg32/comctl32, whose DllMain calls CreateActCtx
+    # for `Microsoft.Windows.Common-Controls` 6.0 — then FAILS with err 14001 (ERROR_SXS_CANT_GEN_ACTCTX)
+    # because there is no x86_ manifest matching the process arch, and DCWindow.dll's init dereferences the
+    # resulting uninitialised state → EXCEPTION_ACCESS_VIOLATION before the first frame (reproduced on BOTH
+    # box64 and FEX i386 backends). Derive each x86_ variant from the arm64_ one: same manifest with
+    # processorArchitecture="x86" (+ the x86_-prefixed filename SxS matches by arch), plus an x86_ assembly
+    # dir carrying the i386 build of each DLL (from the i386-windows tree). aarch64 only — on x86_64 wineboot
+    # emits the x86_/wow64 manifests itself, so the arm64_ glob is empty here and this is a no-op.
+    sxs="$WINEPREFIX/drive_c/windows/winsxs"
+    if [ -d "$sxs/manifests" ]; then
+      for _m in "$sxs/manifests"/arm64_*.manifest; do
+        [ -e "$_m" ] || continue
+        _x="$sxs/manifests/$(basename "$_m" | sed 's/^arm64_/x86_/')"
+        [ -e "$_x" ] || sed 's/processorArchitecture="arm64"/processorArchitecture="x86"/' "$_m" > "$_x"
+      done
+      for _d in "$sxs"/arm64_*; do
+        [ -d "$_d" ] || continue
+        _xd="$sxs/$(basename "$_d" | sed 's/^arm64_/x86_/')"
+        mkdir -p "$_xd"
+        for _f in "$_d"/*; do
+          [ -e "$_f" ] || continue
+          _fb="$(basename "$_f")"
+          if [ -e "${wine}/lib/wine/i386-windows/$_fb" ] && [ ! -e "$_xd/$_fb" ]; then
+            ln -s "${wine}/lib/wine/i386-windows/$_fb" "$_xd/$_fb"
+          fi
+        done
+      done
+    fi
 
     # Reproducibility (1/2): pin the values wineboot RANDOMIZES, so two builds are byte-identical
     # (nix-store --realise --check). MachineGuid/MachineId are UUIDs seeded from /dev/urandom;

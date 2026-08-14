@@ -12,7 +12,7 @@
 # the compositor-derived PROPNIX_WIDTH/HEIGHT facts + the chosen PROPNIX_QUALITY preset. The game builds the
 # script here with `writeShellScript` (its own toolset + `set -euo pipefail`); makeAppWine just runs the path.
 #
-#   nix run .#skyrim-se --extra-sandbox-paths /propnix=/var/tmp/propnix   # aarch64-linux or x86_64-linux
+#   nix run .#skyrim-se --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64-linux or x86_64-linux
 {
   lib,
   makeAppWine,

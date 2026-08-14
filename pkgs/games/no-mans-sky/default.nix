@@ -5,7 +5,7 @@
 # follows the Hollow Knight template. Payload = the pinned GOG Galaxy build fetched with gogdl (D15),
 # delivered as the game tree directly (no InnoSetup).
 #
-#   nix run .#no-mans-sky --extra-sandbox-paths /propnix=/var/tmp/propnix   # aarch64-linux or x86_64-linux
+#   nix run .#no-mans-sky --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64-linux or x86_64-linux
 {
   lib,
   makeAppWine,
@@ -35,4 +35,14 @@ makeAppWine {
   # freedesktop hicolor theme. The symbolic variant is vendored (CC BY-SA 4.0; see the .svg header).
   iconSymbolic = ./no-mans-sky-symbolic.svg;
   inherit tuning;
+  # Broken on aarch64 (runtime-diagnosed): NMS reaches graphics init — DXVK 2.7.1 inits, picks the Apple M2
+  # (Honeykrisp) Vulkan device, loads its Streamline/XeSS upscaling middleware — then the engine's OWN crash
+  # reporter fires a Win32 dialog and self-aborts with a "GX" crash code. `+seh` proves it is NOT a CPU fault
+  # (no c0000005 / handle_syscall_fault) and NOT the winevulkan swapchain NULL-deref (Skyrim) nor a FEX
+  # CPU-fault (KSP wild-write / Stellaris stack-overflow): a Vulkan/upscaler-capability mismatch against the
+  # Honeykrisp driver in NMS's own engine init. Tested on BOTH winewayland (oversized-window white hang) and
+  # x11 (correctly-sized window → GX self-abort) — neither renders. Needs deeper AAA-engine-specific graphics
+  # work. Native x86_64 (standard Vulkan driver) is unaffected.
+  brokenSystems = [ "aarch64-linux" ];
+  brokenReason = "NMS's own engine crash reporter self-aborts during graphics init on aarch64 (a \"GX\" Vulkan/upscaler-capability crash against the Asahi Honeykrisp driver — not a FEX CPU fault, not the winevulkan swapchain NULL-deref); neither winewayland nor x11 renders. Needs AAA-engine-specific graphics work. Runs on native x86_64.";
 }

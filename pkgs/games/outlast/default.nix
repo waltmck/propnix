@@ -5,7 +5,7 @@
 # follows the Hollow Knight template. Payload = the pinned GOG Galaxy build fetched with gogdl (D15),
 # delivered as the game tree directly (no InnoSetup).
 #
-#   nix run .#outlast --extra-sandbox-paths /propnix=/var/tmp/propnix   # aarch64-linux or x86_64-linux
+#   nix run .#outlast --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64-linux or x86_64-linux
 {
   lib,
   makeAppWine,

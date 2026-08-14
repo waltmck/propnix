@@ -1,0 +1,19 @@
+{
+  "backends": {
+    "gog-galaxy-windows": {
+      "components": {
+        "base": {
+          "productId": "1310178756",
+          "buildId": "58726341037542829",
+          "version": "2.3(gog)-2",
+          "outputHash": "sha256-zr9uC3XGPtGIB572P74hoIj2qB0McQvWVaNHTwcjRp8=",
+          "outputHashMode": "recursive",
+          "os": "windows",
+          "lang": "en",
+          "kind": "game",
+          "generation": 2
+        }
+      }
+    }
+  }
+}

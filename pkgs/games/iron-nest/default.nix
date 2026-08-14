@@ -12,7 +12,7 @@
 # galaxyStubDlls and no extraSystem32 are needed (the modern UCRT/VCRUNTIME140 Unity links against is served
 # by wine's ARM64EC builtins — same as Papers, Please, another IL2CPP title). Behaves on the global defaults.
 #
-#   nix run .#iron-nest --extra-sandbox-paths /propnix=/var/tmp/propnix   # aarch64-linux or x86_64-linux
+#   nix run .#iron-nest --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64-linux or x86_64-linux
 {
   lib,
   makeAppWine,

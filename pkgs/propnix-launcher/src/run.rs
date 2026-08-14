@@ -202,11 +202,27 @@ pub fn run_inside_ns(
     let mut cmd = Command::new(&wine);
     // Baked per-game exe args (cfg.exe_args, e.g. a Unity title's `-screen-fullscreen 1`) come first, then
     // any runtime passthrough (`… -- <args>`) so a user can still add or override on the CLI.
-    cmd.arg(&cfg.exe)
-        .args(&cfg.exe_args)
-        .args(passthrough)
-        // cwd = the game's install dir inside the prefix (C:\game), where propnix-mount bound the payload.
-        .current_dir(paths.view.join(crate::config::GAME_DIR));
+    // cwd + exe. Default (workingDir null): cwd = the game's install dir (C:\game) and the exe is passed as
+    // the bare path relative to it — BYTE-IDENTICAL to the historical launch, so no existing game changes.
+    // With workingDir set: cwd = that subdirectory (for an engine that resolves its data root from the CWD,
+    // not the exe path — e.g. Don't Starve → cwd = C:\game\bin, data at ..\data), and the exe is passed as
+    // its full path within the view (still relative to C:\game) so it resolves regardless of the CWD; wine
+    // maps that view path back onto the C: drive, so the module path stays C:\game\... .
+    let game_dir = paths.view.join(crate::config::GAME_DIR);
+    match &cfg.working_dir {
+        Some(rel) => {
+            cmd.arg(game_dir.join(&cfg.exe))
+                .args(&cfg.exe_args)
+                .args(passthrough)
+                .current_dir(game_dir.join(rel));
+        }
+        None => {
+            cmd.arg(&cfg.exe)
+                .args(&cfg.exe_args)
+                .args(passthrough)
+                .current_dir(&game_dir);
+        }
+    }
     child_env.apply(&mut cmd);
     // Inherit stdio: our stdout/stderr are propnix-mount's, which are the outer launcher's read pipe.
     cmd.process_group(0);

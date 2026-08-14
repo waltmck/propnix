@@ -4,7 +4,7 @@
 # across arches. Payload = the pinned GOG Galaxy build fetched with gogdl (D15), delivered as the game tree
 # directly (no InnoSetup). KSP is a Unity title.
 #
-#   nix run .#kerbal-space-program --extra-sandbox-paths /propnix=/var/tmp/propnix   # aarch64/x86_64
+#   nix run .#kerbal-space-program --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64/x86_64
 {
   lib,
   makeAppWine,

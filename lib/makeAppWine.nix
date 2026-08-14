@@ -32,6 +32,7 @@
   wineDefaults, # a FUNCTION `{ lib, prefixLower, galaxyStub ? null }: config: { … }` (see wine-defaults.nix)
   mkPropnixDesktopItem,
   extractPeIcon,
+  mkAppIcon,
   # Graceful no-op GOG Galaxy SDK stubs. Present on the winefex (aarch64) path; null on x86_64 (native wine),
   # where callPackage falls back to this default because the scope has no `galaxyStub` attr there.
   galaxyStub ? null,
@@ -45,6 +46,11 @@ let
       appid,
   payload, # a derivation (e.g. fetchGogGalaxyBuild result); its store path is the game tree + launch cwd
   exe, # executable relative to payload, e.g. "Hollow Knight.exe"
+  # Optional launch working directory, RELATIVE to the game dir (C:\game = payload). Null (default) → cwd is
+  # the payload root (historical behaviour; unchanged for every existing game). Set it (the goggame.info
+  # `workingDir`) for an engine that resolves its asset/data root from the CWD rather than the exe path and
+  # needs the CWD to be the exe's subdirectory — e.g. Don't Starve (exe "bin/dontstarve.exe", workingDir "bin").
+  workingDir ? null,
   # per-game tuning; layered over wineDefaults — the single home for how the app runs (graphics, mounts,
   # registry, dllOverrides, exeArgs, galaxyStubDlls, extraSystem32, setup/userRegScript, …; see
   # wine-defaults.nix for the full set + defaults). Either an attrset, or a FUNCTION `{ payload }: { … }` (so a
@@ -52,6 +58,12 @@ let
   tuning,
   name ? pname, # human-visible name (desktop entry + splash)
   autoIcon ? true, # extract the app icon from the exe's PE resources into a freedesktop hicolor theme
+  # Optional high-res raster icon SOURCE (a PNG path, usually one shipped in the game's own data — e.g.
+  # Factorio's 1024px `data/core/graphics/factorio.icon/Assets/factorio.png`). When set it REPLACES the exe
+  # extraction as the icon source: `mkAppIcon` autocrops its transparent margins, recentres it on a square
+  # canvas, and emits the same hicolor theme + splash png. Prefer this whenever the exe's PE icon is small
+  # (Factorio's tops out at 48px → visibly pixelated upscaled) or off-centre in its canvas. Null → the exe.
+  iconPng ? null,
   iconSymbolic ? null, # optional monochrome `-symbolic.svg` (currentColor) variant
   # Systems on which this title is known-broken → `meta.broken` on those systems (nix refuses to build it
   # without allowBroken). A list of Nix system strings, e.g. `[ "aarch64-linux" ]` for a game that only runs
@@ -64,6 +76,15 @@ let
   # Each is a `finalConfig: <tuning override>` function, merged LAST (so it wins over the game's own tuning) and
   # resolved against the fixed-point config (so a derived entry recomputes). Empty for a normal build.
   tweaks ? [ ],
+  # DLC framework (reusable across games). `dlc` is the attrset of AVAILABLE DLC packages for this game, each
+  # a derivation whose tree overlays onto the game dir (game-relative paths, e.g. `data/<mod>/…` — typically a
+  # `fetchGogGalaxyBuild` with `dlcId` set). The base package ships NO DLC; `passthru.withDlc`/`withAllDlc`
+  # produce variants with DLC enabled (see below). `enabledDlc` is the INTERNAL selection those helpers set —
+  # not meant to be passed directly; enabling it flips the game mount from a read-only bind of `payload` to a
+  # read-only multi-lower OVERLAY (`lowerdir = payload:dlc1:dlc2`), so overlayfs MERGES the trees at mount time
+  # (the game dir gains the DLC's files) with NO store duplication of the (large) base payload.
+  dlc ? { },
+  enabledDlc ? [ ],
   }@gargs:
     let
       # Resolve the per-game tuning (call it with `payload` if it's a function; see the arg doc), layer it over
@@ -159,13 +180,31 @@ let
 
   # The game is installed at C:\game (drive_c/game) in the prefix — the payload bound in read-only there,
   # and the launch cwd. A game that must WRITE inside its own dir (KSP) overrides this row to an overlay in
-  # its tuning. Default: a read-only bind of the raw FOD.
+  # its tuning. Default (no DLC): a read-only bind of the raw FOD. With DLC enabled (`enabledDlc` non-empty,
+  # set by `withDlc`/`withAllDlc`): a read-only multi-lower OVERLAY that unions the base payload with each DLC
+  # tree at mount time — the game dir gains the DLC's `data/<mod>/…` files with NO store copy of the base
+  # payload. `readOnly = true` makes it a lowerdir-only overlay (base + DLCs all as lowers, NO upper) so the
+  # union is strictly read-only, matching the base bind's `mode = "ro"` (not an ephemeral writable upper).
+  # `skeleton = null`: a read-only lowerdir-only overlay never copies up, so it needs no CoW-from-store
+  # metadata skeleton (and a multi-path `lower` isn't a single store tree to skeletonise anyway).
   gameMount = {
-    "drive_c/game" = {
-      type = "mount";
-      source = "${payload}";
-      mode = "ro";
-    };
+    "drive_c/game" =
+      if enabledDlc == [ ] then
+        {
+          type = "mount";
+          source = "${payload}";
+          mode = "ro";
+        }
+      else
+        {
+          type = "overlay";
+          # DLCs FIRST, base payload LAST: overlayfs gives the leftmost lower priority, so a DLC that MODIFIES
+          # a base file (e.g. GOG ships Factorio: Space Age with its own factorio.exe + reworked base data)
+          # wins over the base's version, and the base fills in everything the DLC doesn't ship.
+          lower = lib.concatStringsSep ":" (map (d: "${d}") enabledDlc ++ [ "${payload}" ]);
+          skeleton = null;
+          readOnly = true;
+        };
   };
 
   # Every store-backed `overlay` row gets a data-only skeleton built from its OWN `lower` by DEFAULT — so a
@@ -198,7 +237,15 @@ let
   # Icon: extract the exe's PE icon into a freedesktop hicolor theme (all sizes → share/icons/…), found
   # natively via $XDG_DATA_DIRS once installed. `${iconTree}/icon.png` (largest size) feeds the splash.
   iconName = "org.propnix.${appid}";
-  iconTree = if autoIcon then extractPeIcon { inherit payload exe iconName; } else null;
+  # A high-res raster source (`iconPng`) wins over the exe's PE resources; else extract from the exe if
+  # `autoIcon`; else no icon. Both produce the same layout (hicolor theme + share/propnix/<id>.png splash).
+  iconTree =
+    if iconPng != null then
+      mkAppIcon { src = iconPng; inherit iconName; }
+    else if autoIcon then
+      extractPeIcon { inherit payload exe iconName; }
+    else
+      null;
   splashIcon = if iconTree != null then "${iconTree}/share/propnix/${iconName}.png" else null;
 
   # Informational: which emulation the scope wired for this host (aarch64 = wine+FEX/ARM64EC, x86_64 =
@@ -245,6 +292,9 @@ let
     builtins.toJSON {
       schema = 1;
       inherit appid name exe backend;
+      # Launch cwd relative to C:\game (null → the payload root); see the `workingDir` arg. toJSON drops a
+      # null field, and config.rs defaults `working_dir` to None, so existing games are unaffected.
+      workingDir = workingDir;
       exeArgs = flat.exeArgs;
       icon = splashIcon; # largest extracted PE icon (for the splash), or null
       payload = "${payload}"; # the raw FOD game tree; the launch cwd (galaxy DLLs are stubbed via mount rows)
@@ -330,6 +380,14 @@ symlinkJoin {
     # appended to the tweak stack and re-evaluated, so it WINS over the game's own tuning AND propagates to any
     # derived entry:  hollow-knight.overrideTweaks (old: { graphics = { value = "x11"; reason = "…"; }; })
     overrideTweaks = f: makeApp (gargs // { tweaks = (gargs.tweaks or [ ]) ++ [ f ]; });
+    # DLC selection (see the `dlc`/`enabledDlc` args). `dlc` re-exposes the game's available-DLC attrset so a
+    # caller can pick by name. `withDlc` takes a SELECTOR `dlc: [ <chosen> ]` (e.g.
+    # `factorio.withDlc (dlc: with dlc; [ space-age ])`) and returns a variant with just those enabled;
+    # `withAllDlc` enables every declared DLC. Both re-invoke makeApp with `enabledDlc` set, which turns the
+    # game mount into the merged read-only overlay (no base-payload duplication in the store).
+    inherit dlc;
+    withDlc = select: makeApp (gargs // { enabledDlc = select dlc; });
+    withAllDlc = makeApp (gargs // { enabledDlc = builtins.attrValues dlc; });
   };
   meta = {
     description = "${name} — propnix wine app (${backend})";

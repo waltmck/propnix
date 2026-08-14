@@ -4,7 +4,7 @@
 # arches. Payload = the pinned GOG Galaxy build fetched with gogdl (D15), delivered as the game tree
 # directly (no InnoSetup). Stellaris is a Paradox grand-strategy title on the Clausewitz engine (D3D11/D3D9).
 #
-#   nix run .#stellaris --extra-sandbox-paths /propnix=/var/tmp/propnix   # aarch64-linux or x86_64-linux
+#   nix run .#stellaris --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64-linux or x86_64-linux
 {
   lib,
   makeAppWine,

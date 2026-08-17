@@ -7,6 +7,9 @@
 {
   lib,
   rustPlatform,
+  makeWrapper,
+  depotdownloader,
+  gnutar,
 }:
 rustPlatform.buildRustPackage {
   pname = "propnix-cli";
@@ -20,6 +23,16 @@ rustPlatform.buildRustPackage {
   cargoLock.lockFile = ./Cargo.lock;
 
   doCheck = true; # the only test is the pure `extract_code` unit test — cheap, no network
+
+  nativeBuildInputs = [ makeWrapper ];
+  # `propnix cred add steam` drives DepotDownloader (the interactive Steam Guard login) and `tar` (to capture
+  # its account.config). PIN DepotDownloader — this MUST be the SAME package `fetchSteamDepot` uses, so the
+  # .NET isolated-storage path where account.config lands is identical at `cred add` and at fetch time.
+  # (`xdg-open`/`sudo`/`install`/`rm` stay unpinned host tools — see the header of the GOG login path.)
+  postInstall = ''
+    wrapProgram $out/bin/propnix \
+      --prefix PATH : ${lib.makeBinPath [ depotdownloader gnutar ]}
+  '';
 
   meta.description = "propnix CLI: credential management (propnix cred …) for the credentialed game fetchers";
   meta.mainProgram = "propnix";

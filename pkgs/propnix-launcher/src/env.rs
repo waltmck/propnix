@@ -30,10 +30,12 @@ impl ChildEnv {
         let mut set: Vec<(String, String)> = Vec::new();
         let mut push = |k: &str, v: String| set.push((k.to_string(), v));
 
-        // The baked "meant" vars (USER/LOGNAME + any per-game extras). WINEDEBUG is recomputed below.
+        // The baked "meant" vars (USER/LOGNAME + any per-game extras), each value `$VAR`-expanded — so a
+        // config env value means the same on both backends (thin.rs expands its `env` values identically).
+        // WINEDEBUG is recomputed below.
         for (k, v) in &cfg.seal.set_env {
             if k != "WINEDEBUG" {
-                push(k, v.clone());
+                push(k, crate::util::expand_env(v));
             }
         }
 
@@ -140,6 +142,12 @@ impl ChildEnv {
                 }
             }
         }
+        // NOTE: a wined3d / OpenGL wine title gets NO MangoHud overlay (only the console `+fps`, above). The
+        // MangoHud OpenGL SHIM loads into the wine process fine (libMangoHud_opengl.so maps, the GL context is
+        // detected), but it never measures a frame: wine's winewayland presents via dmabuf/gbm, not a
+        // hookable `eglSwapBuffers`, so there is no swap for MangoHud to count. (The box64 THIN path DOES get
+        // the shim overlay — an SDL/GL game calls a real `eglSwapBuffers` that box64's built-in shim
+        // special-case routes through MangoHud. See thin.rs.)
 
         ChildEnv { unset, set }
     }

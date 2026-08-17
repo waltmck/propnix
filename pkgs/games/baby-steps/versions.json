@@ -1,8 +1,9 @@
 {
-  "backends": {
-    "gog-galaxy-windows": {
-      "components": {
-        "base": {
+  "fetchInfo": {
+    "gog": {
+      "x86_64-windows": [
+        {
+          "pname": "baby-steps-win",
           "productId": "1103818610",
           "buildId": "59494052613282825",
           "version": "12.12.2025 13-57-40 GOG v1",
@@ -13,7 +14,7 @@
           "kind": "game",
           "generation": 2
         }
-      }
+      ]
     }
   }
 }

@@ -1,8 +1,9 @@
 {
-  "backends": {
-    "gog-galaxy-windows": {
-      "components": {
-        "base": {
+  "fetchInfo": {
+    "gog": {
+      "i386-windows": [
+        {
+          "pname": "homeworld-rm-win",
           "productId": "2114871440",
           "buildId": "50952992223865488",
           "version": "2.1",
@@ -13,7 +14,7 @@
           "kind": "game",
           "generation": 2
         }
-      }
+      ]
     }
   }
 }

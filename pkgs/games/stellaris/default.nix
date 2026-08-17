@@ -1,58 +1,98 @@
-# Stellaris (GOG, Windows build) via wine — on aarch64 through FEX + native ARM64EC DXVK, on x86_64
-# natively. ARCH-AGNOSTIC: this spec is identical on both hosts; makeAppWine + the scope pick the
-# arch-appropriate emulator set, and the SAME Windows payload (a content-addressed FOD) is shared across
-# arches. Payload = the pinned GOG Galaxy build fetched with gogdl (D15), delivered as the game tree
-# directly (no InnoSetup). Stellaris is a Paradox grand-strategy title on the Clausewitz engine (D3D11/D3D9).
+# Stellaris (Steam, x86_64 LINUX build) via the THIN launcher path — on aarch64 through box64, on x86_64
+# natively. Stellaris is a Paradox grand-strategy title on the Clausewitz engine (statically-linked SDL2,
+# PhysFS asset VFS, no Mono).
+#
+# WHY box64 + the Linux build (not wine + the Windows build): the Windows/Clausewitz build hangs under
+# FEX/ARM64EC — a worker thread overflows its stack during early init and wine can't dispatch the overflow
+# (a genuine guest overflow the ARM64EC transition overhead inflates; enlarging the reserve doesn't help, it
+# just gets consumed — proven). The native Linux ELF sidesteps ARM64EC entirely: box64 runs the x86_64 code
+# with the NATIVE aarch64 SDL/GL/Vulkan stack bridged in, which is playable on this host.
+#
+# WHY Steam (not GOG): GOG's Linux offline installer exposes ONLY the current version (no version pin — an
+# FOD that breaks on every store update), whereas Steam pins content by (appId, depotId, manifestId),
+# retained forever → a permanently-reproducible FOD. See lib/fetchers/fetchSteamDepot.nix. Requires a Steam
+# account: `propnix cred add steam`.
+#
+# Steam-only, Linux-only: the fetch matrix has exactly that pair, and any other selection is a legible
+# mkApp error. `stellaris.apply { backend = "fex"; }` reruns the same build under FEX (broken on 16K
+# aarch64; carried for x86_64 / future).
 #
 #   nix run .#stellaris --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64-linux or x86_64-linux
 {
   lib,
-  makeAppWine,
-  fetchGogGalaxyBuild,
+  mkApp,
 }:
-let
-  pins = (lib.importJSON ./versions.json).backends.gog-galaxy-windows;
-  tuning = (import ./tuning.nix) // {
-    # Stellaris (like Prison Architect) STATICALLY imports GOG's Galaxy SDK from the exe's own directory
-    # (stellaris.exe → Galaxy64.dll, verified in the PE import table); the SDK's offline RPC init faults wine's
-    # builtin rpcrt4 before the first frame. Because it's a static import in the app dir, wine's loader resolves
-    # it there first (a system32/WINEDLLOVERRIDES stub can't shadow it), so bind a graceful no-op stub over it
-    # via a mount row (aarch64 only; on x86_64 native wine it's omitted). Only Galaxy64.dll is imported here —
-    # no Galaxy.dll / pops_api.dll in this build. (nakama-cpp.dll, also a static import, is Paradox's on-demand
-    # multiplayer client with no offline-RPC init, so it needs no stub. PDXSDK.dll's MSVCP140/VCRUNTIME140/UCRT
-    # imports resolve to wine's builtins, which — unlike Outlast's VC10 msvcp100 — work under FEX, so no
-    # extraSystem32 is needed.)
-    galaxyStubDlls = [ "Galaxy64.dll" ];
-  };
-in
-makeAppWine {
-  pname = "stellaris";
-  appid = "stellaris";
-  name = "Stellaris";
-  # gogdl takes the NUMERIC productId (not the slug); pins verified reproducible (fetchGogGalaxyBuild hdr).
-  payload = fetchGogGalaxyBuild (pins.components.base // { pname = "stellaris-win"; });
-  # Launch the actual game binary DIRECTLY, NOT the goggame.info isPrimary FileTask "dowser.exe" — dowser is
-  # Paradox's launcher-bootstrapper (it locates/installs the Paradox launcher, which then spawns the game and
-  # exits; a launcher-that-exits trips the propnix launcher's primary-child teardown, like Outlast's
-  # OutlastLauncher / KSP's Launcher.exe). stellaris.exe is the 46 MB x86_64 Clausewitz game binary (imports
-  # PDXSDK.dll + d3d11/dxgi/d3d9 → DXVK). Content is resolved relative to the game root (= C:\game = payload),
-  # so cwd = payload root is correct.
-  exe = "stellaris.exe";
-  inherit tuning;
-  # Broken on aarch64 (runtime-diagnosed): startup gets DEEP into engine init — the Galaxy64 stub works,
-  # PDXSDK/nakama load and their MSVCP140/VCRUNTIME140/UCRT/CONCRT140 imports resolve to wine builtins with
-  # no loader_init failures, and d3d11/dxgi/d3d9/opengl32 all map — then, BEFORE the first window, a Clausewitz
-  # worker thread the game creates with an explicit ~1 MB stack (dwStackSize; the exe's main-thread reserve is
-  # 4 MB) OVERFLOWS its stack under FEX: the per-call ARM64EC-transition overhead inflates guest stack use past
-  # the native x86_64 need (~1.07 MB used vs the ~1.03 MB the emulated+guard-patched stack gives — a ~40 KB
-  # overrun). The guest calls abort(), which wine can't dispatch (its SEH frame is below the thread's stack
-  # limits), wedging the thread while it holds a game critical section → the ntdll loader lock deadlocks and the
-  # whole process HANGS (deterministic). DISTINCT from KSP's FEX-codegen crash (FEX raises no fault of its own
-  # here — it's a genuine guest stack overflow). Same failure CLASS the wine stack-guard-headroom patch
-  # (emulators/wine-hangover/patches/0001) mitigates, but this tightly-sized worker needs more; there is NO
-  # per-game knob to enlarge a thread the game sizes itself, so the only fix is a larger wine thread-stack
-  # reserve at the emulator layer (affects all titles → needs suite-wide re-validation). Native x86_64 (no FEX)
-  # is unaffected.
-  brokenSystems = [ "aarch64-linux" ];
-  brokenReason = "FEX stack pressure overflows a Clausewitz engine worker thread's ~1MB stack during early init (before any window) → guest abort() wine can't dispatch → loader-lock deadlock/hang. No per-game thread-stack knob; needs a larger wine thread-stack reserve at the emulator layer. Runs on native x86_64.";
-}
+mkApp (
+  { config, ... }:
+  {
+    pname = "stellaris";
+    appid = "stellaris";
+    name = "Stellaris";
+
+    # The Linux binaries depot (281994: the `stellaris` ELF + $ORIGIN-linked libPDXSDK/libnakama-cpp) and
+    # the shared data depot (281991), UNIONED READ-ONLY by overlayfs at launch — no build-time merge, no
+    # store copy. Binaries FIRST so it wins any overlap with data (arg-set order = overlay priority).
+    fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
+
+    # The game's own executable icon (a spaceship over a planet, no text), autocropped + recentred into the
+    # hicolor theme + splash. It's the low-res 48px `exe_icon.bmp` (the only text-free square icon the
+    # depot ships; the OST cover carries an "Original Soundtrack" subtitle, game-logo is a wide banner), so
+    # it's a touch soft upscaled, but it's the correct icon. It lives in the DATA depot = the 2nd payload.
+    icon.png = "${lib.elemAt config.payloads 1}/gfx/exe_icon.bmp";
+
+    # Run the game binary DIRECTLY, bypassing start.sh → dowser → the Electron Paradox launcher (an entire
+    # Chromium stack that need not survive emulation). launcher-settings.json records what the launcher
+    # would exec: `"exePath": "./stellaris", "exeArgs": [ "-gdpr-compliant" ]` — so we run exactly that.
+    # Clausewitz resolves its game root from the cwd (= the payload tree), so workingDir stays null.
+    exe = "stellaris";
+    exeArgs = [ "-gdpr-compliant" ];
+
+    # The library UNION (PLAN2 §7), derived from the payload: `stellaris` links libX11/libGL/libstdc++/
+    # libgcc_s (+ its two $ORIGIN libs) and carries a statically-linked SDL2 whose dlopen table adds the
+    # audio/wayland/x11/vulkan/egl sonames. bridgingLibs = what box64 WRAPS (needed native aarch64 to
+    # bridge AND x86_64 for the guest); guestLibs = guest-only (glibc, libstdc++). zlib is in BOTH: box64
+    # wants the native copy (else "Error initializing native libz.so.1"), and libPDXSDK links it as a
+    # guest — the union rule in one soname.
+    box64 = {
+      bridgingLibs =
+        p: with p; [
+          libgcc
+          libx11
+          libxext
+          libxcursor
+          libxrandr
+          libxi
+          libxfixes
+          libxscrnsaver
+          libGL
+          libglvnd
+          vulkan-loader
+          libxkbcommon
+          wayland
+          dbus.lib
+          libpulseaudio
+          alsa-lib
+          libxcb # libX11-xcb.so.1 links against it; listed so resolution doesn't depend on RUNPATH
+          zlib
+        ];
+      guestLibs =
+        p: with p; [
+          glibc
+          stdenv.cc.cc.lib
+          zlib
+        ];
+    };
+
+    # State lives outside the store (PLAN2 §7.2): Clausewitz derives it from launcher-settings.json's
+    # "$LINUX_DATA_HOME/Paradox Interactive/Stellaris" (= XDG_DATA_HOME). The THIN launcher points $HOME
+    # (and thus the default XDG roots) at an ephemeral per-launch view, then binds the persistent propnix
+    # save dir onto the exact path the game writes — so saves/settings/mods/dlc_load.json persist while the
+    # game tree stays read-only. Mirrors the wine path's PROPNIX_SAVE_DIR/<appid> semantics.
+    saveBinds = [
+      {
+        src = "$PROPNIX_SAVE_DIR/$PROPNIX_APPID";
+        dst = ".local/share/Paradox Interactive/Stellaris";
+      }
+    ];
+  }
+)

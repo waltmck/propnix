@@ -105,7 +105,7 @@
   # "Owned dlcs []" and download NOTHING *before ever checking ownership*. `--with-dlcs` opens the gate;
   # `--dlcs <id>` then filters the owned set down to just this DLC. The result is the DLC's
   # overlay tree — game-relative paths (e.g. `data/<mod>/…`), no base-game exe — consumed by a game's `dlc`
-  # set + makeAppWine's runtime overlay (`withDlc`). null → the normal base-game fetch. The DLC rides the same
+  # set + mkWineApp's runtime overlay (`withDlc`). null → the normal base-game fetch. The DLC rides the same
   # base `buildId`/`productId` (GOG bundles DLC depots into the base build), so pin those + this `dlcId`.
   dlcId ? null,
 }:
@@ -134,7 +134,15 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}-${version}")
     preferLocalBuild = true;
 
     # Passed into the builder env (buildId/productId/os/lang steer gogdl; the rest are provenance).
-    inherit productId buildId version os lang kind generation;
+    inherit
+      productId
+      buildId
+      version
+      os
+      lang
+      kind
+      generation
+      ;
     platform = os; # gogdl's flag name for `os`
   }
   ''
@@ -149,31 +157,17 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}-${version}")
       cp -a "$dropbase/$buildId"/. "$out/"
     else
       # ── Rung-2: gogdl download ────────────────────────────────────────────────────────────────────
-      if [ ! -r /propnix/credentials.toml ]; then
-        echo "propnix: no credentials at /propnix/credentials.toml" >&2
-        echo "  Add a GOG account:  propnix cred add gog   (populates /var/lib/propnix)" >&2
-        echo "  and enable the sandbox bind (services.propnix.enable, or" >&2
-        echo "  --extra-sandbox-paths /propnix=/var/lib/propnix)." >&2
-        echo "  (Or stage a drop at \$PROPNIX_DROP_DIR/$buildId to fetch offline.)" >&2
-        exit 1
-      fi
-      # credentialDir is a filesystem path (the in-sandbox credential root, normally /propnix), not a secret.
-      creddir=$(grep -oP 'credentialDir\s*=\s*"\K[^"]+' /propnix/credentials.toml)
+      # Shared credential prologue (credentials.toml check, creddir extraction, account glob): cred-lib.sh.
+      source ${../cred-lib.sh}
+      propnix_require_credentials gog \
+        "  (Or stage a drop at \$PROPNIX_DROP_DIR/$buildId to fetch offline.)"
+      creddir=$(propnix_creddir)
 
       # Collect every GOG account token the store offers. The `propnix cred` CLI writes the multi-account
       # layout <root>/gog/<username>/galaxy_tokens.json; the second glob keeps backward-compat with the older
-      # single-file model (credentialDir naming the dir that directly holds galaxy_tokens.json). Non-matching
-      # globs expand to their literal pattern, which the `-r` test drops. Token PATHS/usernames are never
-      # printed (nor the token contents).
-      tokens=()
-      for _t in "$creddir"/gog/*/galaxy_tokens.json "$creddir"/galaxy_tokens.json; do
-        [ -r "$_t" ] && tokens+=("$_t")
-      done
-      if [ "''${#tokens[@]}" -eq 0 ]; then
-        echo "propnix: no GOG account tokens found under the credential store" >&2
-        echo "  Add one with:  propnix cred add gog" >&2
-        exit 1
-      fi
+      # single-file model (credentialDir naming the dir that directly holds galaxy_tokens.json). Token
+      # PATHS/usernames are never printed (nor the token contents).
+      propnix_account_files gog "$creddir"/gog/*/galaxy_tokens.json "$creddir"/galaxy_tokens.json
 
       export HOME="$TMPDIR/home"
       export GOGDL_CONFIG_PATH="$TMPDIR/gogdl-cfg"   # -> manifest cache lands OUTSIDE the game tree
@@ -185,7 +179,7 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}-${version}")
       # fails at manifest resolution (before any bulk download) and we fall through to the next. The output is
       # content-addressed, so WHICH account fetched it never affects the hash.
       fetched=0
-      for _tok in "''${tokens[@]}"; do
+      for _tok in "''${PROPNIX_ACCOUNT_FILES[@]}"; do
         rm -rf "$TMPDIR/dl"; mkdir -p "$TMPDIR/dl"
         # Build gogdl's auth-config by a PURE file->file transform (no token value ever reaches stdout):
         #   * key it by GOG's Galaxy client id (gogdl's CLIENT_ID) so gogdl finds the tokens
@@ -213,10 +207,14 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}-${version}")
           fetched=1
           break
         fi
-        echo "propnix: this account could not fetch ${if dlcId != null then "DLC ${dlcId} of " else ""}build $buildId; trying the next configured account" >&2
+        echo "propnix: this account could not fetch ${
+          if dlcId != null then "DLC ${dlcId} of " else ""
+        }build $buildId; trying the next configured account" >&2
       done
       if [ "$fetched" -ne 1 ]; then
-        echo "propnix: no configured GOG account could fetch ${if dlcId != null then "DLC ${dlcId} of " else ""}build $buildId of product $productId" >&2
+        echo "propnix: no configured GOG account could fetch ${
+          if dlcId != null then "DLC ${dlcId} of " else ""
+        }build $buildId of product $productId" >&2
         echo "  (none owns it, all tokens are expired/invalid, or the pinned buildId is stale)." >&2
         exit 1
       fi

@@ -1,8 +1,9 @@
 {
-  "backends": {
-    "gog-galaxy-windows": {
-      "components": {
-        "base": {
+  "fetchInfo": {
+    "gog": {
+      "x86_64-windows": [
+        {
+          "pname": "factorio-win",
           "productId": "1238653230",
           "buildId": "59928886516479116",
           "version": "2.1.14",
@@ -12,20 +13,23 @@
           "lang": "en",
           "kind": "game",
           "generation": 2
-        },
-        "space-age": {
-          "productId": "1238653230",
-          "buildId": "59928886516479116",
-          "version": "2.1.14",
-          "dlcId": "1831417704",
-          "outputHash": "sha256-cONGL99TkivYumfG+EwmWiUP4trOSTiCTZJ8FHLQJeU=",
-          "outputHashMode": "recursive",
-          "os": "windows",
-          "lang": "en",
-          "kind": "dlc",
-          "generation": 2
         }
-      }
+      ]
+    }
+  },
+  "dlc": {
+    "space-age": {
+      "pname": "factorio-space-age-win",
+      "productId": "1238653230",
+      "buildId": "59928886516479116",
+      "version": "2.1.14",
+      "dlcId": "1831417704",
+      "outputHash": "sha256-cONGL99TkivYumfG+EwmWiUP4trOSTiCTZJ8FHLQJeU=",
+      "outputHashMode": "recursive",
+      "os": "windows",
+      "lang": "en",
+      "kind": "dlc",
+      "generation": 2
     }
   }
 }

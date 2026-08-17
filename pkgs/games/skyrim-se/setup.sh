@@ -1,12 +1,16 @@
 # Skyrim SE prefix setup — run by propnix-launcher (the `setupScript` tuning field) in the OUTER phase, BEFORE
 # wine. Seeds SkyrimPrefs.ini's display settings (we launch SkyrimSE.exe directly, bypassing
 # SkyrimSELauncher.exe, which is the only thing that normally writes them) + an optional graphics quality
-# preset. Failure aborts the launch (the wrapper in default.nix supplies `set -euo pipefail`), because a
+# preset. Failure aborts the launch (the mkSetupScript wrapper supplies `set -euo pipefail`), because a
 # half-written prefs is worse than a clear error.
+#
+# `ini_set` comes from the shared ini-lib.sh (mkSetupScript withIniLib) at its defaults — SkyrimPrefs.ini is
+# plain-LF `key=value` with no commented assignments, so no INI_* knob is set.
 #
 # Env provided by the launcher:
 #   PROPNIX_SAVE_DIR, PROPNIX_APPID  — host save dir = $PROPNIX_SAVE_DIR/$PROPNIX_APPID (bound into the prefix
-#                                      at Documents\My Games\Skyrim Special Edition GOG; see tuning.nix)
+#                                      at Documents\My Games\Skyrim Special Edition GOG; the saveBinds row in
+#                                      default.nix)
 #   PROPNIX_WIDTH, PROPNIX_HEIGHT    — the compositor's primary-output mode, physical px (may be unset if the
 #                                      launcher couldn't read the display — then iSize is left as-is)
 #   PROPNIX_QUALITY                  — low|medium|high|ultra|default (validated by the launcher; may be unset)
@@ -15,33 +19,6 @@
 prefs="$PROPNIX_SAVE_DIR/$PROPNIX_APPID/SkyrimPrefs.ini"
 mkdir -p "$(dirname "$prefs")"
 [ -e "$prefs" ] || : > "$prefs"
-
-# ini_set FILE SECTION KEY VALUE — set [SECTION] KEY=VALUE, preserving every other line: replace the key's
-# value in place if present, add the key within the section if the section exists, or append the whole
-# section at EOF if it doesn't. Section + key match case-insensitively (INI convention).
-ini_set() {
-  local f="$1" sec="$2" key="$3" val="$4" tmp
-  tmp="$(mktemp)"
-  awk -v sec="$sec" -v key="$key" -v val="$val" '
-    function flush() { if (insec && !done) { print key "=" val; done = 1 } }
-    BEGIN { insec = 0; done = 0; seen = 0 }
-    /^[ \t]*\[/ {
-      flush()
-      h = $0; gsub(/^[ \t]*\[|\][ \t]*$/, "", h)
-      insec = (tolower(h) == tolower(sec)); if (insec) seen = 1
-      print; next
-    }
-    {
-      if (insec && !done) {
-        k = $0; sub(/=.*/, "", k); gsub(/^[ \t]+|[ \t]+$/, "", k)
-        if (tolower(k) == tolower(key)) { print key "=" val; done = 1; next }
-      }
-      print
-    }
-    END { flush(); if (!seen) { print ""; print "[" sec "]"; print key "=" val } }
-  ' "$f" > "$tmp"
-  mv "$tmp" "$f"
-}
 
 # Quality preset: low/medium/high/ultra → merge the shipped preset (Skyrim's own Low/Medium/High/Ultra.ini,
 # what SkyrimSELauncher.exe's auto-detect would apply); default or unset → leave the engine baseline. The

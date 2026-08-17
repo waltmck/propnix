@@ -107,6 +107,41 @@ pub enum Entry {
         /// writable tmpfs upper — here there is no upper, so writes are rejected rather than discarded.
         ro: bool,
     },
+    /// ERASE a single file from whatever mount/overlay is `target`'s parent — the merged view no longer has it
+    /// (true absence, not an empty file). Realized by overlaying `target`'s PARENT DIR in place with a fresh
+    /// tmpfs upper holding a char-device 0,0 whiteout for `target`'s basename, so the parent's other entries
+    /// pass through unchanged. Kernel-agnostic (the classic overlay whiteout) and unprivileged (mknod of a 0,0
+    /// char device on a ns-private tmpfs needs only in-userns CAP_MKNOD). Use to neutralize a bundled file at
+    /// runtime with NO store copy — e.g. a Steam game's `libsteam_api.so`, which must be ABSENT (an empty stub
+    /// makes the game's dlopen throw instead of cleanly detecting no Steam). Laid after its parent mount (it is
+    /// sorted parent-first by `target`), and it is NOT a mountpoint others can nest under.
+    Whiteout { target: String },
+}
+
+impl Entry {
+    /// The absolute mount target — the path the entry lands on, and the key the parent-first order and the
+    /// mount forest (ancestor lookup, child skeletons) are computed from.
+    pub fn target(&self) -> &str {
+        match self {
+            Entry::Mount { target, .. } => target,
+            Entry::Overlay { target, .. } => target,
+            Entry::Whiteout { target } => target,
+        }
+    }
+}
+
+/// Sort a mount table PARENT-FIRST: fewer path components bind before deeper ones (ties broken
+/// lexicographically, for determinism), so applying the entries in order makes each nested entry land on —
+/// and shadow — its already-mounted parent. The launcher calls this on every table it resolves;
+/// `enter_and_mount` REQUIRES its input already be in this order.
+pub fn sort_parent_first(entries: &mut [Entry]) {
+    entries.sort_by(|a, b| {
+        let (ta, tb) = (a.target(), b.target());
+        ta.matches('/')
+            .count()
+            .cmp(&tb.matches('/').count())
+            .then_with(|| ta.cmp(tb))
+    });
 }
 
 fn oserr() -> String {
@@ -223,13 +258,6 @@ fn seed_dir(seed: &str, target: &str) -> Result<(), String> {
     }
 }
 
-fn entry_target(e: &Entry) -> &str {
-    match e {
-        Entry::Mount { target, .. } => target,
-        Entry::Overlay { target, .. } => target,
-    }
-}
-
 /// The path whose tree provides this mount's content — a bind's `source`, an overlay's `lower`. `None` → a
 /// fresh tmpfs (empty content). Used only to decide which child mountpoints a bind/tmpfs already carries;
 /// overlays stub every child unconditionally, so the value isn't consulted for them.
@@ -237,6 +265,7 @@ fn content_path(e: &Entry) -> Option<&str> {
     match e {
         Entry::Mount { source, .. } => source.as_deref(),
         Entry::Overlay { lower, .. } => Some(lower),
+        Entry::Whiteout { .. } => None, // erases content; provides none, and is never a mount ancestor
     }
 }
 
@@ -291,7 +320,7 @@ fn build_child_skeleton(idx: usize, missing: &[(String, bool)]) -> Result<String
 /// exec runs the game inside the assembled prefix (the ns + its binds live exactly as long as that process
 /// tree). Every entry target is an absolute path AT/UNDER `root` (the launcher joined it to the view).
 ///
-/// The prefix ROOT is normally the table's own root entry (makeAppWine injects target "" — a persistent
+/// The prefix ROOT is normally the table's own root entry (mkWineApp injects target "" — a persistent
 /// mount of `$PROPNIX_STATE/wine/prefix` seeded with the base user.reg, realized as an overlay so its upper
 /// persists and its child-skeleton lower exposes every sub-mount's mountpoint); being parent-first it's laid
 /// first. As a fallback, a table with NO root entry gets a fresh ephemeral tmpfs at the root instead.
@@ -324,9 +353,14 @@ pub fn enter_and_mount(root: &str, entries: &[Entry], tar_bin: &str) -> Result<(
         // ancestor, which must expose it as a mountpoint. So every mount gets a CHILD SKELETON of the
         // mountpoints its own content lacks (below); applied parent-first (the launcher sorted the table so),
         // a mount — with its skeleton — is always laid before any child lands on it.
-        let targets: Vec<&str> = entries.iter().map(entry_target).collect();
+        let targets: Vec<&str> = entries.iter().map(Entry::target).collect();
         let mut children: Vec<Vec<usize>> = vec![Vec::new(); entries.len()];
         for i in 0..entries.len() {
+            // A whiteout is not a mountpoint anything nests under (it overlays its PARENT dir in place), so it
+            // must not make its parent stub a mountpoint for it — that would shadow the very file we erase.
+            if matches!(entries[i], Entry::Whiteout { .. }) {
+                continue;
+            }
             if let Some(p) = parent_index(&targets, root, i) {
                 children[p].push(i);
             }
@@ -335,7 +369,7 @@ pub fn enter_and_mount(root: &str, entries: &[Entry], tar_bin: &str) -> Result<(
         // The prefix ROOT: normally the table's own root entry (a Mount of $STATE/wine/prefix, realized below
         // as an overlay whose upper persists user.reg) — laid in the loop below, and being parent-first it's
         // first. FALLBACK: a table with no root entry gets a fresh ephemeral tmpfs backing the root here.
-        if !entries.iter().any(|e| entry_target(e) == root) {
+        if !entries.iter().any(|e| e.target() == root) {
             let r = CString::new(root).unwrap();
             let ty = CString::new("tmpfs").unwrap();
             if libc::mount(ty.as_ptr(), r.as_ptr(), ty.as_ptr(), 0, std::ptr::null()) != 0 {
@@ -474,6 +508,11 @@ pub fn enter_and_mount(root: &str, entries: &[Entry], tar_bin: &str) -> Result<(
                         }
                     }
                 }
+                Entry::Whiteout { target } => {
+                    if let Err(msg) = mount_whiteout(i, target) {
+                        return Err(format!("whiteout {target}: {msg}"));
+                    }
+                }
             }
         }
     }
@@ -604,6 +643,44 @@ fn finish_overlay_mount(target: &str, opts: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Erase `target` from its parent mount/overlay: overlay `target`'s PARENT DIR in place with a fresh tmpfs
+/// upper that holds a char-device 0,0 whiteout for `target`'s basename. The parent's other entries fall
+/// through the lowerdir (the pre-existing parent dir) unchanged; only `target` disappears from the merged view.
+/// `userxattr` for the unprivileged overlay; the 0,0 char device is the classic overlay whiteout (created via
+/// mknod, which the ns-creator can do on a private tmpfs). The parent dir must already be mounted (whiteouts
+/// are sorted parent-first by target).
+fn mount_whiteout(idx: usize, target: &str) -> Result<(), String> {
+    let tp = Path::new(target);
+    let name = tp
+        .file_name()
+        .ok_or_else(|| format!("whiteout target {target} has no filename component"))?;
+    let parent = tp
+        .parent()
+        .and_then(|p| p.to_str())
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| format!("whiteout target {target} has no parent directory"))?;
+    // A fresh ns-private tmpfs backs the upper + workdir (self-cleaning with the ns).
+    let scratch = format!("/tmp/.propnix-whiteout-{idx}");
+    std::fs::create_dir_all(&scratch).map_err(|e| format!("mkdir {scratch}: {e}"))?;
+    let sc = CString::new(scratch.as_str()).unwrap();
+    let ty = CString::new("tmpfs").unwrap();
+    if unsafe { libc::mount(ty.as_ptr(), sc.as_ptr(), ty.as_ptr(), 0, std::ptr::null()) } != 0 {
+        return Err(format!("tmpfs at {scratch}: {}", oserr()));
+    }
+    let (up, wk) = (format!("{scratch}/up"), format!("{scratch}/work"));
+    std::fs::create_dir_all(&up).map_err(|e| format!("mkdir {up}: {e}"))?;
+    std::fs::create_dir_all(&wk).map_err(|e| format!("mkdir {wk}: {e}"))?;
+    // The whiteout: a 0,0 char device in the upper at the basename → overlayfs hides the lower's entry.
+    let wh = Path::new(&up).join(name);
+    let whc = CString::new(wh.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
+    if unsafe { libc::mknod(whc.as_ptr(), libc::S_IFCHR, 0) } != 0 {
+        return Err(format!("mknod whiteout {}: {}", wh.display(), oserr()));
+    }
+    // Overlay the parent dir IN PLACE (lowerdir is the parent's current contents; upper carries the whiteout).
+    let opts = format!("lowerdir={parent},upperdir={up},workdir={wk},userxattr");
+    finish_overlay_mount(parent, &opts)
+}
+
 /// Stamp a freshly-extracted skeleton tree with the data-only overlay xattrs. The tar holds only sized
 /// sparse stubs (the Nix build sandbox can't set user.* xattrs); here — on the tmpfs, which supports them —
 /// each regular-file stub gets `user.overlay.metacopy` (present) + `user.overlay.redirect=/<relpath>` (its
@@ -617,6 +694,9 @@ fn apply_metacopy_xattrs(root: &Path, dir: &Path) -> Result<(), String> {
         if ft.is_dir() {
             apply_metacopy_xattrs(root, &path)?;
         } else if ft.is_file() {
+            // Only REGULAR files get the data-only metacopy/redirect. A mkStoreSkeleton `maskFiles` entry is a
+            // char-device 0,0 WHITEOUT (not a regular file) → skipped here, and overlayfs hides the payload's
+            // real file entirely (true absence, not an empty shadow).
             use std::os::unix::ffi::OsStrExt;
             let rel = path
                 .strip_prefix(root)

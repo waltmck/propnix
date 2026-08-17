@@ -1,8 +1,9 @@
 {
-  "backends": {
-    "gog-galaxy-windows": {
-      "components": {
-        "base": {
+  "fetchInfo": {
+    "gog": {
+      "x86_64-windows": [
+        {
+          "pname": "iron-nest-win",
           "productId": "1162687982",
           "buildId": "59928334169953902",
           "version": "1.0",
@@ -13,7 +14,7 @@
           "kind": "game",
           "generation": 2
         }
-      }
+      ]
     }
   }
 }

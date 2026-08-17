@@ -16,6 +16,7 @@ mod run;
 mod settings;
 mod signals;
 mod splash;
+mod thin;
 mod userreg;
 mod util;
 
@@ -83,6 +84,27 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
+    // Two launcher MODES, tagged by the config's `mode` field (default "prefix"). "thin" (box64 / native
+    // Linux) diverges enough from wine — no WINEPREFIX, no registry, a direct execve — to warrant a separate
+    // path with a different config shape (`ThinConfig`), so dispatch there before loading the wine `Config`
+    // (whose required fields a thin config lacks). "prefix" falls through to the wine path below, unchanged.
+    match config::ModeProbe::mode_of(&config_path) {
+        Ok(m) if m == "thin" => {
+            return thin::run(
+                &config_path,
+                args.unseal,
+                args.inside_ns,
+                args.view.as_deref(),
+                &args.passthrough,
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("propnix-launcher: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
 
     let cfg = match config::Config::load(&config_path) {
         Ok(c) => c,
@@ -170,6 +192,10 @@ fn run_outer(
     args: Args,
     config_path: String,
 ) -> ExitCode {
+    // The view root is cleaned up by RAII (mount::ViewGuard) on EVERY exit path below — declared first so
+    // it drops last, after the worker join has reaped the mount child.
+    let _view_guard = mount::ViewGuard(paths.view.clone());
+
     // propnix-mount assembles the prefix inside a private user+mount namespace; without unprivileged userns
     // support there is no way to lay the binds, so fail fast with an actionable error.
     if !mount::userns_supported() {
@@ -179,7 +205,6 @@ fn run_outer(
              `sudo sysctl -w kernel.unprivileged_userns_clone=1` (persist under /etc/sysctl.d), or ensure \
              the kernel has CONFIG_USER_NS and `user.max_user_namespaces` > 0. NixOS enables them by default."
         );
-        let _ = std::fs::remove_dir(&paths.view);
         return ExitCode::FAILURE;
     }
 
@@ -243,12 +268,10 @@ fn run_outer(
                     "propnix-launcher: setup script exited {} — aborting (packaging bug or corrupted prefix)",
                     run::code_of(s)
                 );
-                let _ = std::fs::remove_dir(&paths.view);
                 return ExitCode::FAILURE;
             }
             Err(e) => {
                 eprintln!("propnix-launcher: cannot run setup script {script}: {e}");
-                let _ = std::fs::remove_dir(&paths.view);
                 return ExitCode::FAILURE;
             }
         }
@@ -261,7 +284,7 @@ fn run_outer(
     // MUST be single-threaded here — spawn_mounted's pre_exec assembles the prefix post-fork. Spawn the
     // prefetch thread + the splash/worker threads only AFTER it returns.
     let (child, reader) = match run::spawn_mounted(
-        &cfg,
+        &cfg.emulators.tar,
         &config_path,
         &paths.view,
         entries,
@@ -271,7 +294,6 @@ fn run_outer(
         Ok(pair) => pair,
         Err(e) => {
             eprintln!("propnix-launcher: launch failed: {e}");
-            let _ = std::fs::remove_dir(&paths.view);
             return ExitCode::FAILURE;
         }
     };
@@ -285,71 +307,15 @@ fn run_outer(
     let name = cfg.name.clone();
     let icon = cfg.icon.clone();
 
-    // Compositor window watcher (best-effort; needs wlr-foreign-toplevel-management — present on wlroots
-    // compositors like Hyprland/sway). One probe of the game's toplevel drives two jobs:
-    //   1. Splash dismiss — some backends emit NO first-present stderr marker for watch_child to scan
-    //      (notably OpenGL titles, e.g. Prison Architect), so dismiss the splash once the game window maps.
-    //      Complements the marker scan (whichever fires first); a marker backend normally wins, so this
-    //      never uncovers a still-black D3D window early.
-    //   2. Close-to-quit — once the window has appeared, watch for it to be DESTROYED (gone from the
-    //      compositor's toplevel list; minimized/unfocused windows still appear, so absence means closed)
-    //      and force teardown. Needed because a wine game can HANG on shutdown (stuck on ntsync) after its
-    //      window closes, so the inner's wait-on-process never returns and the launcher tree lingers.
-    //      `signals::cancel()` drives the existing SIGTERM-the-tree + prefix-scoped `wineserver -k` path,
-    //      which kills the hung game.
-    // On a compositor lacking the protocol (or no display) the probe returns NoManager and the watcher
-    // stops: the splash then relies on the fallback timeout, and the game must exit on its own.
+    // Compositor window watcher (run::watch_window): dismisses the splash when the game window MAPS (the
+    // only signal for marker-less backends, e.g. an OpenGL title) and force-tears-down when it is DESTROYED
+    // (a wine game can hang on shutdown after its window closes).
     {
         let tx = tx.clone();
         let needle = wm_class.clone();
         let title = cfg.name.clone();
         let splash_app_id = app_id.clone();
-        std::thread::spawn(move || {
-            let step = std::time::Duration::from_millis(400);
-            // Phase 1: wait for the game window to appear → dismiss the splash.
-            let mut appeared = false;
-            for _ in 0..430u32 {
-                // ~175 s, under watch_child's 180 s fallback
-                if signals::cancelled() {
-                    return;
-                }
-                match focus::game_window_probe(&needle, &title, &splash_app_id) {
-                    focus::Probe::NoManager => return, // signal unavailable here — fallback timeout owns it
-                    focus::Probe::Found => {
-                        std::thread::sleep(std::time::Duration::from_millis(750)); // let the first frame paint
-                        let _ = tx.send(run::Progress::Presented);
-                        appeared = true;
-                        break;
-                    }
-                    focus::Probe::NotFound => std::thread::sleep(step),
-                }
-            }
-            if !appeared {
-                return;
-            }
-            // Phase 2: the window is up — watch for it to be destroyed (user closed it) → force teardown.
-            // Require several consecutive absences (~3 s) so a transient probe glitch, or a toplevel that a
-            // fullscreen toggle briefly destroys and re-creates, doesn't trigger a false quit.
-            let mut gone = 0u32;
-            loop {
-                std::thread::sleep(step);
-                if signals::cancelled() {
-                    return; // teardown already under way (normal exit or Ctrl-C)
-                }
-                match focus::game_window_probe(&needle, &title, &splash_app_id) {
-                    focus::Probe::Found => gone = 0,
-                    focus::Probe::NotFound => {
-                        gone += 1;
-                        if gone >= 8 {
-                            // ~3.2 s with no game window → it was closed; tear the launcher down.
-                            signals::cancel();
-                            return;
-                        }
-                    }
-                    focus::Probe::NoManager => return, // lost the signal — don't force-quit on uncertainty
-                }
-            }
-        });
+        std::thread::spawn(move || run::watch_window(tx, needle, title, splash_app_id));
     }
 
     let worker = std::thread::spawn(move || {
@@ -357,10 +323,6 @@ fn run_outer(
     });
     let code = splash::run(app_id, name, icon, rx);
     let _ = worker.join();
-    // Best-effort remove the now-empty view root: once the kernel ns is torn down its binds are gone, so
-    // this is an empty dir. An unclean exit may leave the empty dir behind — harmless, and the next launch
-    // mints a fresh random root anyway.
-    let _ = std::fs::remove_dir(&paths.view);
     ExitCode::from((code & 0xff) as u8)
 }
 

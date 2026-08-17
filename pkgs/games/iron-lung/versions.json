@@ -1,8 +1,9 @@
 {
-  "backends": {
-    "gog-galaxy-windows": {
-      "components": {
-        "base": {
+  "fetchInfo": {
+    "gog": {
+      "x86_64-windows": [
+        {
+          "pname": "iron-lung-win",
           "productId": "1310178756",
           "buildId": "58726341037542829",
           "version": "2.3(gog)-2",
@@ -13,7 +14,7 @@
           "kind": "game",
           "generation": 2
         }
-      }
+      ]
     }
   }
 }

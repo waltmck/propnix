@@ -1,19 +1,38 @@
-//! The launcher↔wrapper interface: the JSON config `makeAppWine` bakes (a `writeText` with store paths
-//! interpolated) and passes via `--config`. Nix computes the intended set; the launcher enforces it. This
-//! struct mirrors PLAN2 §4 exactly. Every field is explicit (no catch-all) so a schema drift fails loudly
-//! at load, not silently at launch.
+//! The launcher↔wrapper interface: the JSON configs the wine/thin builders bake (a `writeText` with store
+//! paths interpolated) and pass via `--config`. Nix computes the intended set; the launcher enforces it.
+//! The wine `Config` mirrors PLAN2 §4. Schema drift fails loudly at LOAD, not silently at launch:
+//!   * every flatten-free struct is `#[serde(deny_unknown_fields)]` — a misspelled or removed field is a
+//!     deserialization error (the configs ship in lockstep with this launcher, so strictness is free);
+//!   * `Mount`/`MountSpec` CANNOT be stamped (serde ignores/forbids `deny_unknown_fields` under
+//!     `#[serde(flatten)]` + internal tagging), so mount-row keys are checked by an explicit validation
+//!     pass in `Config::load` (`validate_mount_rows`) instead;
+//!   * `ModeProbe` alone stays deliberately tolerant — it reads one field of the full config.
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
 /// Where the game payload is mounted inside the prefix (C:\game) and thus the launch cwd, relative to the
-/// view root. makeAppWine mounts the payload here and puts the galaxy stubs under it; keep the two in sync.
+/// view root. mkWineApp mounts the payload here and puts the galaxy stubs under it; keep the two in sync.
 pub const GAME_DIR: &str = "drive_c/game";
 
+/// THIN mode's game dir, relative to the view root ($HOME): the launcher mounts the read-only game overlay
+/// (the unioned `gameLowers`) here and runs the game from it. Under $HOME so it sits in the same ephemeral
+/// per-launch view as the save binds; the game writes nothing here (state goes to the bound save dirs).
+pub const THIN_GAME_DIR: &str = "game";
+
+/// THIN mode's exec-bit-fix mountpoint, relative to the view root: the intermediate `skeleton::lower`
+/// metacopy overlay (see `GameModeFix`) is mounted here and then stacked into the game overlay as its
+/// highest-priority lower. A hidden dir in the view $HOME the game never reads.
+pub const THIN_BINFIX_DIR: &str = ".propnix-binfixed";
+
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// Interface version; bumped when this shape changes incompatibly.
     pub schema: u32,
+    /// The launcher-dispatch tag ("prefix" — `ModeProbe` routes on it before this struct loads). Declared
+    /// here as well so `deny_unknown_fields` accepts the baked field.
+    pub mode: String,
     pub appid: String,
     pub name: String,
     /// Icon path (a store path to a PNG), or null this pass.
@@ -90,6 +109,8 @@ pub struct Config {
 /// Targets (the keys) are paths RELATIVE to the tmpfs prefix root; sources are `$VAR`-expanded by the
 /// launcher (it sets `PROPNIX_STATE`/`PROPNIX_SAVE_DIR`/`PROPNIX_APPID`; store paths are baked literal by
 /// Nix). Only literal paths ever reach propnix-mount. (Nix defaults `type` to "mount"; see sealing.nix.)
+/// NOT `deny_unknown_fields`: serde ignores/forbids it under `#[serde(flatten)]` + internal tagging, so an
+/// unknown row key would be silently dropped — `validate_mount_rows` does that strict check instead.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Mount {
     #[serde(flatten)]
@@ -147,6 +168,12 @@ pub enum MountSpec {
         #[serde(rename = "readOnly", default)]
         read_only: bool,
     },
+    /// ERASE the file at the target (the key) from its parent mount — a true absence, no store copy. Realized
+    /// by propnix-mount overlaying the parent dir in place with a char-device 0,0 whiteout for the basename.
+    /// Used to neutralize a store-integration DLL a wine game bundles (e.g. a Steam build's steam_api64.dll)
+    /// so the game's plugin loader reports "no online subsystem" and runs offline — the wine-path sibling of
+    /// the THIN `maskFiles` mechanism (both are derived from the game's `maskFiles`). Carries no other fields.
+    Whiteout {},
 }
 
 fn default_mount_mode() -> String {
@@ -157,6 +184,7 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RegOverride {
     /// Key relative to HKEY_CURRENT_USER, e.g. "Control Panel\\Colors".
     pub key: String,
@@ -172,6 +200,7 @@ fn default_reg_type() -> String {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Emulators {
     /// wine-hangover store dir (`/bin/wine`, `/bin/wineserver`).
     pub wine: String,
@@ -193,6 +222,7 @@ pub struct Emulators {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Defaults {
     /// Wine display driver: "wayland" | "x11". Each PROPNIX_* env var overrides the matching default.
     pub graphics: String,
@@ -201,6 +231,7 @@ pub struct Defaults {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Seal {
     /// Env-var name PREFIXES to unset before spawning the child (targeted scrub, never env_clear).
     pub scrub: Vec<String>,
@@ -215,10 +246,160 @@ pub struct Seal {
     pub set_env: BTreeMap<String, String>,
 }
 
+/// The launcher runs in one of two MODES, tagged by the config's `mode` field (default "prefix"):
+///   * "prefix" — the wine path: `Config` above (userns + mount table + WINEPREFIX overlay). UNCHANGED.
+///   * "thin"   — box64/native: `ThinConfig` below (no prefix; scrubbed env + LD_LIBRARY_PATH + cwd + save
+///                binds + execve). The two share focus/splash/window-watcher/signals.
+/// `ModeProbe` reads just the discriminator so `main` can deserialize the right variant (their field sets
+/// differ, so loading a thin config as `Config` would fail on the missing wine fields).
+#[derive(Deserialize)]
+pub struct ModeProbe {
+    #[serde(default = "default_mode")]
+    pub mode: String,
+}
+
+fn default_mode() -> String {
+    "prefix".to_string()
+}
+
+impl ModeProbe {
+    pub fn mode_of(path: &str) -> Result<String, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read config {path}: {e}"))?;
+        let p: ModeProbe =
+            serde_json::from_str(&text).map_err(|e| format!("invalid config {path}: {e}"))?;
+        Ok(p.mode)
+    }
+}
+
+/// THIN-mode config: a native/box64 Linux game. No wine prefix — $HOME is a fresh per-launch tmpfs view; the
+/// game tree (`gameLowers`, read-only overlay) is mounted at the view's game dir and run from there under a
+/// scrubbed env with the library union on LD_LIBRARY_PATH; the declared save dirs are bound out of the view to
+/// persistent $STATE. So a native game writes its own paths (`$HOME/.local/share/…`) while the data lands in
+/// propnix-managed dirs — mirroring the wine PROPNIX_SAVE_DIR/<appid> semantics.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThinConfig {
+    pub schema: u32,
+    /// The launcher-dispatch tag ("thin"; see `ModeProbe`). Declared here as well so `deny_unknown_fields`
+    /// accepts the baked field.
+    pub mode: String,
+    #[serde(rename = "appId")]
+    pub app_id: String,
+    pub name: String,
+    /// Icon path (a store-path PNG) for the splash + desktop entry, or null.
+    pub icon: Option<String>,
+    /// The game tree the launcher mounts read-only at the view's game dir (`THIN_GAME_DIR`) and runs from. One
+    /// or more store paths: a single-tree game is one path (bound); a multi-depot Steam game is several
+    /// (e.g. Stellaris = binaries depot + data depot), UNIONED by a read-only overlayfs at mount time — merged
+    /// for FREE with NO store copy (leftmost wins on overlap), exactly like the wine DLC overlay. overlayfs
+    /// presents real dirs/files (not symlinks), so a PhysFS-style engine traverses the union fine. When a
+    /// `gameModeFix` is present, its metacopy-fixed tree is stacked ABOVE these (highest priority).
+    #[serde(rename = "gameLowers")]
+    pub game_lowers: Vec<String>,
+    /// Optional EXEC-BIT fix for the game tree, mounted as a read-only overlayfs layer ABOVE `gameLowers`.
+    /// A Steam depot fetched via DepotDownloader ships mode 0444 (no +x); box64/native exec require +x on the
+    /// ELF. Rather than re-emit the executable's data, `skeleton` is a sparse metacopy skeleton of `lower`
+    /// (the exe-bearing tree) whose exe stubs are 0755, and `lower` is that same tree used as the metacopy
+    /// DATA source: the launcher mounts `skeleton::lower` (userxattr) — the merged files are +x with data
+    /// redirected to the store (ZERO copy) — then unions THAT above `gameLowers`. See thin.rs resolve.
+    #[serde(rename = "gameModeFix", default)]
+    pub game_mode_fix: Option<GameModeFix>,
+    /// Game-dir-relative files to ERASE from the game dir — each becomes a propnix-mount `whiteout` entry (an
+    /// overlay-whiteout over the file's parent), so the file is genuinely absent at runtime with no store copy.
+    /// Used to neutralize a bundled library (e.g. a Steam game's libsteam_api.so). Default empty.
+    #[serde(rename = "maskFiles", default)]
+    pub mask_files: Vec<String>,
+    /// The program that runs the game: `${box64}/bin/box64` on aarch64 (the x86_64 ELF is passed as its arg),
+    /// or null on x86_64 where the ELF is exec'd natively. An absolute store path when set.
+    #[serde(default)]
+    pub emulator: Option<String>,
+    /// The game executable, RELATIVE to the game dir (e.g. "stellaris"). The launcher runs it as
+    /// `<emulator> <gameDir>/<exe> <exeArgs>` (aarch64) or `<gameDir>/<exe> <exeArgs>` (native).
+    pub exe: String,
+    /// Baked args passed to the exe on every launch (before any runtime `-- <args>`), e.g. `[ "-gdpr-compliant" ]`.
+    #[serde(rename = "exeArgs", default)]
+    pub exe_args: Vec<String>,
+    /// Optional working directory RELATIVE to the game dir (for an engine that resolves its data root from cwd).
+    /// Null (default) → cwd = the game dir root.
+    #[serde(rename = "workingDir", default)]
+    pub working_dir: Option<String>,
+    /// Env vars SET on the child after the scrub ($VAR-expanded): box64 knobs, SDL driver, etc.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// The ':'-joined LD_LIBRARY_PATH — the native aarch64 bridging libs box64 wraps + the x86_64 guest libs,
+    /// baked by nix (`lib.makeLibraryPath (native ++ guest)`).
+    #[serde(rename = "ldLibraryPath", default)]
+    pub ld_library_path: String,
+    /// Env-name PREFIXES scrubbed before the child (targeted, never env_clear) — e.g. BOX64_/FEX_/LD_/WINE.
+    #[serde(rename = "scrubPrefixes", default)]
+    pub scrub_prefixes: Vec<String>,
+    /// Save/state bind rows: bind `src` (a persistent `$STATE/…`/`$VAR`-expandable dir) at `dst` (a path under
+    /// the view $HOME). Laid by propnix-mount in the game's private mount ns.
+    #[serde(default)]
+    pub binds: Vec<Bind>,
+    #[serde(default = "default_true")]
+    pub splash: bool,
+    #[serde(rename = "singleInstance", default = "default_true")]
+    pub single_instance: bool,
+    #[serde(rename = "windowWatch", default = "default_true")]
+    pub window_watch: bool,
+    /// A `tar` binary path for propnix-mount's skeleton extraction (it has no runtime deps of its own).
+    pub tar: String,
+    /// The NATIVE MangoHud package root for PROPNIX_BENCH. box64 renders through native Mesa (it wraps libGL),
+    /// and box64 has a built-in special-case for `libMangoHud_shim.so`'s `dlsym`, so the HUD is enabled the way
+    /// the `mangohud` wrapper does: LD_PRELOAD the SHIM (`<root>/lib/mangohud/libMangoHud_shim.so`), put that
+    /// dir on LD_LIBRARY_PATH (so the shim finds its opengl/dlsym siblings), and add `<root>/share` to
+    /// XDG_DATA_DIRS (the Vulkan implicit layer). See thin.rs.
+    #[serde(default)]
+    pub mangohud: Option<String>,
+}
+
+/// THIN-mode exec-bit fix (see `ThinConfig::game_mode_fix`): a metacopy skeleton (`skeleton`, a sparse-stub
+/// tar with 0755 exe stubs) over the exe-bearing store tree (`lower`) as its data source. The launcher mounts
+/// `skeleton::lower` (userxattr) so the merged executables are +x with data redirected to the store, then
+/// stacks that above the other game lowers — all zero-copy.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct GameModeFix {
+    pub skeleton: String,
+    pub lower: String,
+}
+
+/// A THIN-mode save/state bind: `src` (persistent, $VAR-expandable) mounted at `dst` (under the view $HOME).
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct Bind {
+    pub src: String,
+    pub dst: String,
+    #[serde(default)]
+    pub ro: bool,
+    #[serde(default = "default_true")]
+    pub create: bool,
+}
+
+impl ThinConfig {
+    pub fn load(path: &str) -> Result<ThinConfig, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read config {path}: {e}"))?;
+        let cfg: ThinConfig =
+            serde_json::from_str(&text).map_err(|e| format!("invalid config {path}: {e}"))?;
+        if cfg.schema != 1 {
+            return Err(format!("unsupported config schema {} (need 1)", cfg.schema));
+        }
+        Ok(cfg)
+    }
+}
+
 impl Config {
     pub fn load(path: &str) -> Result<Config, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read config {path}: {e}"))?;
+        // The explicit mount-row key check first (serde cannot strict-check those rows; see
+        // `validate_mount_rows`), then the typed deserialization from the same text — the file is read once.
+        let raw: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("invalid config {path}: {e}"))?;
+        validate_mount_rows(&raw, path)?;
         let cfg: Config =
             serde_json::from_str(&text).map_err(|e| format!("invalid config {path}: {e}"))?;
         if cfg.schema != 1 {
@@ -229,4 +410,52 @@ impl Config {
         }
         Ok(cfg)
     }
+}
+
+/// The strict key check serde cannot do for `mounts` rows: `Mount` flattens the internally-tagged
+/// `MountSpec`, and serde ignores/forbids `deny_unknown_fields` on that combination — so without this pass a
+/// misspelled row key (`sorce`, `readonly`, …) would be SILENTLY DROPPED and the row would launch with the
+/// field's default. Walks the raw JSON's `.mounts` and checks each row's keys against its `type` variant's
+/// allowed set, failing with the target + offending key. The rest of the row's typing (value shapes, the
+/// tag itself) is still serde's job in the typed deserialization that follows.
+fn validate_mount_rows(raw: &serde_json::Value, path: &str) -> Result<(), String> {
+    // Keys every bind/overlay row may carry (`Mount`'s own fields + the tag).
+    const COMMON: &[&str] = &["type", "enabled", "createIfNotExist"];
+    let Some(mounts) = raw.get("mounts") else {
+        return Ok(()); // absent → serde's `#[serde(default)]` empty table
+    };
+    let Some(map) = mounts.as_object() else {
+        return Err(format!("invalid config {path}: `mounts` is not an object"));
+    };
+    for (target, row) in map {
+        let Some(obj) = row.as_object() else {
+            return Err(format!(
+                "invalid config {path}: mount row '{target}' is not an object"
+            ));
+        };
+        // A missing/non-string tag is left for serde's own missing-field-`type` error, right after this pass.
+        let Some(ty) = obj.get("type").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        // Per-variant keys, mirroring `MountSpec` (a whiteout carries nothing beyond the tag + `enabled`).
+        let (variant, extra): (&[&str], &[&str]) = match ty {
+            "mount" => (&["source", "mode", "seed"], COMMON),
+            "overlay" => (&["lower", "upper", "skeleton", "readOnly"], COMMON),
+            "whiteout" => (&[], &["type", "enabled"]),
+            other => {
+                return Err(format!(
+                    "invalid config {path}: mount row '{target}' has unknown type '{other}' \
+                     (expected mount | overlay | whiteout)"
+                ));
+            }
+        };
+        for key in obj.keys() {
+            if !variant.contains(&key.as_str()) && !extra.contains(&key.as_str()) {
+                return Err(format!(
+                    "invalid config {path}: mount row '{target}' (type '{ty}') has unknown key '{key}'"
+                ));
+            }
+        }
+    }
+    Ok(())
 }

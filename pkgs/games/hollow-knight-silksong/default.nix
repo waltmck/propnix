@@ -1,28 +1,38 @@
 # Hollow Knight: Silksong (GOG, Windows x86_64 build) via wine — on aarch64 through FEX + native ARM64EC
 # DXVK, on x86_64 natively. Team Cherry's Unity sequel to Hollow Knight; ARCH-AGNOSTIC like the HK spec:
-# makeAppWine + the scope pick the arch-appropriate emulator set, and the SAME Windows payload (a
+# mkApp + the scope pick the arch-appropriate emulator set, and the SAME Windows payload (a
 # content-addressed FOD) is shared across arches. Payload = the pinned GOG Galaxy build fetched with gogdl
 # (D15), delivered as the game tree directly (no InnoSetup).
+#
+# Well-behaved on the global wine defaults (d3d=dxvk, graphics=wayland, DLL hygiene) — the only per-title
+# tuning is the Unity frame-pacing preset (Silksong persists the SAME `VidVSync`/`VidTFR` PlayerPrefs as
+# Hollow Knight — verified: identical `_h<hash>` value names, the hash is a pure function of the pref name —
+# under its own HKCU key), so the fragment is passed directly and there is no wine-tuning.nix.
 #
 #   nix run .#hollow-knight-silksong --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64/x86_64-linux
 {
   lib,
-  makeAppWine,
-  fetchGogGalaxyBuild,
+  mkApp,
+  presets,
 }:
-let
-  pins = (lib.importJSON ./versions.json).backends.gog-galaxy-windows;
-  tuning = import ./tuning.nix;
-in
-makeAppWine {
+mkApp {
   pname = "hollow-knight-silksong";
   appid = "hollow-knight-silksong";
   name = "Hollow Knight: Silksong";
-  # gogdl takes the NUMERIC productId (not the slug).
-  payload = fetchGogGalaxyBuild (pins.components.base // { pname = "hollow-knight-silksong-win"; });
+  fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
   exe = "Hollow Knight Silksong.exe";
-  # Full-color icon is auto-extracted from the exe's PE resources (autoIcon defaults true) into a
-  # freedesktop hicolor theme. The symbolic variant is vendored (CC BY-SA 4.0; see the .svg header).
-  iconSymbolic = ./hollow-knight-silksong-symbolic.svg;
-  inherit tuning;
+  # Full-color icon auto-extracted from the exe's PE resources (icon.auto default). Symbolic vendored (CC BY-SA 4.0).
+  icon.symbolic = ./hollow-knight-silksong-symbolic.svg;
+
+  # Save: Unity persistentDataPath (Company/Product from the payload's goggame-*.info: "Team Cherry" /
+  # "Hollow Knight Silksong"), bound to the app's host save dir ($PROPNIX_SAVE_DIR/$PROPNIX_APPID,
+  # default $XDG_DATA_HOME/propnix-saves/hollow-knight-silksong).
+  saveBinds = [
+    {
+      src = "$PROPNIX_SAVE_DIR/$PROPNIX_APPID";
+      dst = "AppData/LocalLow/Team Cherry/Hollow Knight Silksong";
+    }
+  ];
+
+  wine = presets.unity.framePacing "Software\\Team Cherry\\Hollow Knight Silksong";
 }

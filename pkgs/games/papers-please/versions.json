@@ -1,8 +1,9 @@
 {
-  "backends": {
-    "gog-galaxy-windows": {
-      "components": {
-        "base": {
+  "fetchInfo": {
+    "gog": {
+      "x86_64-windows": [
+        {
+          "pname": "papers-please-win",
           "productId": "1207659209",
           "buildId": "56353505673715002",
           "version": "1.4.11.124",
@@ -13,7 +14,7 @@
           "kind": "game",
           "generation": 2
         }
-      }
+      ]
     }
   }
 }

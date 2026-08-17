@@ -127,6 +127,27 @@ impl Settings {
         }
     }
 
+    /// THIN-mode settings (box64 / native Linux): no wine defaults to resolve — the backend has no
+    /// graphics/d3d/fps/dpi knobs (those are wine's). We keep only the fields the shared OUTER machinery
+    /// reads: `appid` (state paths, single-instance, PROPNIX_APPID), `console` (forward the game's piped
+    /// stdout under PROPNIX_DEBUG/BENCH), `no_prefetch` (always true — there is no wine DLL lower to warm),
+    /// and `unseal`. The wine-only fields get inert defaults so `paths()` / `watch_child` work unchanged.
+    pub fn resolve_thin(appid: &str, unseal: bool) -> Settings {
+        let appid = env_nonempty("PROPNIX_APPID").unwrap_or_else(|| appid.to_string());
+        Settings {
+            appid,
+            graphics: String::new(),
+            d3d: String::new(), // never "dxvk" → is_dxvk() is false, so the DXVK overlays/env never apply
+            fps: FpsMode::Unmanaged,
+            dpi: None,
+            winedebug: String::new(),
+            bench: env_set("PROPNIX_BENCH"),
+            no_prefetch: true,
+            unseal,
+            console: env_set("PROPNIX_BENCH") || env_set("PROPNIX_DEBUG"),
+        }
+    }
+
     pub fn is_dxvk(&self) -> bool {
         self.d3d == "dxvk"
     }

@@ -7,7 +7,7 @@
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/9bc02893134c733dd85de46ee4fb2fac696b5529";
 
   outputs =
-    { self, nixpkgs }: 
+    { self, nixpkgs }:
     let
       lib = nixpkgs.lib;
 
@@ -76,17 +76,40 @@
         }
       );
 
-      # Arch-agnostic helpers (pure lib / data), usable without picking a system. The arch-specific builders
-      # (makeAppWine, fetchGogGalaxyBuild) live under legacyPackages.<system>.
+      # `nix flake check` gates: the STANDING config-resolution matrix + guard tests (pure eval — pins every
+      # game's (fetcher, platform, backend) triple under the default config, the preferredFetchers guards,
+      # and that no game silently defines a fetcher quality-exception). See lib/tests/resolution.nix.
+      # (NB: `nix flake check` also force-evals packages.*, so the meta.broken titles still fail it there —
+      # pre-existing, by design: broken games eval but refuse drvPath.)
+      checks = forAllSystems (system: {
+        config-resolution = import ./lib/tests/resolution.nix {
+          inherit lib;
+          pkgs = import nixpkgs {
+            inherit system;
+            config.allowUnfree = true;
+          };
+        };
+      });
+
+      # Arch-agnostic launcher-contract helpers (pure lib / data), usable without picking a system. The
+      # arch-specific builders (mkWineApp, the fetchers, …) live under legacyPackages.<system>.
       lib = {
         inherit (import ./lib/sealing.nix { inherit lib; })
           mkSeal
           flattenTuning
-          mergeTuning
-          resolveTuning
           defaultScrub
           ;
-        wineDefaults = import ./lib/wine-defaults.nix;
+        # Instantiate a CONFIGURED propnix scope, nixpkgs-style — the consumer-facing entry for the
+        # instantiation config (legacyPackages above carries the DEFAULT config):
+        #   (propnix.lib.mkScope { inherit pkgs; config.preferredFetchers = [ "steam" "gog" ]; }).hollow-knight
+        # An existing scope can equivalently be re-based:
+        #   scope.overrideScope (final: prev: { propnixConfig.preferredFetchers = [ … ]; })
+        mkScope =
+          {
+            pkgs,
+            config ? { },
+          }:
+          import ./lib { inherit pkgs config; };
       };
 
       # Host wiring: `services.propnix.enable` binds the credential dir into the build sandbox and loads

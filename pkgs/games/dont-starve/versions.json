@@ -1,8 +1,9 @@
 {
-  "backends": {
-    "gog-galaxy-windows": {
-      "components": {
-        "base": {
+  "fetchInfo": {
+    "gog": {
+      "i386-windows": [
+        {
+          "pname": "dont-starve-win",
           "productId": "1207659210",
           "buildId": "56655759880923085",
           "version": "20230427",
@@ -13,7 +14,7 @@
           "kind": "game",
           "generation": 2
         }
-      }
+      ]
     }
   }
 }

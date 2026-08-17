@@ -37,6 +37,27 @@ pub fn make_view(appid: &str) -> io::Result<PathBuf> {
     Ok(PathBuf::from(std::ffi::OsString::from_vec(buf)))
 }
 
+/// RAII cleanup of the per-launch view root (`make_view`'s dir): best-effort `remove_dir` on Drop, so EVERY
+/// outer exit path — including early error returns — removes the dir. Held by the OUTER for the whole run,
+/// declared before anything else so it drops last (after the worker join has reaped the mount child).
+/// Non-recursive and errors-ignored by design: the ns-private binds never appear in the outer's namespace,
+/// so the dir is empty here — and while the child's ns still pins it as a mount root, rmdir just fails
+/// EBUSY (harmless; an unclean exit leaves at most an empty dir, and the next launch mints a fresh random
+/// root anyway).
+pub struct ViewGuard(pub PathBuf);
+
+impl Drop for ViewGuard {
+    fn drop(&mut self) {
+        // Skip removal during a PANIC unwind: between spawn_mounted and the worker join the game child may
+        // still be running, and rmdir of a dir that is a mountpoint only in the child's namespace can
+        // lazily detach it there (leak-on-panic is the safe pre-existing behavior; every normal return —
+        // including the early error paths — still cleans up).
+        if !std::thread::panicking() {
+            let _ = std::fs::remove_dir(&self.0);
+        }
+    }
+}
+
 // A resolved table entry (LITERAL paths only). This is `propnix_mount::Entry` — the SAME type the linked
 // mount code consumes (no JSON, no serialization): `resolve_table` builds a `Vec<Entry>` and hands it
 // straight to `propnix_mount::enter_and_mount` via the mount child's `pre_exec` closure. For an Overlay,
@@ -73,7 +94,7 @@ pub fn userns_supported() -> bool {
 ///     volume — fail loudly rather than write saves to the wrong place); unset → the default
 ///     `$XDG_DATA_HOME/propnix-saves`, created. Per-app dirs (`<root>/$PROPNIX_APPID`) are made by
 ///     `createIfNotExist` on the entry that uses them.
-fn set_mount_env(_cfg: &Config, settings: &Settings, paths: &Paths) -> io::Result<()> {
+pub fn set_mount_env(settings: &Settings, paths: &Paths) -> io::Result<()> {
     std::env::set_var("PROPNIX_STATE", &paths.state);
     std::env::set_var("PROPNIX_APPID", &settings.appid);
     let save_root = match std::env::var_os("PROPNIX_SAVE_DIR") {
@@ -105,11 +126,11 @@ fn set_mount_env(_cfg: &Config, settings: &Settings, paths: &Paths) -> io::Resul
 /// parent-first `Vec<Entry>` that the linked `propnix_mount::enter_and_mount` applies. `$VAR`s are expanded
 /// here; only literals go out (passed in-memory to the mount child's pre_exec — no JSON, no table file).
 pub fn resolve_table(cfg: &Config, settings: &Settings, paths: &Paths) -> io::Result<Vec<Entry>> {
-    set_mount_env(cfg, settings, paths)?;
+    set_mount_env(settings, paths)?;
     let view = &paths.view;
     let mut entries: Vec<Entry> = Vec::new();
 
-    // The prefix ROOT is itself a declared entry (makeAppWine injects target "" — a persistent mount of
+    // The prefix ROOT is itself a declared entry (mkWineApp injects target "" — a persistent mount of
     // `$PROPNIX_STATE/wine/prefix`, seeded once with the game-agnostic base user.reg). propnix-mount realizes
     // it as an overlay over a child-skeleton lower so every sub-mount's mountpoint exists; user.reg PERSISTS
     // there across launches (the three-way merge in userreg.rs reconciles it each launch), it is not
@@ -178,6 +199,8 @@ pub fn resolve_table(cfg: &Config, settings: &Settings, paths: &Paths) -> io::Re
                     ro: *read_only,
                 }
             }
+            // Erase the target file from its parent (a bundled store-integration DLL); no source to prepare.
+            MountSpec::Whiteout {} => Entry::Whiteout { target: abs_target },
         };
         entries.push(entry);
     }
@@ -205,22 +228,9 @@ pub fn resolve_table(cfg: &Config, settings: &Settings, paths: &Paths) -> io::Re
     }
 
     // Parent-first: fewer path components bind before deeper ones, so a nested entry shadows its parent.
-    entries.sort_by(|a, b| {
-        let (ta, tb) = (entry_target(a), entry_target(b));
-        ta.matches('/')
-            .count()
-            .cmp(&tb.matches('/').count())
-            .then_with(|| ta.cmp(tb))
-    });
+    propnix_mount::sort_parent_first(&mut entries);
 
     Ok(entries)
-}
-
-fn entry_target(e: &Entry) -> &str {
-    match e {
-        Entry::Mount { target, .. } => target,
-        Entry::Overlay { target, .. } => target,
-    }
 }
 
 /// A target is a path RELATIVE to the prefix view root — join it to the view. The special EMPTY target is

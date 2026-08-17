@@ -4,6 +4,7 @@
 //! store + `cred list`/`cred rm` are provider-agnostic (they just enumerate `<store>/<type>/<username>/`).
 
 use crate::gog::Gog;
+use crate::steam::Steam;
 
 /// A minted credential ready to persist: the account label (username, for `cred list` + the dir name) and the
 /// token file bytes to write verbatim as `<store>/<type>/<username>/<token_filename>`.
@@ -26,7 +27,7 @@ pub trait Provider {
 
 /// All known providers, in a stable display order.
 pub fn all() -> Vec<Box<dyn Provider>> {
-    vec![Box::new(Gog)]
+    vec![Box::new(Gog), Box::new(Steam)]
 }
 
 /// Look up a provider by its `type_name` (the `cred add <type>` argument).

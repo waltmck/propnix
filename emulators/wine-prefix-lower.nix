@@ -112,6 +112,21 @@ runCommand "wine-prefix-lower"
       [ -e "$_t" ] || ln -s "$_mod" "$_t"
     done
 
+    # Register mmdevapi's MMDeviceEnumerator COM class for the 32-bit (Wow6432Node) view. Same 64-bit-only
+    # wineboot gap as syswow64/SxS above: `wineboot -u` populates HKLM\Software\Classes\CLSID (the native
+    # arm64ec/64-bit view, 2288 entries) but leaves HKLM\Software\Wow6432Node\Classes\CLSID EMPTY (0 entries),
+    # so a 32-bit (i386/WoW64) process's CoCreateInstance(MMDeviceEnumerator) returns REGDB_E_CLASSNOTREG and
+    # DirectSound/WASAPI find NO audio endpoint → the app runs MUTE. VERIFIED in Don't Starve (32-bit, FMOD):
+    # `err:dsound:get_mmdevenum CoCreateInstance failed: 80040154` (REGDB_E_CLASSNOTREG) → `SoundSystem::
+    # Initialize failed`. 64-bit titles are unaffected (their CLSID IS registered). Mirror the 64-bit entry
+    # into the 32-bit view; InprocServer32 stays C:\windows\system32\mmdevapi.dll — the WoW64 file redirector
+    # resolves system32 → syswow64 (the i386 mmdevapi.dll staged just above) for a 32-bit caller. Audio is the
+    # COM class every 32-bit title needs; add other 32-bit builtin classes here should a future title need them.
+    _clsid='HKLM\Software\Wow6432Node\Classes\CLSID\{BCDE0395-E52F-467C-8E3D-C4579291692E}'
+    wine reg add "$_clsid" /ve /d 'MMDeviceEnumerator class' /f
+    wine reg add "$_clsid\\InprocServer32" /ve /d 'C:\windows\system32\mmdevapi.dll' /f
+    wine reg add "$_clsid\\InprocServer32" /v ThreadingModel /t REG_SZ /d Both /f
+
     # Generate the x86 (32-bit) WinSxS assembly manifests + dirs from the arm64 ones. Same 64-bit-only gap as
     # syswow64: `wineboot -u` on this ARM64X hybrid emits SxS manifests ONLY for the arm64 arch (verified:
     # winsxs/manifests has arm64_* but no x86_*). A 32-bit (i386) process that requests a side-by-side

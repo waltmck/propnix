@@ -28,7 +28,7 @@
 # ARCH. The stub DLLs match the GAME's arch, not the host: a game's Galaxy64.dll is x86_64, so wine's loader
 # resolves the import against x86_64 (even on aarch64/ARM64EC, where the tiny stub then runs emulated — its
 # cost is nil). So these are x86_64 (+ i386) PEs, built with llvm-mingw. Only aarch64 (the winefex path)
-# wires this in; see lib/default.nix and lib/makeAppWine.nix.
+# wires this in; see lib/default.nix and lib/builders/wine.nix.
 #
 # The GalaxyFactory / api:: exports are MSVC-mangled (64-bit uses PEAV/PEBV far-encoding, 32-bit PAV/PBV),
 # aliased to the plain C bodies via a .def EXPORTS list generated below by `classify` (the 32-bit names are

@@ -1,8 +1,9 @@
 {
-  "backends": {
-    "gog-galaxy-windows": {
-      "components": {
-        "base": {
+  "fetchInfo": {
+    "gog": {
+      "x86_64-windows": [
+        {
+          "pname": "hollow-knight-win",
           "productId": "1308320804",
           "buildId": "59545516053866453",
           "version": "1.5.12620",
@@ -13,7 +14,29 @@
           "kind": "game",
           "generation": 2
         }
-      }
+      ]
+    },
+    "steam": {
+      "x86_64-windows": [
+        {
+          "pname": "hollow-knight-win-steam",
+          "appId": 367520,
+          "depotId": 367521,
+          "manifestId": "257781644874438846",
+          "outputHash": "sha256-skM7BIO//sNu6//klDbglqCetOEOglZKVu4YH9ZvK40=",
+          "title": "Hollow Knight (windows, Steam, 1.5.78.11)"
+        }
+      ],
+      "x86_64-linux": [
+        {
+          "pname": "hollow-knight-linux",
+          "appId": 367520,
+          "depotId": 367523,
+          "manifestId": "708613018541602983",
+          "outputHash": "sha256-mGQvVdhTu/GAtQTvXzLVFQq1QN9oDjvj8flZnYeqwaM=",
+          "title": "Hollow Knight (linux, Steam, 1.5.78.11)"
+        }
+      ]
     }
   }
 }

@@ -8,7 +8,7 @@
 #
 # Env provided by the launcher:
 #   PROPNIX_SAVE_DIR, PROPNIX_APPID  — host save dir = $PROPNIX_SAVE_DIR/$PROPNIX_APPID (bound into the prefix
-#                                      at Documents\My Games\FalloutNV; see tuning.nix)
+#                                      at Documents\My Games\FalloutNV; the saveBinds row in default.nix)
 #   PROPNIX_WIDTH, PROPNIX_HEIGHT    — the compositor's primary-output mode, physical px (may be unset)
 #   PROPNIX_PAYLOAD                  — the game tree (ships Fallout_default.ini + low/medium/high/VeryHigh.ini)
 
@@ -26,7 +26,7 @@ fi
 
 # FalloutPrefs.ini: seed once (never clobber). Base = the shipped "medium" quality preset (the graphics keys
 # the launcher's auto-detect would apply), then inject a valid [Display] (resolution + WINDOWED + the adapter
-# name we spoof via wined3d's VideoPciVendorID, see tuning.nix) and a [Launcher] section so the engine treats
+# name we spoof via wined3d's VideoPciVendorID, see wine-tuning.nix) and a [Launcher] section so the engine treats
 # the profile as configured and does not bounce to the launcher.
 if [ ! -e "$prefs" ]; then
   W="${PROPNIX_WIDTH:-1280}"

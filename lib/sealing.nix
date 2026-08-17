@@ -27,46 +27,10 @@ let
       "propnix tuning knob '${name}' must be { value; reason; } (PLAN2 §6: every knob justifies itself).";
     v.value;
 
-  # Merge two nested "<key>"."<name>" maps per-VALUE (per-game adds/overrides individual values within a
-  # key; the rest of the global map stays). Used for `userReg`.
-  mergeNested =
-    a: b:
-    lib.listToAttrs (
-      map (k: lib.nameValuePair k ((a.${k} or { }) // (b.${k} or { }))) (
-        lib.unique (lib.attrNames a ++ lib.attrNames b)
-      )
-    );
-
-  # Layer a per-game tuning over the global wineDefaults. Top-level keys: per-game REPLACES the global
-  # atomically (a scalar knob is a whole { value; reason; }, so no reason-bleed). `dllOverrides` merges
-  # per-DLL, `userReg` merges per-value, and `mounts` merges per-target/per-field (below). This is why a
-  # game spec need only state what's specific to it (e.g. its save-dir mount rows).
-  mergeTuning =
-    defaults: perGame:
-    (defaults // perGame)
-    // {
-      dllOverrides = (defaults.dllOverrides or { }) // (perGame.dllOverrides or { });
-      userReg = mergeNested (defaults.userReg or { }) (perGame.userReg or { });
-      # `fpsUserReg` / `vsyncUserReg` — same nested shape as `userReg`, merged per-value (a game adds its
-      # fps>0-conditional resp. fps==0-conditional keys).
-      fpsUserReg = mergeNested (defaults.fpsUserReg or { }) (perGame.fpsUserReg or { });
-      vsyncUserReg = mergeNested (defaults.vsyncUserReg or { }) (perGame.vsyncUserReg or { });
-      # `mounts` merges per-TARGET *and* per-field: a game can add an entry, override one field of a
-      # default (e.g. `mounts."drive_c/windows/temp".source = …`), or disable one
-      # (`mounts.<t>.enabled = false;`) without restating the rest.
-      mounts = mergeNested (defaults.mounts or { }) (perGame.mounts or { });
-      # `brokenVariables` is a UNION of the global + per-game lists (a game adds the env vars it can't tolerate
-      # on top of any global ones), deduplicated.
-      brokenVariables = lib.unique ((defaults.brokenVariables or [ ]) ++ (perGame.brokenVariables or [ ]));
-      # `systemReg`/`userdefReg` (HKLM/HKU\.Default) merge per-value like `userReg`. `extraSystem32` merges
-      # per-DLL like `dllOverrides`. `galaxyStubDlls` is a deduplicated UNION (a layer adds stubs). `exeArgs`,
-      # `setupScript`, `userRegScript` are NOT special-cased → the `defaults // perGame` above REPLACES them
-      # (a game states its complete arg list / its one script).
-      systemReg = mergeNested (defaults.systemReg or { }) (perGame.systemReg or { });
-      userdefReg = mergeNested (defaults.userdefReg or { }) (perGame.userdefReg or { });
-      extraSystem32 = (defaults.extraSystem32 or { }) // (perGame.extraSystem32 or { });
-      galaxyStubDlls = lib.unique ((defaults.galaxyStubDlls or [ ]) ++ (perGame.galaxyStubDlls or [ ]));
-    };
+  # NOTE: layering/merging tuning across layers (the old `mergeNested`/`mergeTuning`/`resolveTuning`) now lives
+  # in the evalModules resolver (lib/modules/* + lib/backends/*/options.nix, driven by mkApp) — the custom knob option types reproduce this
+  # exact algebra (head-wins scalars, per-value userReg/mounts, deduped union lists). sealing.nix keeps only the
+  # FLATTEN (reason-strip) + the SEAL record, which run on the already-resolved config.
 
   # Flatten `userReg` (nested "<key>"."<name>" = { value; reason; type ? "REG_SZ"; }) to a LIST of
   # { key; name; value; type; } — the launcher applies each into HKCU every launch via `wine reg add`.
@@ -112,22 +76,6 @@ let
         v
     ) tuning;
 
-  # Resolve a stack of tuning LAYERS to one config via a FIXED POINT (the module-system semantic, in miniature):
-  # each layer is either a plain tuning attrset OR a FUNCTION of the FINAL merged config, so a DERIVED entry can
-  # reference another knob's POST-override value (e.g. `config: { userReg.…Graphics.value = config.graphics.value; }`
-  # recomputes whenever a later layer overrides `graphics`). Layers merge left→right with `mergeTuning` (later
-  # wins). `lib.fix` ties the knot; it terminates because derived entries depend on knobs, not vice versa (no
-  # cycles). This is what `//`-merge cannot do: `//` resolves a reference BEFORE the override, freezing it.
-  resolveTuning =
-    layers:
-    lib.fix (
-      final:
-      let
-        resolved = map (l: if lib.isFunction l then l final else l) layers;
-      in
-      lib.foldl' mergeTuning (lib.head resolved) (lib.tail resolved)
-    );
-
   # mkSeal builds the seal record baked into the launcher config: the scrub prefixes, the structured
   # `dllOverrides` map (DLL → load order; the launcher joins it into WINEDLLOVERRIDES and merges the
   # DXVK/vkd3d entries), and `setEnv` (the remaining meant vars: WINEDEBUG, USER/LOGNAME, plus any per-game
@@ -146,8 +94,6 @@ in
   inherit
     defaultScrub
     isKnob
-    mergeTuning
-    resolveTuning
     flattenTuning
     mkSeal
     ;

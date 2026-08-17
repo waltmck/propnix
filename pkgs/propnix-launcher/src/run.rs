@@ -9,6 +9,7 @@
 
 use crate::config::Config;
 use crate::env::ChildEnv;
+use crate::focus;
 use crate::settings::{Paths, Settings};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -46,7 +47,7 @@ pub fn code_of(status: ExitStatus) -> i32 {
 /// `enter_and_mount`) is only safe if the CALLER is SINGLE-THREADED at this point. `run_outer` guarantees
 /// that — it calls this BEFORE spawning the prefetch thread, the worker thread, or the GTK splash.
 pub fn spawn_mounted(
-    cfg: &Config,
+    tar: &str,
     config_path: &str,
     view: &std::path::Path,
     entries: Vec<propnix_mount::Entry>,
@@ -71,7 +72,7 @@ pub fn spawn_mounted(
     // Assemble the prefix in the child (post-fork, pre-exec): unshare the ns + lay the mount table, then the
     // Command execs the inner launcher into it. An assembly failure aborts the spawn (surfaced to the parent).
     let root = view.to_string_lossy().into_owned();
-    let tar = cfg.emulators.tar.clone();
+    let tar = tar.to_string();
     unsafe {
         cmd.pre_exec(move || {
             propnix_mount::enter_and_mount(&root, &entries, &tar)
@@ -164,6 +165,68 @@ pub fn watch_child(
             let _ = tx.send(Progress::Presented);
         }
         std::thread::sleep(Duration::from_millis(120));
+    }
+}
+
+/// Compositor window-watcher (best-effort; needs a toplevel-list protocol — wlr-foreign-toplevel-management,
+/// present on wlroots compositors like Hyprland/sway). Spawned on a thread by both outer paths (wine in
+/// main.rs, THIN in thin.rs); one probe of the game's toplevel drives two jobs:
+///   1. Splash dismiss — some backends emit NO first-present stderr marker for `watch_child` to scan
+///      (OpenGL wine titles like Prison Architect, and every THIN native/box64 game), so dismiss the splash
+///      once the game window MAPS. Complements the marker scan (whichever fires first); a marker backend
+///      normally wins, so this never uncovers a still-black D3D window early.
+///   2. Close-to-quit — once the window has appeared, watch for it to be DESTROYED (gone from the
+///      compositor's toplevel list; minimized/unfocused windows still appear, so absence means closed) and
+///      force teardown. Needed because a wine game can HANG on shutdown (stuck on ntsync) after its window
+///      closes, so the inner's wait-on-process never returns and the launcher tree lingers.
+///      `signals::cancel()` drives the existing teardown path (wine: SIGTERM-the-tree + prefix-scoped
+///      `wineserver -k`; THIN: the process-group kill), which reaps the hung game.
+/// On a compositor lacking the protocol (or no display) the probe returns NoManager and the watcher stops:
+/// the splash then relies on the fallback timeout, and the game must exit on its own.
+pub fn watch_window(tx: Sender<Progress>, needle: String, title: String, splash_app_id: String) {
+    let step = Duration::from_millis(400);
+    // Phase 1: wait for the game window to appear → dismiss the splash.
+    let mut appeared = false;
+    for _ in 0..430u32 {
+        // ~175 s, under watch_child's 180 s fallback
+        if crate::signals::cancelled() {
+            return;
+        }
+        match focus::game_window_probe(&needle, &title, &splash_app_id) {
+            focus::Probe::NoManager => return, // signal unavailable here — fallback timeout owns the splash
+            focus::Probe::Found => {
+                std::thread::sleep(Duration::from_millis(750)); // let the first frame paint
+                let _ = tx.send(Progress::Presented);
+                appeared = true;
+                break;
+            }
+            focus::Probe::NotFound => std::thread::sleep(step),
+        }
+    }
+    if !appeared {
+        return;
+    }
+    // Phase 2: the window is up — watch for it to be destroyed (user closed it) → force teardown.
+    // Require several consecutive absences (~3 s) so a transient probe glitch, or a toplevel that a
+    // fullscreen toggle briefly destroys and re-creates, doesn't trigger a false quit.
+    let mut gone = 0u32;
+    loop {
+        std::thread::sleep(step);
+        if crate::signals::cancelled() {
+            return; // teardown already under way (normal exit or Ctrl-C)
+        }
+        match focus::game_window_probe(&needle, &title, &splash_app_id) {
+            focus::Probe::Found => gone = 0,
+            focus::Probe::NotFound => {
+                gone += 1;
+                if gone >= 8 {
+                    // ~3.2 s with no game window → it was closed; tear the launcher down.
+                    crate::signals::cancel();
+                    return;
+                }
+            }
+            focus::Probe::NoManager => return, // lost the signal — don't force-quit on uncertainty
+        }
     }
 }
 

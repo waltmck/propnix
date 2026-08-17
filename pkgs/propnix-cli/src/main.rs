@@ -5,6 +5,7 @@
 
 mod gog;
 mod provider;
+mod steam;
 mod store;
 
 use clap::{Parser, Subcommand};
@@ -41,8 +42,12 @@ enum CredAction {
         #[arg(value_name = "TYPE")]
         r#type: String,
     },
-    /// Remove the stored account with the given username.
+    /// Remove a stored account by username. If the same username exists under multiple account types (e.g. a
+    /// GOG and a Steam `alice`), pass `--type` to say which.
     Rm {
+        /// Account type, to disambiguate a username stored under more than one backend (e.g. `gog`, `steam`).
+        #[arg(short = 't', long = "type", value_name = "TYPE")]
+        r#type: Option<String>,
         #[arg(value_name = "USERNAME")]
         username: String,
     },
@@ -54,7 +59,7 @@ fn main() -> ExitCode {
         Command::Cred { action } => match action {
             CredAction::List => cmd_list(),
             CredAction::Add { r#type } => cmd_add(&r#type),
-            CredAction::Rm { username } => cmd_rm(&username),
+            CredAction::Rm { r#type, username } => cmd_rm(&username, r#type.as_deref()),
         },
     };
     match result {
@@ -118,9 +123,9 @@ fn cmd_add(type_name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_rm(username: &str) -> Result<(), String> {
+fn cmd_rm(username: &str, type_filter: Option<&str>) -> Result<(), String> {
     let store = CredStore::from_env();
-    let type_name = store.remove(username)?;
-    println!("propnix: removed {type_name} account '{username}'");
+    let removed_type = store.remove(username, type_filter)?;
+    println!("propnix: removed {removed_type} account '{username}'");
     Ok(())
 }

@@ -1,20 +1,25 @@
 # propnix
 
 Reproducible Nix packaging of proprietary games/apps to run on Linux. The goal is to provide sensible 
-defaults that make apps run well (i.e. constructing a WINE prefix, overriding certainDLLs, choosing an
+defaults that make apps run well (i.e. constructing a WINE prefix, overriding certain DLLs, choosing an
 emulator/emulator options), abstracting the details of emulation to provide a consistent experience
 between platforms.
 
-For now, the only supported fetcher is GoG. You will need to initialize your credentials (see
-**Cretentials**). Quick start:
+Supported fetchers are GOG and Steam. You will need to initialize your credentials (see
+**Credentials**). Quick start:
 
 ```
 nix run .#propnix -- cred add gog   # And follow the instructions to login
 nix run .#factorio --extra-sandbox-paths /propnix=/var/lib/propnix
 ```
 
-This is fully reproducible (it relies on pinned versions from the Galaxy fetcher API); it downloads the 
-game using your GoG credentials as a FOD, then wraps it so that it looks like a native linux application.
+This is fully reproducible (every download is pinned in the game's `versions.json` — GOG Windows builds
+by Galaxy `buildId`, Steam builds by depot manifest); it downloads the game using your credentials as a
+FOD, then wraps it so that it looks like a native linux application.
+
+Tell propnix which stores you have (a ranked preference; resolved purely at eval — credentials are never
+probed): `propnix.lib.mkScope { inherit pkgs; config.preferredFetchers = [ "steam" "gog" ]; }` — see
+**Configuration** in [DOCS.md](DOCS.md).
 
 ## Requirements
 
@@ -33,14 +38,15 @@ benefits of native kernel mounts. That design leans on several host capabilities
 | Wayland (+ Xwayland) or X11 | the GTK4 splash + the game window | yes |
 | `/dev/ntsync` (Linux **6.14+**) | fast wine synchronization | recommended |
 | `wlr-foreign-toplevel-management` compositor | single-instance raise, splash dismiss, close-to-quit | optional (degrades gracefully) |
-| GOG account owning the title + Galaxy token | **building** a game payload (FOD fetch) | yes (build-time) |
+| GOG/Steam account owning the title + its token | **building** a game payload (FOD fetch) | yes (build-time) |
 
 ## How it runs
 
-`makeAppWine` turns a game spec into `bin/<name>` — a wrapper around `propnix-launcher` with a baked
-JSON config (store paths + defaults + the seal + the mount table). The scope injects the arch-appropriate
-emulator set (aarch64 → wine+FEX+ARM64EC DXVK/vkd3d; x86_64 → native wine + standard DXVK/vkd3d), but the
-launcher, config, and game spec are identical. At launch the launcher:
+`mkApp` evaluates a game's module (two orthogonal axes: `fetcher` × `emulatedPlatform`) and dispatches to
+the selected backend's builder (`mkWineApp` / `mkThinApp`), producing `bin/<name>` — a wrapper around
+`propnix-launcher` with a baked JSON config (store paths + defaults + the seal + the mount table). The
+scope injects the arch-appropriate emulator set (aarch64 → wine+FEX+ARM64EC DXVK/vkd3d; x86_64 → native
+wine + standard DXVK/vkd3d), but the launcher, config, and game spec are identical. At launch the launcher:
 
 1. **single-instance** — an flock keyed on the appid; a duplicate launch focuses the running window and
    exits. Focus works via EWMH `_NET_ACTIVE_WINDOW` on X11/Xwayland, and via `wlr-foreign-toplevel-management`
@@ -82,20 +88,25 @@ Debug escape hatches: `--shell` (sealed shell in the prefix), `--propnix-unseal`
 
 ## Credentials
 
-The credentialed fetch needs a GOG token, kept **out of the store**. Add an account with the `propnix` CLI:
+The credentialed fetchers need an account token, kept **out of the store**. Add an account with the
+`propnix` CLI (`gog` for GOG payloads, `steam` for Steam depots):
 
 ```
-propnix cred add gog      # opens a browser login; paste back the redirect URL
-propnix cred list         # accounts, grouped by type, labelled by username
-propnix cred rm <username>
+propnix cred add gog             # opens a browser login; paste back the redirect URL
+propnix cred add steam           # DepotDownloader's Steam Guard 2FA login (one-time)
+propnix cred list                # accounts, grouped by type, labelled by username
+propnix cred rm <username>       # or, if a username exists under >1 type:
+propnix cred rm --type steam <username>
 ```
 
 `cred add gog` opens GoG's login in your browser (GoG blocks headless password login — captcha/2FA happen
-there); you paste the resulting `…/on_login_success?code=…` URL back, and it mints + stores the token. It
-populates the store at **`/var/lib/propnix`** — `credentials.toml` (a non-secret pointer) plus
-`gog/<username>/galaxy_tokens.json`, group-owned `nixbld` (mode 0640) so the build sandbox can read it
-(writing `/var/lib` needs `sudo`; the login itself runs as you). Multiple accounts are supported — the
-fetcher tries each until one owns the pinned build.
+there); you paste the resulting `…/on_login_success?code=…` URL back, and it mints + stores the token.
+`cred add steam` drives DepotDownloader through Steam's one-time Steam Guard 2FA and stores the reusable
+refresh token. Both populate the store at **`/var/lib/propnix`** — `credentials.toml` (a non-secret pointer)
+plus `<type>/<username>/<tokenfile>` (`gog/…/galaxy_tokens.json`, `steam/…/depotdownloader-store.tar`),
+group-owned `nixbld` (mode 0640) so the build sandbox can read it (writing `/var/lib` needs `sudo`; the login
+itself runs as you). Multiple accounts are supported — a fetcher tries each of its type until one owns the
+pinned content. `cred rm` takes `--type` to disambiguate when the same username is stored under two backends.
 
 Bind the store into the build sandbox with the NixOS module (`services.propnix.enable`) or manually
 (`--extra-sandbox-paths /propnix=/var/lib/propnix`, requires a trusted Nix user). The store holds only the

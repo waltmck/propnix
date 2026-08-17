@@ -66,11 +66,14 @@ impl CredStore {
         out
     }
 
-    /// Find the (type, dir) of a stored account by username, across all types. Err if none or ambiguous.
-    pub fn find(&self, username: &str) -> Result<(String, PathBuf), String> {
+    /// Find the (type, dir) of a stored account by username. `type_filter` (from `--type`) restricts the
+    /// search to one account type — needed to disambiguate the SAME username under multiple backends (e.g. a
+    /// GOG `alice` and a Steam `alice`). Err if none match, or if >1 match (only possible without a filter).
+    pub fn find(&self, username: &str, type_filter: Option<&str>) -> Result<(String, PathBuf), String> {
         let matches: Vec<(String, PathBuf)> = self
             .list()
             .into_iter()
+            .filter(|t| type_filter.map_or(true, |tf| t.type_name == tf))
             .flat_map(|t| {
                 let ty = t.type_name.clone();
                 t.usernames.into_iter().filter(|u| u == username).map(move |u| {
@@ -79,13 +82,18 @@ impl CredStore {
             })
             .collect();
         match matches.len() {
-            0 => Err(format!("no credential found for username '{username}'")),
+            0 => Err(match type_filter {
+                Some(tf) => format!("no {tf} credential found for username '{username}'"),
+                None => format!("no credential found for username '{username}'"),
+            }),
             1 => Ok(matches.into_iter().next().unwrap()),
             _ => {
                 let types: Vec<String> = matches.iter().map(|(t, _)| t.clone()).collect();
                 Err(format!(
-                    "username '{username}' exists under multiple types ({}); remove is ambiguous",
-                    types.join(", ")
+                    "username '{username}' exists under multiple types ({}) — disambiguate with:\n  \
+                     propnix cred rm --type <{}> {username}",
+                    types.join(", "),
+                    types.join("|")
                 ))
             }
         }
@@ -130,9 +138,10 @@ impl CredStore {
         Ok(())
     }
 
-    /// Remove a stored account (by username, across types). Escalates via sudo when needed.
-    pub fn remove(&self, username: &str) -> Result<String, String> {
-        let (type_name, dir) = self.find(username)?;
+    /// Remove a stored account, disambiguated by `type_filter` (`--type`) when the username is not unique.
+    /// Escalates via sudo when needed. Returns the removed account's type.
+    pub fn remove(&self, username: &str, type_filter: Option<&str>) -> Result<String, String> {
+        let (type_name, dir) = self.find(username, type_filter)?;
         self.priv_run("rm", &["-rf", "--", &dir.to_string_lossy()])?;
         Ok(type_name)
     }

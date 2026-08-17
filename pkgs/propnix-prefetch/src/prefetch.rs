@@ -20,10 +20,12 @@ extern "C" {
 }
 const POSIX_FADV_WILLNEED: i32 = 3; // asm-generic value (same on aarch64 and x86_64)
 
-/// Recursively collect regular-file paths under `path`. Never recurses THROUGH a symlink (cycle-safe
-/// against e.g. a wine prefix's `dosdevices/z: -> /`), but a symlink whose target is a regular file is
-/// included — opening it later follows the link, which is what warms wine's store-linked DLLs.
-pub fn collect(path: &Path, out: &mut Vec<PathBuf>) {
+/// Recursively collect regular-file paths under `path` whose extension matches `exts` (see `wanted`). Never
+/// recurses THROUGH a symlink (cycle-safe against e.g. a wine prefix's `dosdevices/z: -> /`, and it keeps
+/// `dosdevices/c: -> ../drive_c` from walking the tree twice), but a symlink whose target is a regular file
+/// is included — opening it later follows the link, which is what warms wine's store-linked DLLs (the whole
+/// i386 syswow64 set is symlinks into `${wine}/lib/wine/i386-windows`).
+pub fn collect(path: &Path, out: &mut Vec<PathBuf>, exts: &[&str]) {
     let md = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(_) => return,
@@ -32,9 +34,11 @@ pub fn collect(path: &Path, out: &mut Vec<PathBuf>) {
     if ft.is_dir() {
         if let Ok(entries) = fs::read_dir(path) {
             for entry in entries.flatten() {
-                collect(&entry.path(), out);
+                collect(&entry.path(), out, exts);
             }
         }
+    } else if !wanted(path, exts) {
+        // Filtered out before the (cheap, but not free) stat that resolves a symlink's target.
     } else if ft.is_symlink() {
         if let Ok(target) = fs::metadata(path) {
             if target.is_file() {
@@ -43,6 +47,20 @@ pub fn collect(path: &Path, out: &mut Vec<PathBuf>) {
         }
     } else if ft.is_file() {
         out.push(path.to_path_buf());
+    }
+}
+
+/// Does this file's extension match the allowlist? An EMPTY `exts` accepts every file (warm everything);
+/// otherwise the extension must match one entry case-insensitively — Windows trees are case-insensitive by
+/// convention, so a game shipping `Foo.DLL` alongside wine's lowercase `kernel32.dll` must still match.
+/// An extensionless file never matches a non-empty allowlist.
+fn wanted(path: &Path, exts: &[&str]) -> bool {
+    if exts.is_empty() {
+        return true;
+    }
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => exts.iter().any(|w| ext.eq_ignore_ascii_case(w)),
+        None => false,
     }
 }
 

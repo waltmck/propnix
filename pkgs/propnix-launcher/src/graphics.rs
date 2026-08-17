@@ -45,6 +45,8 @@ pub fn apply(
     // per-game `graphics` knob (already merged), so exporting it captures BOTH override layers. `settings.dpi`
     // is exported only when set → an unset `$PROPNIX_DPI` drops LogPixels, and the merge prunes a stale one.
     // Single-threaded here (run_inside_ns calls us before any thread / the wine spawn), so set_var is safe.
+    // LOAD-BEARING: run_inside_ns spawns the module-prefetch thread only AFTER this returns, precisely because
+    // that thread reads the env (`getenv`) — never move it above this call, or these two race.
     std::env::set_var("PROPNIX_WINE_GRAPHICS", &settings.graphics);
     if let Some(dpi) = settings.dpi {
         std::env::set_var("PROPNIX_DPI", dpi.to_string());

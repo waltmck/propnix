@@ -335,7 +335,10 @@ let
       payload = "${payload}"; # the primary game tree; the launch cwd (store DLLs are stubbed/whited-out via mount rows)
       emulators = {
         wine = "${wine}";
-        prefixLower = "${prefixLower}";
+        # No `prefixLower`: the read-only system tree is referenced only by the `mounts` rows above
+        # (`${prefixLower}/drive_c/windows`, …), which is all the launcher needs — it warms the ASSEMBLED
+        # prefix's PE modules from inside the mount ns, never the store tree. (`deny_unknown_fields`: adding it
+        # back here without the matching launcher field is a hard load error.)
         dxvk = "${dxvk}";
         vkd3d = "${vkd3d}";
         # `tar` for the linked propnix_mount to extract overlay `skeleton` tars (sparse + xattr aware).

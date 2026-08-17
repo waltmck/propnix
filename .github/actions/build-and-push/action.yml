@@ -1,0 +1,50 @@
+# The shared build-job body for .github/workflows/cachix.yml: free runner disk, install nix, connect
+# the propnix cachix (substituter + streaming push of locally-built paths), then build the given
+# propnix scope attrs for the given system. The job must have checked out the repo already (a local
+# composite action is itself loaded from the checkout).
+name: build-and-push
+description: Build propnix legacyPackages attrs and stream them to the propnix cachix
+
+inputs:
+  system:
+    description: Nix system to build for (must match the runner arch — some builds execute wine)
+    required: true
+  attrs:
+    description: Space-separated legacyPackages.<system> attr names to build
+    required: true
+  cachix-auth-token:
+    description: Cachix auth token for the propnix cache
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # The heavy builds (wine's 4-arch ARM64X tree, fexdlls' submodule source + two cmake trees) need
+    # more scratch than the stock image leaves free; drop the preinstalled toolchains we never use.
+    - name: Free runner disk space
+      shell: bash
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+          /opt/hostedtoolcache/CodeQL || true
+        sudo docker image prune --all --force >/dev/null 2>&1 || true
+        df -h /
+    - uses: cachix/install-nix-action@v31
+      with:
+        extra_nix_config: |
+          experimental-features = nix-command flakes
+    - uses: cachix/cachix-action@v16
+      with:
+        name: propnix
+        authToken: ${{ inputs.cachix-auth-token }}
+        # Locally-built paths stream to the cache as they finish (daemon mode), so a job that later
+        # times out still keeps its completed packages. Don't push source FODs (wine/FEX checkouts,
+        # toolchain tarballs) — they're multi-GB and re-fetchable from upstream.
+        pushFilter: '(-source$|\.tar\.|\.zip$|\.patch$)'
+    - name: Build
+      shell: bash
+      run: |
+        targets=()
+        for attr in ${{ inputs.attrs }}; do
+          targets+=(".#legacyPackages.${{ inputs.system }}.${attr}")
+        done
+        nix build --print-build-logs --keep-going "${targets[@]}"

@@ -1,0 +1,140 @@
+# Build every REDISTRIBUTABLE package (the emulator stack + the Rust tools — never game payloads,
+# whose fetchers are credentialed and allowSubstitutes=false) and push it to propnix.cachix.org.
+# Consumers substitute with:
+#
+#   extra-substituters = https://propnix.cachix.org
+#   extra-trusted-public-keys = propnix.cachix.org-1:SNLYz28zaBpFI1ORjqI7pPXy95fFmumG1aF4gW1eAxo=
+#
+# Job DAG (each node substitutes its deps from the cache, so re-runs resume where the last run got to;
+# aarch64 runs natively on the free public-repo ARM runners — required, some builds EXECUTE wine):
+#
+#   wine (both systems; the multi-hour long pole, nixpkgs-only deps) ─────────┐
+#   toolchain (aarch64 llvmMingw; fast prebuilt fetch) ─→ arm64ec fan-out ────┼─→ prefix-lower
+#   tools (Rust launcher/cli + box64 / x86_64 dxvk+vkd3d; independent roots)  │
+#
+# (prefix-lower `needs` the whole wine + arm64ec jobs — GitHub can't express per-matrix-entry edges —
+# so the x86_64 prefixLower also waits on the aarch64 arm64ec fan-out; it's cheap, minutes.)
+name: cachix
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cachix-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  wine:
+    name: wine (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: x86_64-linux
+            runner: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build-and-push
+        with:
+          system: ${{ matrix.system }}
+          attrs: wine
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+  tools:
+    name: tools (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+            attrs: propnix-launcher propnix-cli box64
+          - system: x86_64-linux
+            runner: ubuntu-latest
+            attrs: propnix-launcher propnix-cli dxvk vkd3d
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build-and-push
+        with:
+          system: ${{ matrix.system }}
+          attrs: ${{ matrix.attrs }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+  # The aarch64 ARM64EC toolchain root: fast (prebuilt mstorsjo release + autoPatchelf), pushed before
+  # the fan-out below so its four consumers substitute it instead of each re-realizing it.
+  toolchain:
+    name: llvm-mingw (aarch64-linux)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build-and-push
+        with:
+          system: aarch64-linux
+          attrs: llvmMingw
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+  arm64ec:
+    name: ${{ matrix.name }} (aarch64-linux)
+    needs: toolchain
+    # The needs edge is ORDERING (so llvmMingw is substitutable from the cache), not a gate: if the
+    # toolchain job failed, still attempt — the build realizes llvmMingw in-job and fails visibly here
+    # rather than being silently skipped.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: fex-dlls
+            attrs: fexdlls
+          - name: graphics
+            attrs: dxvk vkd3d
+          - name: galaxy-stub
+            attrs: galaxyStub
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build-and-push
+        with:
+          system: aarch64-linux
+          attrs: ${{ matrix.attrs }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+  # prefixLower composes wine (+ fexdlls on aarch64) and EXECUTES wine in the sandbox (wineboot), so it
+  # must build on the matching runner arch. Cheap once its deps substitute.
+  prefix-lower:
+    name: prefix-lower (${{ matrix.system }})
+    needs: [wine, arm64ec]
+    # As above: the needs edges are ORDERING only. Without this, a failure in ANY leg of wine/arm64ec —
+    # including legs prefixLower doesn't depend on (galaxyStub, the other arch's wine) — would silently
+    # skip BOTH prefixLower builds. Attempting instead realizes missing deps in-job (or fails visibly).
+    if: ${{ !cancelled() }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: x86_64-linux
+            runner: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build-and-push
+        with:
+          system: ${{ matrix.system }}
+          attrs: prefixLower
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}

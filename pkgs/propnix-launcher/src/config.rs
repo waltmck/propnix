@@ -204,9 +204,9 @@ fn default_reg_type() -> String {
 pub struct Emulators {
     /// wine-hangover store dir (`/bin/wine`, `/bin/wineserver`).
     pub wine: String,
-    /// The read-only system tree symlinked into each prefix (wine-prefix-lower).
-    #[serde(rename = "prefixLower")]
-    pub prefix_lower: String,
+    // (No `prefixLower`: the read-only system tree reaches the launcher only as the baked `${prefixLower}/…`
+    // sources of the `mounts` rows. Nothing needs the root itself — the module prefetch warms the ASSEMBLED
+    // prefix from inside the mount ns, not the store tree — so it is not baked, per `deny_unknown_fields`.)
     /// Native ARM64EC DXVK store dir (d3d11/d3d10core/dxgi/d3d9 DLLs).
     pub dxvk: String,
     /// Native ARM64EC vkd3d-proton store dir (d3d12/d3d12core DLLs).

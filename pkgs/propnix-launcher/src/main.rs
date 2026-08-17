@@ -282,7 +282,8 @@ fn run_outer(
     }
 
     // MUST be single-threaded here — spawn_mounted's pre_exec assembles the prefix post-fork. Spawn the
-    // prefetch thread + the splash/worker threads only AFTER it returns.
+    // splash/worker threads only AFTER it returns. (The module prefetch is NOT started here: the assembled
+    // prefix lives in the child's private mount namespace, invisible from this process — the INNER warms it.)
     let (child, reader) = match run::spawn_mounted(
         &cfg.emulators.tar,
         &config_path,
@@ -298,11 +299,7 @@ fn run_outer(
         }
     };
 
-    // Now safe to go multithreaded: warm the wine lower's cache on a detached thread (overlaps cold start).
-    if !settings.no_prefetch {
-        run::spawn_prefetch(&cfg);
-    }
-
+    // Now safe to go multithreaded.
     let (tx, rx) = mpsc::channel::<run::Progress>();
     let name = cfg.name.clone();
     let icon = cfg.icon.clone();

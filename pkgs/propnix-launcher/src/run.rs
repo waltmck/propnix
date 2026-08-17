@@ -23,12 +23,39 @@ pub enum Progress {
     Exited(i32), // the game (and its prefix tree) is gone → quit with this code
 }
 
-/// Warm the wine lower's DLL closure in the background (posix_fadvise WILLNEED). No-op on a warm cache.
-/// Runs the linked `propnix_prefetch::warm` on a DETACHED thread so it overlaps the mount + wine cold start
-/// (fire-and-forget; dies with the process). Must be called AFTER `spawn_mounted` — see its SAFETY note.
-pub fn spawn_prefetch(cfg: &Config) {
-    let lower = std::path::PathBuf::from(&cfg.emulators.prefix_lower);
-    std::thread::spawn(move || propnix_prefetch::warm(&[lower]));
+/// Warm the ASSEMBLED prefix's PE-module closure in the background (posix_fadvise WILLNEED). No-op on a warm
+/// cache.
+/// Runs the linked `propnix_prefetch::warm` on a DETACHED thread so it overlaps the registry stamp and wine's
+/// own cold start (fire-and-forget; dies with the process).
+///
+/// INNER-ONLY, and hence WINE-ONLY: the prefix view exists solely inside the mount namespace propnix-mount
+/// unshares in the mount child, so from the OUTER (which is not in that namespace) `paths.view` is an empty
+/// directory — warming it there would find nothing. Running here, after the mount, covers the WHOLE prefix
+/// in one walk: system32's wine builtins + FEX emulator DLLs + the DXVK/vkd3d and `extraSystem32` binds,
+/// syswow64's i386 symlinks, AND the game's own bundled modules under `drive_c/game`. (THIN has no prefix
+/// and no wine loader, so it never reaches this path.)
+///
+/// Restricted to the three PE-module extensions wine's loader MAPS at start-up, and nothing else:
+///   * `dll` — the bulk of it (~1.3 k in the store system tree) plus the game's bundled libraries;
+///   * `drv` — the display driver is `winewayland.drv` / `winex11.drv`, NOT a `.dll`, and every GUI title
+///     binds one before its first window;
+///   * `exe` — the game's own executable, plus the wine services wineboot starts alongside it
+///     (services.exe, explorer.exe, winedevice.exe).
+/// The restriction is what makes warming the full view affordable: a game's DATA (assets, packs, video) is
+/// streamed by its engine on its own schedule, so warming it would only spend I/O bandwidth and ARC that the
+/// modules need first.
+fn spawn_prefetch(view: &std::path::Path) {
+    let view = view.to_path_buf();
+    let debug = std::env::var_os("PROPNIX_DEBUG").is_some();
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        let n = propnix_prefetch::warm(&[view], &["dll", "drv", "exe"]);
+        // The only trace of an otherwise silent background job — and the one number that says whether it
+        // found the assembled prefix at all (a count of 0 would mean we warmed an empty view).
+        if debug {
+            eprintln!("propnix: prefetched {n} PE modules in {:?}", started.elapsed());
+        }
+    });
 }
 
 pub fn code_of(status: ExitStatus) -> i32 {
@@ -45,7 +72,7 @@ pub fn code_of(status: ExitStatus) -> i32 {
 ///
 /// SAFETY: the `pre_exec` closure runs post-fork / pre-exec, so it (and the fs writes + mount syscalls in
 /// `enter_and_mount`) is only safe if the CALLER is SINGLE-THREADED at this point. `run_outer` guarantees
-/// that — it calls this BEFORE spawning the prefetch thread, the worker thread, or the GTK splash.
+/// that — it calls this BEFORE spawning the worker thread or the GTK splash.
 pub fn spawn_mounted(
     tar: &str,
     config_path: &str,
@@ -259,6 +286,16 @@ pub fn run_inside_ns(
     if let Err(e) = crate::graphics::apply(cfg, settings, paths, child_env) {
         eprintln!("propnix: registry setup failed: {e}");
         return 1;
+    }
+
+    // Warm the assembled prefix's PE-module closure (detached; see `spawn_prefetch`). The view is live from the
+    // moment we start — propnix-mount laid it before re-exec'ing us — but this must come AFTER
+    // `graphics::apply`, which mutates the PROCESS env (`set_var`): `warm` reads its own env knobs, and a
+    // concurrent setenv/getenv is a data race. Here is the last point that still overlaps wine's cold start,
+    // which is the window that matters. `PROPNIX_NO_PREFETCH` is inherited from the outer, so the opt-out
+    // holds in this phase too.
+    if !settings.no_prefetch {
+        spawn_prefetch(&paths.view);
     }
 
     let wine = format!("{}/bin/wine", cfg.emulators.wine);

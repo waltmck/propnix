@@ -2,7 +2,8 @@
 //! ZFS ARC / page cache for a set of paths, without contending with a concurrent synchronous consumer (e.g.
 //! wine's demand page-faults during a cold launch). The launcher's sole cold-launch prefetcher (RESEARCH §19).
 //!
-//! For every regular file under the given roots it issues `posix_fadvise(WILLNEED)` in ≤`chunk`-byte windows.
+//! For every matching regular file under the given roots (filtered by extension — the launcher asks for the
+//! PE modules `dll`/`drv`/`exe`) it issues `posix_fadvise(WILLNEED)` in ≤`chunk`-byte windows.
 //! On ZFS that maps to `dmu_prefetch(…, ZIO_PRIORITY_ASYNC_READ)` — real reads that populate the ARC at a
 //! priority the vdev scheduler runs *behind* synchronous demand reads, so wine keeps I/O priority; on
 //! generic_fadvise filesystems it degrades to ordinary readahead. Chunking to ≤`dmu_prefetch_max` (default
@@ -26,18 +27,22 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// Best-effort: warm the ZFS ARC / page cache for every regular file under `roots`. Builds a small tokio
-/// runtime + a bounded blocking pool of fadvise workers and blocks until they finish. Intended to run on a
-/// detached launcher thread just before wine cold-starts (fire-and-forget; failures are ignored). No-op if
-/// the roots contain no files.
-pub fn warm(roots: &[PathBuf]) {
-    // Directory walk is cheap → do it synchronously up front and collect the file list.
+/// Best-effort: warm the ZFS ARC / page cache for every regular file under `roots` whose extension matches
+/// `exts` (case-insensitively; an EMPTY `exts` warms every file). Builds a small tokio runtime + a bounded
+/// blocking pool of fadvise workers and blocks until they finish. Intended to run on a detached launcher
+/// thread just before wine cold-starts (fire-and-forget; failures are ignored). No-op if the roots contain no
+/// matching files. Returns the number of files actually advised — the only visible trace of an otherwise
+/// silent background job, which the launcher reports under `PROPNIX_DEBUG`.
+pub fn warm(roots: &[PathBuf], exts: &[&str]) -> u64 {
+    // Directory walk is metadata-only → do it synchronously up front and collect the file list. Filtering
+    // here (rather than at advise time) is what keeps a multi-GB game tree cheap to walk: its assets are
+    // stat'd and dropped, and only its DLLs reach the fadvise pool.
     let mut files: Vec<PathBuf> = Vec::new();
     for r in roots {
-        prefetch::collect(r, &mut files);
+        prefetch::collect(r, &mut files, exts);
     }
     if files.is_empty() {
-        return;
+        return 0;
     }
 
     let jobs = env_u64("PROPNIX_PREFETCH_JOBS", 16).max(1) as usize;
@@ -48,7 +53,7 @@ pub fn warm(roots: &[PathBuf]) {
         .build()
     {
         Ok(rt) => rt,
-        Err(_) => return, // best-effort — if we can't even build a runtime, skip warming
+        Err(_) => return 0, // best-effort — if we can't even build a runtime, skip warming
     };
 
     let advised = Arc::new(AtomicU64::new(0));
@@ -72,4 +77,5 @@ pub fn warm(roots: &[PathBuf]) {
             let _ = h.await;
         }
     });
+    advised.load(Ordering::Relaxed)
 }

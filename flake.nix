@@ -91,6 +91,25 @@
         };
       });
 
+      # CI-ONLY (non-standard output): the exhaustive pinned (game × fetcher × emulatedPlatform) eval
+      # matrix, driven one-`nix eval`-process-per-target by ci/eval-matrix.sh (.github/workflows/eval.yml)
+      # so an infinite recursion in one combo can't mask the rest. Instantiated with allowBroken — a
+      # meta.broken title must still EVALUATE (broken refuses building, never enumeration); that's why
+      # this doesn't reuse `scopes` above. See lib/tests/eval-matrix.nix.
+      ci = forAllSystems (
+        system:
+        import ./lib/tests/eval-matrix.nix {
+          inherit lib;
+          pkgs = import nixpkgs {
+            inherit system;
+            config = {
+              allowUnfree = true;
+              allowBroken = true;
+            };
+          };
+        }
+      );
+
       # Arch-agnostic launcher-contract helpers (pure lib / data), usable without picking a system. The
       # arch-specific builders (mkWineApp, the fetchers, …) live under legacyPackages.<system>.
       lib = {

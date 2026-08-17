@@ -81,6 +81,22 @@ let
           (builtins.tryEval (builtins.seq cfg.fetcher (builtins.seq cfg.emulatedPlatform true))).success;
       };
     in
-    drv // surface // { passthru = (drv.passthru or { }) // surface; };
+    # Restrict the result to a PREDICTABLE attr spine (lib.lazyDerivation): a plain `drv // surface`
+    # is strict in `drv`, so ANY attr access (even `.config` or the `resolvable` probe) would force the
+    # default-combo axis resolution + backend dispatch (`backends.${cfg.backend}`) — which made the
+    # tryEval in `resolvable` dead code (the throw fired before the probe could catch it) and let one
+    # game's base-eval regression poison every consumer that merely enumerates the scope
+    # (`resolvableGames`, the CI eval matrix). The spine below is lazy in `drv`: derivation attrs
+    # (outPath/drvPath/meta/…) still force it on access — semantics there are unchanged, including the
+    # meta.broken refusal — but the surface no longer does.
+    lib.lazyDerivation {
+      derivation = drv;
+      passthru = surface // {
+        # mkDerivation's top-level passthru promotion doesn't survive the fixed spine; re-expose the
+        # names mkLauncherPackage guarantees (values stay lazy in drv), and passthru itself.
+        inherit (drv) configFile launcher;
+        passthru = (drv.passthru or { }) // surface;
+      };
+    };
 in
 build [ ]

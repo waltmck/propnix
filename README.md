@@ -81,7 +81,7 @@ steer **all** games:
 | `PROPNIX_DEBUG` | tee the game's merged stdout+stderr to the launcher's stdout (no bench overlay) — for troubleshooting a launch |
 | `PROPNIX_SAVE_DIR` | global saves root, namespaced per app (`$PROPNIX_SAVE_DIR/<appid>`). Set-but-missing is a hard error; unset → `$XDG_DATA_HOME/propnix-saves`. |
 | `PROPNIX_WINEDEBUG` | override `WINEDEBUG` (default `-all`) |
-| `PROPNIX_NO_PREFETCH` | skip the cold-launch prefetch |
+| `PROPNIX_NO_PREFETCH` | skip the cold-launch prefetch (the wine path warms the assembled prefix's PE modules — `.dll`/`.drv`/`.exe`, system32 + the game's own — into the page cache while wine starts) |
 | `PROPNIX_EXTRA_BINDS` | extra `;`-separated `TARGET\|SOURCE` bind rows (TARGET prefix-relative or `$`-expandable; SOURCE an absolute/`$`-expandable host path) — an ad-hoc redirect (e.g. a secondary saves/mods dir) without a rebuild |
 
 Debug escape hatches: `--shell` (sealed shell in the prefix), `--propnix-unseal` (skip the scrub).

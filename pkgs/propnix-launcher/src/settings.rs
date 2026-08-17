@@ -130,7 +130,8 @@ impl Settings {
     /// THIN-mode settings (box64 / native Linux): no wine defaults to resolve — the backend has no
     /// graphics/d3d/fps/dpi knobs (those are wine's). We keep only the fields the shared OUTER machinery
     /// reads: `appid` (state paths, single-instance, PROPNIX_APPID), `console` (forward the game's piped
-    /// stdout under PROPNIX_DEBUG/BENCH), `no_prefetch` (always true — there is no wine DLL lower to warm),
+    /// stdout under PROPNIX_DEBUG/BENCH), `no_prefetch` (always true — the module prefetch is a wine-path-only
+    /// step, run from inside the assembled prefix; THIN has neither a prefix nor a wine loader),
     /// and `unseal`. The wine-only fields get inert defaults so `paths()` / `watch_child` work unchanged.
     pub fn resolve_thin(appid: &str, unseal: bool) -> Settings {
         let appid = env_nonempty("PROPNIX_APPID").unwrap_or_else(|| appid.to_string());

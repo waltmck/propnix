@@ -40,6 +40,13 @@ let
       wine = wine64Packages.minimal; # widl only; 64-bit → avoids the pkgsi686Linux (windows-host) throw
     }).overrideAttrs
       (old: {
+        # winpthreads: meson's dependency('threads') puts `-pthread` on the link line, and the win32
+        # thread-model toolchain ships no libpthread.a of its own — the link fails with "cannot find
+        # -lpthread". nixpkgs' dxvk_2 adds exactly this buildInput for Windows hosts
+        # (dxvk_2/package.nix: `++ lib.optionals hostPlatform.isWindows [ windows.pthreads ]`);
+        # nixpkgs' vkd3d-proton — never cross-built by Hydra — misses it. The STATIC archive
+        # (pthreads.nix: withStatic default) satisfies the `-static` link with no runtime DLL dep.
+        buildInputs = (old.buildInputs or [ ]) ++ [ pkgsCross.mingwW64.windows.pthreads ];
         # vkd3d-proton inherits meta.platforms from `wine`; the 64-bit-Linux wine we substituted excludes
         # the x86_64-windows host this PE build targets. Restore it so checkMeta accepts the cross build.
         meta = (old.meta or { }) // {

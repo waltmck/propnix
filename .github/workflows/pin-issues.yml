@@ -2,12 +2,20 @@
 #
 # This is the CI equivalent of the commit hook one might reach for first. A git hook cannot do the job: it
 # has no GitHub token, no guaranteed network, and it would not run for a squash-merge done in the web UI or
-# for anything pushed by another clone. A `push` trigger on the default branch fires for all of those.
+# for anything pushed by another clone. Running on the default branch after every push-triggered `cachix`
+# run covers all of those.
 #
-# It deliberately RE-VERIFIES against upstream instead of trusting the push. Touching versions.json is not
-# the same as being current — a hand edit could move a pin to some intermediate build, and the issue should
-# only close when the game is genuinely at the newest upstream version. `propnix pin --check` is anonymous,
-# so that re-verification costs nothing and needs no secret.
+# ORDERED AFTER `cachix`, never directly on push. This job substitutes the propnix CLI with --max-jobs 0,
+# and a push that touches the CLI's sources fires the cachix build of the very binary this job refuses to
+# compile — a direct push trigger therefore RACED it and lost (`Cannot build …propnix-cli… local builds
+# are disabled`). `workflow_run` makes the ordering explicit: cachix finishes, then this sweep runs. The
+# price is latency, not correctness — after a slow emulator-stack push the sweep waits hours, but it
+# re-verifies against upstream whenever it runs, so a late close is still a correct close.
+#
+# It deliberately RE-VERIFIES against upstream instead of trusting the repo state. Touching versions.json
+# is not the same as being current — a hand edit could move a pin to some intermediate build, and the
+# issue should only close when the game is genuinely at the newest upstream version. `propnix pin --check`
+# is anonymous, so that re-verification costs nothing and needs no secret.
 #
 # The issue is never REOPENED. `ci/pin-issue.sh` only ever queries `state=open` and has no reopen path,
 # so a game that falls behind again gets a fresh issue — which is also the truthful representation, since
@@ -15,10 +23,14 @@
 name: pin-issues
 
 on:
-  push:
-    branches: [master]
-    paths:
-      - "pkgs/games/*/versions.json"
+  workflow_run:
+    # Matches cachix.yml's `name:`. cachix runs on EVERY master push (it has no path filter), so nothing
+    # a direct push trigger would catch is missed — this fires on the same pushes, just after the cache
+    # is populated. `completed` on purpose, not success-only: the build-and-push composite STREAMS each
+    # finished package to the cache as it completes, so the CLI is normally there even when an unrelated
+    # wine job failed — and when it truly is not, the substitute step below is the honest, loud gate.
+    workflows: [cachix]
+    types: [completed]
   workflow_dispatch:
     inputs:
       game:
@@ -30,7 +42,7 @@ permissions:
 
 concurrency:
   # SHARED with the other pin workflow, deliberately. Concurrency groups are repository-wide and match
-  # across workflows, so one literal name means the weekly refresh and the push hook can never be
+  # across workflows, so one literal name means the weekly refresh and this sweep can never be
   # mid-flight at the same time — no interleaving on the same issue, and no two runs racing the branch.
   #
   # CAVEAT, accepted: GitHub keeps at most ONE queued run per group, so a run queued here can be
@@ -50,10 +62,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Full history: a push can carry many commits, and `git diff <before> <after>` needs both ends.
-          # This is only an OPTIMIZATION — every candidate is re-verified against upstream below, so
-          # widening to all games on any ambiguity is free.
-          fetch-depth: 0
+          # The default ref — the default branch's CURRENT head — is exactly right here: the sweep
+          # re-checks every game against upstream (a workflow_run event carries no push range to narrow
+          # by), so the freshest versions.json state is the one to read. Shallow, too: nothing diffs.
           # This job never pushes; leaving GITHUB_TOKEN in .git/config would only widen what a compromised
           # step can reach. (Parity with auto-update.yml, which has a stronger reason of its own.)
           persist-credentials: false
@@ -75,32 +86,20 @@ jobs:
           echo "$(cat /tmp/cli-path)/bin" >> "$GITHUB_PATH"
 
       # `${{ }}` splices interpolate BEFORE the shell sees the script, so a value carrying shell syntax
-      # would execute as code. `github.event.inputs.game` is human-supplied and `github.event.before`
-      # comes off the wire; both go through `env:` instead, where the shell treats them as data.
+      # would execute as code. `github.event.inputs.game` is human-supplied; it goes through `env:`
+      # instead, where the shell treats it as data.
       - name: Which games to re-check
-        id: which
         env:
           INPUT_GAME: ${{ github.event.inputs.game }}
-          PUSH_BEFORE: ${{ github.event.before }}
-          PUSH_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           if [ -n "${INPUT_GAME:-}" ]; then
             printf '%s\n' "$INPUT_GAME" > /tmp/games
           else
-            before=${PUSH_BEFORE:-}
-            # github.event.before is all-zeroes for a branch's first push, and a force-push can leave it
-            # unreachable. Either way, fall back to examining every game — this job is cheap and
-            # anonymous, so being thorough costs nothing but a minute.
-            if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ] \
-               || ! git cat-file -e "$before^{commit}" 2>/dev/null; then
-              echo "::notice::cannot diff against ${before:-<empty>}; re-checking every game"
-              propnix games --repo . > /tmp/games
-            else
-              git diff --name-only --diff-filter=ACMRT "$before" "$PUSH_SHA" \
-                -- 'pkgs/games/*/versions.json' \
-                | sed -n 's|^pkgs/games/\([^/]*\)/versions.json$|\1|p' | sort -u > /tmp/games
-            fi
+            # Every game, every run. A workflow_run event carries no push range, so there is nothing to
+            # narrow by — and no need: the sweep is cheap and anonymous (one unauthenticated check per
+            # game), and re-checking a game whose pin did not move is a no-op.
+            propnix games --repo . > /tmp/games
           fi
           echo "games: $(tr '\n' ' ' < /tmp/games)"
 

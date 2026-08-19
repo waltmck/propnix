@@ -30,7 +30,7 @@ permissions:
 
 concurrency:
   # SHARED with the other pin workflow, deliberately. Concurrency groups are repository-wide and match
-  # across workflows, so one literal name means the weekly refresh and the push hook can never be
+  # across workflows, so one literal name means the weekly refresh and the post-cachix sweep can never be
   # mid-flight at the same time — no interleaving on the same issue, and no two runs racing the branch.
   #
   # CAVEAT, accepted: GitHub keeps at most ONE queued run per group, so a queued weekly refresh can be

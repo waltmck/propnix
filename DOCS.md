@@ -222,9 +222,11 @@ fabricated manifest id simply fails to download.)
   request — never a direct push, so `eval.yml` gates the result. Set the `PROPNIX_APP_ID` variable and
   `PROPNIX_APP_PRIVATE_KEY` secret if you want that PR to trigger CI by itself; a `GITHUB_TOKEN` PR does
   not.
-- **`.github/workflows/pin-issues.yml`** (on pushes touching `pkgs/games/*/versions.json`) re-checks the
-  affected games and closes their "pin is behind upstream" issue once the pin genuinely matches upstream.
-  It re-verifies rather than trusting the push, because editing the file is not the same as being current.
+- **`.github/workflows/pin-issues.yml`** (after every push-triggered `cachix` run completes — ordered
+  behind it because it substitutes the CLI with `--max-jobs 0`, and a push touching the CLI's sources
+  would otherwise race the very build that publishes it) re-checks every game and closes its "pin is
+  behind upstream" issue once the pin genuinely matches upstream. It re-verifies rather than trusting the
+  repo state, because editing the file is not the same as being current.
 
 The issue lifecycle (`ci/pin-issue.sh`) gives each game **exactly one open issue, ever**: it is edited in
 place when upstream moves again — and only then, so a long-stale game does not notify anyone weekly — and

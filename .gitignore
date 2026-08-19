@@ -1,2 +1,12 @@
+# Rust build output and the local cargo home, for every crate under pkgs/ (and the historical ones under
+# preliminaries/). Bare directory names, so they match at any depth rather than only at the repo root.
+#
+# These must never be tracked: they are large (propnix-cli's target/ alone reaches ~1 GB), machine-specific,
+# and they would otherwise become part of the flake's source tree — a `nix build` reads the git tree, so a
+# tracked target/ makes a package's inputs depend on whatever the last local build left behind. Each crate's
+# default.nix filters both names out of `src` as a second line of defence.
+#
+# Note .gitignore does NOT untrack anything already committed: 827 such files had been tracked under
+# pkgs/propnix-launcher/target and pkgs/propnix-prefetch/target and needed `git rm -r --cached` to drop.
 target/
 .cargo-home/

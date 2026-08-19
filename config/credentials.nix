@@ -34,15 +34,58 @@
 #       change WHAT is fetched.
 #     * The fetcher tries each stored GOG account until one OWNS the pinned build (transparent multi-account).
 #
-#   4. nixbld access. The build runs as the `nixbld` group, so the tokens must be `nixbld`-readable —
-#      `propnix cred` does this: token files are group-owned by `nixbld`, mode 0640; store dirs are 0755
-#      (their names aren't secret, so a plain user can `cred list` without privilege).
+#   4. Read is one group, WRITE is another. Token files are group-owned mode 0640; store dirs are 0755 (their
+#      names aren't secret, so a plain user can `cred list` without privilege). Two parties must READ a token
+#      — the sandboxed builder, and the human running `propnix pin` — and a file has only one group, so both
+#      go in the same one. Write cannot hang off that group, or a build could rewrite the store, so it hangs
+#      off the group on the DIRECTORIES, which the build users are not in. Under the NixOS module:
+#          propnix        the humans. Owns the dirs, 2775 (group-writable + setgid) → `cred add`/`cred rm`
+#                         need no sudo, and a new dir inherits the group instead of being chowned.
+#          propnix-fetch  those humans PLUS the Nix build users (nix passes a build user's supplementary
+#                         groups to the builder). Owns the token files → read only.
+#      `propnix cred` takes the FILE group from `PROPNIX_BUILD_GROUP` (which the module sets to
+#      `propnix-fetch`) and the DIR group by inheritance from the setgid parent — never the file group, which
+#      would hand builds the store. Off NixOS both collapse to `nixbld`: dirs stay 0755 owner-only, the human
+#      reads as the file's owner, and store writes sudo-escalate as before.
+#      NEVER the reverse — putting a human in `nixbld` would make them eligible to run builds as.
+#
+#   5. Declared credentials are the config's, not the CLI's. The NixOS module records what it materializes in
+#      `<root>-declarative-credentials` (beside the store, never inside it — the bind carries auth only): one
+#      store-relative token path per line, world-readable. That manifest is the contract by which the module
+#      prunes a credential dropped from the config, and by which the CLI answers "is this declarative?" —
+#      `cred list` marks such an account `(declarative)` and `cred rm` refuses it, naming the option to edit.
+#      The module also keeps a declared account's dir root-owned 0755, so the unprivileged path cannot delete
+#      what activation would only restore.
+#
+#      Those modes are hygiene, not a security boundary. `sandbox-paths` is GLOBAL: once the bind is
+#      configured, EVERY sandboxed build on the host sees `/propnix`, so anyone allowed to use the daemon can
+#      `cp -r /propnix $out` and read the token out of the (world-readable) store. Whoever may build on the
+#      host can read the credentials — which is why the module's group defaults to `nix.settings
+#      .allowed-users`, and why an untrusted-user host should not carry the bind at all.
+#
+#      A COROLLARY for nix's `auto-allocate-uids`: it runs builds as a per-build synthetic uid/gid that is in
+#      no host group, and its user namespace doesn't map root, so no group membership reaches the builder and
+#      a 0640 token is unreadable. Only a world-readable token would work there, so propnix doesn't support
+#      that mode (the NixOS module warns).
 #
 # `propnix cred` writes a system dir, so `add`/`rm` sudo-escalate the store write while the browser login
 # itself runs as the invoking user. The NixOS module (`nixosModules.propnix`) renders the sandbox bind.
+#
+# The store can equally be provisioned DECLARATIVELY instead of by `propnix cred add` — see
+# `services.propnix.credentials` in nixos/propnix.nix, which materializes the same layout from
+# already-decrypted files (sops-nix, agenix, …). Either way the on-disk shape below is the contract.
 {
   # Where the fetchers expect the pointer file inside the sandbox.
   credentialsFile = "/propnix/credentials.toml";
+
+  # The token filename each account type stores under `<root>/<type>/<username>/`. This is the SAME table the
+  # `propnix cred` providers implement (`Provider::token_filename`, pkgs/propnix-cli/src/cred/{gog,steam}.rs) and
+  # the fetchers glob for; the NixOS module reads it to place declaratively-provisioned tokens. Adding a
+  # backend means adding it here, in the provider, and in that backend's fetcher.
+  tokenFilenames = {
+    gog = "galaxy_tokens.json"; # lgogdownloader/gogdl flat OAuth token object
+    steam = "depotdownloader-store.tar"; # tar of DepotDownloader's isolated-storage account.config
+  };
 
   # The bind argument to pass to `nix build`. LHS is the in-sandbox path; RHS is the host store dir.
   sandboxBind = "/propnix=/var/lib/propnix";

@@ -39,6 +39,7 @@ benefits of native kernel mounts. That design leans on several host capabilities
 | `/dev/ntsync` (Linux **6.14+**) | fast wine synchronization | recommended |
 | `wlr-foreign-toplevel-management` compositor | single-instance raise, splash dismiss, close-to-quit | optional (degrades gracefully) |
 | GOG/Steam account owning the title + its token | **building** a game payload (FOD fetch) | yes (build-time) |
+| Nix's classic build users, i.e. `auto-allocate-uids = false` | reading that token inside the FOD sandbox — an auto-allocated build runs as a synthetic uid/gid in no host group, so a 0640 token is unreadable and only a world-readable one would work | yes (build-time) |
 
 ## How it runs
 
@@ -104,12 +105,63 @@ there); you paste the resulting `…/on_login_success?code=…` URL back, and it
 `cred add steam` drives DepotDownloader through Steam's one-time Steam Guard 2FA and stores the reusable
 refresh token. Both populate the store at **`/var/lib/propnix`** — `credentials.toml` (a non-secret pointer)
 plus `<type>/<username>/<tokenfile>` (`gog/…/galaxy_tokens.json`, `steam/…/depotdownloader-store.tar`),
-group-owned `nixbld` (mode 0640) so the build sandbox can read it (writing `/var/lib` needs `sudo`; the login
-itself runs as you). Multiple accounts are supported — a fetcher tries each of its type until one owns the
-pinned content. `cred rm` takes `--type` to disambiguate when the same username is stored under two backends.
+mode 0640 and group-owned by **`propnix-fetch`** so the build sandbox can read it. On NixOS the whole flow is
+unprivileged — the store dirs are group-writable by `propnix`, so no step prompts for a password. Without the
+module (or with a group it names absent) the CLI falls back to the historical layout: dirs 0755, group
+`nixbld`, and the `/var/lib` write via `sudo` — the login itself always runs as you. Multiple accounts are
+supported everywhere: a fetcher tries each of its type until one owns the pinned content, and **so does
+`propnix pin`** — it advances to the next stored account on an ownership refusal and settles the question
+before a byte of content is fetched. Force one account with `--gog-account <name>` / `--steam-account
+<name>`, or with `PROPNIX_GOG_ACCOUNT` / `PROPNIX_STEAM_ACCOUNT` (flag beats env beats try-all). `cred rm`
+takes `--type` to disambiguate when the same username is stored under two backends.
 
 Bind the store into the build sandbox with the NixOS module (`services.propnix.enable`) or manually
 (`--extra-sandbox-paths /propnix=/var/lib/propnix`, requires a trusted Nix user). The store holds only the
 pointer + tokens; every download parameter is pinned in `versions.json`, so the bind can only make a fetch
 succeed or fail, never change *what* is fetched. See `config/credentials.nix` for the full model.
+
+Prefer keeping the token in your (encrypted) config repo? The module also builds the store **declaratively**
+from any secret manager that decrypts to a path — sops-nix, agenix, a hand-rolled unit:
+
+```nix
+sops.secrets."propnix/gog/alice" = {
+  sopsFile = ./secrets/gog-alice.json;                # the encrypted galaxy_tokens.json
+  format = "binary";                                  # keep the file verbatim
+  restartUnits = [ "propnix-credentials.service" ];   # re-copy when you rotate it
+};
+services.propnix.credentials.gog.alice.source = config.sops.secrets."propnix/gog/alice".path;
+```
+
+`propnix-credentials.service` copies each declared token into the same `<type>/<username>/<tokenfile>` layout
+at activation (it copies rather than symlinks because sops-nix's `path` points into `/run/secrets.d/…`, which
+doesn't exist inside the build sandbox). Declared and `cred add`-ed accounts coexist; set
+`services.propnix.credentialsPath = "/run/propnix"` for a fully declarative host and no token ever touches
+the disk. A declared credential stays the config's: `cred list` marks it `(declarative)` and `cred rm`
+refuses it, naming the option to edit.
+
+```
+$ propnix cred list
+GOG:
+  - alice (declarative)
+  - dave
+Steam:
+  - bob (declarative)
+```
+
+Either way, managing credentials means being in the **`propnix`** group the module creates. Its members
+default to `nix.settings.allowed-users` — i.e. `*`, every human account, unless you've narrowed who may use
+the daemon — so `cred add`, `cred rm` and `propnix pin` all work without sudo out of the box. Restrict or
+extend it with:
+
+```nix
+services.propnix.allowedUsers = [ "you" ];     # or [ "@wheel" ], or [ ] to opt out entirely
+users.users.you.extraGroups = [ "propnix" ];   # equivalent, honoured alongside the option
+```
+
+There are two groups, because read and write have to be separable: `propnix` owns the store *directories*
+(2775, so members write without sudo), while a derived `propnix-fetch` holds those same humans **plus** the
+Nix build users and owns the token *files* (0640). That way a build can read a credential — nix passes a
+build user's supplementary groups to the builder, which is what keeps the sandboxed fetcher working — but
+never write one. You only ever touch `propnix`; `propnix-fetch` is kept in sync for you. Adding yourself to
+`nixbld` instead would be a mistake — its members are exactly who nix runs builds as.
 

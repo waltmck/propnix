@@ -116,7 +116,11 @@ propnix/
 │       ├── hollow-knight/         # the two-axis exemplar (gog/steam × windows/linux; see Worked examples)
 │       ├── stellaris/             # Steam Linux two-depot build under box64/native
 │       └── …                      # 17 titles
-├── nixos/propnix.nix              # services.propnix: cred-dir bind into the FOD sandbox; ntsync udev
+├── nixos/propnix.nix              # services.propnix: cred-dir bind into the FOD sandbox; ntsync udev;
+│                                  #   cachix substituter+key (useCache); `propnix` CLI in systemPackages;
+│                                  #   declarative cred store from sops/agenix paths (credentials.<t>.<u>);
+│                                  #   groups: `propnix` = manage (humans, dirs 2775 → cred add/rm sudo-free),
+│                                  #   `propnix-fetch` = read (those humans + the nix build users, tokens 0640)
 ├── docs/
 │   ├── verified/<game>.json       # committed hand-test manifest (host/kernel/mesa/fex/box64/wine/fps/status)
 │   └── DESIGN.md → (this file)

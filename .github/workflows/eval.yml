@@ -35,6 +35,11 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+      # Offline, no network and no credentials: the pin-issue lifecycle against a stub gh. It is the only
+      # coverage the GitHub interactions get, since they cannot be exercised for real from a test.
+      - name: pin-issue lifecycle (stub gh)
+        if: ${{ matrix.system == 'x86_64-linux' }}
+        run: ci/pin-issue-test.sh
       - name: config-resolution check (pure eval)
         run: nix eval --raw '.#checks.${{ matrix.system }}.config-resolution.drvPath'
       - name: fetcher × emulatedPlatform eval matrix

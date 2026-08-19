@@ -2,7 +2,7 @@
 name = "propnix-cli"
 version = "0.1.0"
 edition = "2021"
-description = "propnix CLI — credential management (propnix cred …) for the credentialed game fetchers"
+description = "propnix CLI — credential management and content-pin refresh (propnix cred / propnix pin)"
 
 [[bin]]
 name = "propnix"
@@ -12,14 +12,48 @@ path = "src/main.rs"
 # Subcommand CLI + help/usage. Derive keeps the account-type/subcommand surface declarative + easy to extend.
 clap = { version = "4", features = ["derive"] }
 # Blocking HTTP client with bundled rustls + webpki roots (no system OpenSSL/CA dep, no async runtime) — used
-# for the OAuth code/refresh exchange and the userData lookup. Secrets go in the request, never in argv (a
-# curl subprocess would leak the auth code / refresh token via `ps`).
+# for the OAuth code/refresh exchange and the userData lookup, and for ALL bulk pin traffic (manifests and
+# content chunks). Secrets go in the request, never in argv (a curl subprocess would leak the auth code /
+# refresh token via `ps`).
 ureq = { version = "2", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order keeps versions.json key order so a rewrite is a MINIMAL diff (verified: all 17 current
+# files round-trip byte-identically through to_string_pretty + a trailing newline).
+serde_json = { version = "1", features = ["preserve_order"] }
 # geteuid + access(W_OK): decide whether a store write needs sudo (write /var/lib as root, but run the
 # browser login as the invoking user).
 libc = "0.2"
+
+# ── propnix pin ──────────────────────────────────────────────────────────────────────────────────
+# The only hash we need: the NAR digest IS the Nix fixed-output hash. Base64 (SRI rendering) is
+# hand-rolled in pin/nar.rs to avoid a second crate for 32 bytes.
+sha2 = "0.10"
+# GOG: content-system metadata and every content chunk is a standalone zlib stream. Also .NET's raw
+# DEFLATE, which is how DepotDownloader's account.config is wrapped.
+flate2 = "1"
+# GOG pins chunks by md5, both compressed and decompressed — verified on the fly.
+md-5 = "0.10"
+
+# ── Steam ────────────────────────────────────────────────────────────────────────────────────────
+# Only THREE operations need Steam's CM protocol: log in, GetDepotDecryptionKey, and
+# GetManifestRequestCode. Everything after that (content-server list, manifest download, chunk download)
+# is plain HTTPS over ureq. steam-vent speaks the CM protocol and ships every protobuf we need
+# PRE-GENERATED, so there is no protoc, no prost, and no vendored .proto in this build.
+steam-vent = "0.5.0"
+steam-vent-proto-steam = "0.5.2"
+# SteamKit2's SymmetricDecrypt layout (AES-256-ECB over the first block to recover the IV, then
+# AES-256-CBC): used for BOTH chunk bodies and the encrypted filenames in a manifest.
+steam-vent-crypto = "0.2.1"
+protobuf = "=3.5.1" # must match steam-vent's rust-protobuf pin, not prost
+# steam-vent is async and enables no runtime of its own; the CM control plane runs on a small runtime
+# while the bulk chunk transfer stays on blocking threads (see pin/steam.rs).
+tokio = { version = "1", features = ["rt-multi-thread"] }
+bytes = "1"         # steam-vent-crypto takes and returns BytesMut
+base64 = "0.22"     # encrypted manifest filenames are base64 before decryption; JWT payloads too
+sha1 = "0.10"       # a chunk's id IS sha1(plaintext) — a free end-to-end integrity check
+zstd = "0.13"       # current chunk container (VSZa)
+lzma-rs = "0.3"     # legacy chunk container (VZ, raw LZMA1)
+tar = "0.4"         # read account.config out of the stored credential tar
 
 [profile.release]
 opt-level = "s"

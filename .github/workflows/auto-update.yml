@@ -1,0 +1,369 @@
+# Weekly pin refresh: move every game to the newest upstream build it can, open ONE pull request with the
+# result, and open an issue for each game a human has to handle.
+#
+# Why this is cheap enough to run weekly: `propnix pin --check` is ANONYMOUS for both stores — GOG's build
+# list is GOG's own, and the Steam side reads api.steamcmd.net, a THIRD-PARTY appinfo mirror (Valve
+# publishes no unauthenticated appinfo endpoint; an anonymous CM PICS session is the fallback if that
+# mirror dies). So the usual "nothing changed" run touches no secret and downloads no game. Only a game
+# that actually moved gets re-hashed, and even then the hash is computed by STREAMING — the payload never
+# lands on disk, which is the only reason a 300 GB title can be re-pinned on a runner with ~14 GB free.
+#
+# Job order is deliberate: `tools` builds and pushes the CLI to cachix FIRST, so `update` substitutes it
+# instead of spending ten minutes compiling 300 crates. `update` asserts that with `--max-jobs 0`, which
+# forbids local builds outright — if the cache does not have it, the job fails loudly rather than quietly
+# doing the slow thing.
+#
+# TRIGGERS ARE DELIBERATELY NARROW. `schedule` and `workflow_dispatch` both run only on the default branch,
+# and fork pull requests never receive secrets. `pull_request_target` must never appear in this repo: it is
+# the one trigger that would hand a fork's code our Steam and GOG credentials.
+name: auto-update
+
+on:
+  schedule:
+    # Mondays, 05:17 UTC. Off the hour because GitHub queues everything scheduled on the hour.
+    # NB: scheduled workflows are disabled automatically after 60 days without repository activity.
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # SHARED with the other pin workflow, deliberately. Concurrency groups are repository-wide and match
+  # across workflows, so one literal name means the weekly refresh and the push hook can never be
+  # mid-flight at the same time — no interleaving on the same issue, and no two runs racing the branch.
+  #
+  # CAVEAT, accepted: GitHub keeps at most ONE queued run per group, so a queued weekly refresh can be
+  # superseded by a push run queued after it and never execute. That is tolerable because the push run
+  # re-checks every affected game anyway, and cron fires again next week — but it is the reason not to
+  # treat "the weekly run happened" as guaranteed.
+  group: propnix-pins
+  cancel-in-progress: false
+
+jobs:
+  # Build + push the CLI so the updater can substitute it. Same composite action as cachix.yml.
+  tools:
+    name: build propnix (x86_64-linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build-and-push
+        with:
+          system: x86_64-linux
+          attrs: propnix-cli
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+  update:
+    name: refresh pins
+    needs: tools
+    # ORDERING, not a gate: if the push failed we still want to see the refresh attempt fail visibly on
+    # the substitute assertion below, rather than being silently skipped.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350 # under the 6 h job cap; a big title is bandwidth-bound, not CPU-bound
+    permissions:
+      contents: write # pushes the auto-update/pins branch
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Do NOT leave GITHUB_TOKEN in .git/config. `git push` would then always be a GITHUB_TOKEN push,
+          # and GitHub parks the resulting `synchronize` checks in an approval-required state — so every
+          # week-2+ update to an open PR would arrive ungated. The push below sets the remote explicitly,
+          # preferring the App token.
+          persist-credentials: false
+
+      # A PR authored by GITHUB_TOKEN does NOT trigger other workflows, so eval.yml would never gate it.
+      # An App token makes the PR look like a real actor and CI runs. Optional: without the secrets the
+      # run still works, and the PR step says clearly that CI must be kicked by hand.
+      - name: Mint an App token (optional)
+        id: app
+        if: ${{ vars.PROPNIX_APP_ID != '' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.PROPNIX_APP_ID }}
+          private-key: ${{ secrets.PROPNIX_APP_PRIVATE_KEY }}
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      # Substituter only — no authToken, so this job can read the cache but never writes to it.
+      - uses: cachix/cachix-action@v16
+        with:
+          name: propnix
+          skipPush: true
+
+      - name: Substitute propnix from cachix (never compile it here)
+        run: |
+          set -euo pipefail
+          # --max-jobs 0 forbids local builds: if the path is not substitutable this fails instead of
+          # silently spending ten minutes compiling.
+          if ! nix build --max-jobs 0 --print-out-paths \
+                 '.#legacyPackages.x86_64-linux.propnix-cli' > /tmp/cli-path; then
+            # NB: single quotes — backticks inside double quotes would be command substitution.
+            echo '::error::propnix-cli is not in the binary cache; the tools job must push it first' >&2
+            exit 1
+          fi
+          echo "$(cat /tmp/cli-path)/bin" >> "$GITHUB_PATH"
+          "$(cat /tmp/cli-path)/bin/propnix" --version
+
+      # Phase 1 is ANONYMOUS. On a week where nothing moved the job ends here having touched no secret
+      # at all — which is only true because this runs BEFORE the credentials are materialized.
+      - name: Discover what moved (anonymous)
+        run: ci/pin-refresh.sh check "$RUNNER_TEMP/pins" x86_64-linux
+
+      # Missing secrets are a SKIP, not a failure: a repo with only the GOG credential set should still
+      # refresh its GOG games every week and quietly leave the Steam ones alone.
+      - name: Materialize credentials
+        env:
+          GOG_TOKENS: ${{ secrets.PROPNIX_GOG_TOKENS }}
+          STEAM_STORE_B64: ${{ secrets.PROPNIX_STEAM_STORE_B64 }}
+          STEAM_USERNAME: ${{ secrets.PROPNIX_STEAM_USERNAME }}
+        run: |
+          set -euo pipefail
+          if [ ! -s "$RUNNER_TEMP/pins/pending" ]; then
+            echo "nothing moved upstream — not writing any credential to disk this week"
+            exit 0
+          fi
+          umask 077
+          root="$RUNNER_TEMP/propnix-cred"
+          if [ -n "${GOG_TOKENS:-}" ]; then
+            mkdir -p "$root/gog/ci"
+            printf '%s' "$GOG_TOKENS" > "$root/gog/ci/galaxy_tokens.json"
+            echo "gog credential: present"
+          else
+            echo "::notice::no PROPNIX_GOG_TOKENS — GOG games will report blocked"
+          fi
+          if [ -n "${STEAM_STORE_B64:-}" ]; then
+            mkdir -p "$root/steam"
+            printf '%s' "$STEAM_STORE_B64" | base64 -d > "$root/steam/store.tar"
+            echo "steam credential: present"
+          else
+            echo "::notice::no PROPNIX_STEAM_STORE_B64 — Steam games will report blocked"
+          fi
+          echo "PROPNIX_CRED_DIR=$root" >> "$GITHUB_ENV"
+          [ -n "${STEAM_USERNAME:-}" ] && echo "PROPNIX_STEAM_ACCOUNT=$STEAM_USERNAME" >> "$GITHUB_ENV"
+          true
+
+      - name: Re-pin the games that moved
+        run: ci/pin-refresh.sh repin "$RUNNER_TEMP/pins" x86_64-linux
+
+      # Issues come BEFORE the PR: if the PR step fails for a permissions reason we still want the human
+      # -actionable games on record.
+      - name: Open or update issues for games a human must handle
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/pins"
+          jq -r '.[] | select(.status == "blocked") | .game' "$out/summary.json" | while read -r game; do
+            echo "::group::issue for $game"
+            # Hand the tool's own message to the body: "the token expired" and "you do not own this" are
+            # different problems, and the issue should say which.
+            PIN_DETAIL=$(jq -r --arg g "$game" '.[] | select(.game == $g) | .detail' "$out/summary.json") \
+              ci/pin-issue.sh open-or-edit "$game" "$out/$game.check.json"
+            echo "::endgroup::"
+          done
+
+      # A game that this run found already current is current ON MASTER — the refresh ran against the
+      # checked-out default branch — so its issue can close with no caveat. This is what stops an issue
+      # going zombie after you buy a game (or after someone re-pins it by hand): the very next weekly run
+      # notices and closes it, without waiting for anything to be merged.
+      - name: Close issues for games that are already current
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/pins"
+          # One API call for every open issue, then act only on the intersection.
+          ci/pin-issue.sh list-open > "$out/open-issues" || : > "$out/open-issues"
+          # `frozen` is deliberately NOT included: a held game is not "caught up", and its issue is
+          # about something else.
+          jq -r '.[] | select(.status == "up-to-date") | .game' "$out/summary.json" \
+            | grep -Fxf "$out/open-issues" - > "$out/to-close" || : > "$out/to-close"
+          if [ ! -s "$out/to-close" ]; then
+            echo "no open issue belongs to an already-current game"
+            exit 0
+          fi
+          while read -r game; do
+            [ -n "$game" ] || continue
+            # A VERSION-HELD game also reports up-to-date, but it sits at its `pin.version`, not at the
+            # newest upstream build — closing it with "now pinned to the newest upstream version" would
+            # be a plain untruth in the issue thread. `summary.json`'s `version` carries `pinnedTo` for
+            # exactly those games.
+            pinned=$(jq -r --arg g "$game" '.[] | select(.game == $g) | .version // ""' "$out/summary.json")
+            if [ -n "$pinned" ]; then
+              echo "  $game: $(ci/pin-issue.sh close-if-open "$game" "$pinned" "" held)"
+            else
+              echo "  $game: $(ci/pin-issue.sh close-if-open "$game")"
+            fi
+          done < "$out/to-close"
+
+      # A game that has been deleted or renamed still has an open issue nobody will ever act on, and the
+      # per-game loops above cannot see it — they iterate the games that EXIST. Sweep those separately.
+      - name: Close issues for games that no longer exist
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ci/pin-issue.sh list-open | while read -r game; do
+            [ -n "$game" ] || continue
+            [ -f "pkgs/games/$game/versions.json" ] && continue
+            echo "  $game: no longer in pkgs/games — closing its stale issue"
+            ci/pin-issue.sh close-if-open "$game" "" \
+              "\`pkgs/games/$game\` no longer exists in the repository (deleted or renamed), so this pin \
+               is no longer tracked." gone
+          done
+
+      # ONE COMMIT PER GAME, so a single bad pin can be reverted on its own. `git commit -- <path>` is
+      # what makes that possible from a working tree that already has every change applied: it commits
+      # only the named path and leaves the rest staged-not-committed for the next iteration.
+      #
+      # This is also why the PR is assembled by hand rather than with create-pull-request: that action
+      # squashes the whole working tree into one commit, which is exactly the granularity we do not want.
+      - name: Commit each game separately
+        id: commits
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/pins"
+          git config user.name  "propnix-bot"
+          git config user.email "propnix-bot@users.noreply.github.com"
+          base=$(git rev-parse HEAD)
+          git switch -c auto-update/pins
+          jq -r '.[] | select(.status == "updated") | "\(.game)\t\(.version // "")"' "$out/summary.json" \
+          | while IFS=$'\t' read -r game version; do
+              # A game can be recorded `updated` and yet have nothing to commit: `check` and `repin` run
+              # minutes apart, so upstream can revert in between and the rewrite land byte-identical to
+              # HEAD. `git commit -- <path>` on an unchanged path exits non-zero and, under `set -e`,
+              # would kill the whole commit loop over a no-op. (Worktree vs HEAD, because the rewrites
+              # are unstaged.)
+              if git diff --quiet HEAD -- "pkgs/games/$game/versions.json"; then
+                echo "  $game: recorded updated but identical to HEAD (upstream reverted?) — nothing to commit"
+                continue
+              fi
+              git commit -q \
+                -m "pkgs/games/$game: pin -> ${version:-newest upstream}" \
+                -- "pkgs/games/$game/versions.json"
+            done
+          n=$(git rev-list --count "$base"..HEAD)
+          echo "count=$n" >> "$GITHUB_OUTPUT"
+          echo "$n commit(s):"
+          git log --oneline "$base"..HEAD
+
+      - name: Write the PR body
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/pins"
+          {
+            echo "Automated weekly pin refresh — **one commit per game**, so any single pin can be"
+            echo "reverted on its own."
+            echo
+            echo "| game | outcome | version |"
+            echo "|---|---|---|"
+            jq -r '.[] | select(.status != "up-to-date") | "| \(.game) | \(.status) | \(.version // "") |"' \
+              "$out/summary.json"
+            echo
+            echo "Each game is re-pinned as a unit — base payloads and every DLC together, or not at all."
+            echo "Hashes were computed by streaming; no payload was written to disk. Every rewritten"
+            echo "versions.json was validated with a pure \`nix eval\` before being committed."
+            if [ -z "${APP_TOKEN:-}" ]; then
+              echo
+              echo "> Opened with \`GITHUB_TOKEN\`, so **CI will not start on its own** — close and reopen"
+              echo "> this PR, or push an empty commit, to run \`eval\`."
+            fi
+          } > "$out/pr-body.md"
+          cat "$out/pr-body.md"
+        env:
+          APP_TOKEN: ${{ steps.app.outputs.token }}
+
+      - name: Push the branch and open or update the PR
+        id: pr
+        if: ${{ steps.commits.outputs.count != '0' }}
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/pins"
+          # The branch is regenerated from the default branch every run, so a force push is intended.
+          # Only this workflow writes it, and the shared concurrency group means no two runs overlap.
+          # The token goes in the remote URL rather than a persisted credential; both candidate tokens are
+          # registered secrets, so GitHub masks them in the log.
+          git remote set-url origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin HEAD:refs/heads/auto-update/pins
+          # `gh pr view <branch>` matches a MERGED or CLOSED PR on that branch too (verified with gh
+          # 2.96.0), so once week 1's PR merged this probe kept returning it: `gh pr edit` rewrote a
+          # merged PR, `gh pr create` never ran, and the step went green forever without opening
+          # anything. `gh pr list` filtered by head+state only stays on the REST list resource rather
+          # than the eventually-consistent GraphQL search index — the same rule pin-issue.sh follows,
+          # and for the same reason: a lookup miss here silently costs us the PR.
+          url=$(gh pr list --head auto-update/pins --state open --json url --jq '.[0].url // empty')
+          if [ -n "$url" ]; then
+            # An open PR already exists on this branch: the push above updated it. Refresh its text.
+            gh pr edit "$url" \
+              --title "pkgs/games: refresh ${{ steps.commits.outputs.count }} pin(s)" \
+              --body-file "$out/pr-body.md"
+          else
+            # The label must exist before `--label` is used, or the create fails outright. Idempotent,
+            # the same pattern ensure_label uses for the issue label.
+            gh label create pin-update --force \
+              --description "Automated weekly pin refresh" --color 1D76DB >/dev/null
+            url=$(gh pr create \
+              --base "${{ github.event.repository.default_branch || 'master' }}" \
+              --head auto-update/pins \
+              --title "pkgs/games: refresh ${{ steps.commits.outputs.count }} pin(s)" \
+              --body-file "$out/pr-body.md" \
+              --label pin-update)
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "PR: $url"
+
+      # Games this run DID refresh: close their issue and point at the PR. Closing before the PR merges is
+      # safe precisely because a closed issue is never reopened — if the PR is abandoned, the next weekly
+      # run finds the game stale again and opens a FRESH issue. So the failure mode self-heals, whereas
+      # leaving it open would leave a body that now says something untrue (that CI cannot refresh it).
+      # Gated on the PR actually existing: if that step failed we must not drop the tracking issue.
+      - name: Close issues for games this run refreshed
+        if: ${{ steps.pr.outputs.url != '' }}
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/pins"
+          ci/pin-issue.sh list-open > "$out/open-issues2" || : > "$out/open-issues2"
+          note="Refreshed automatically in ${{ steps.pr.outputs.url }} — the pin lands on the default branch when that merges."
+          jq -r '.[] | select(.status == "updated") | "\(.game)\t\(.version // "")"' "$out/summary.json" \
+          | while IFS=$'\t' read -r game version; do
+              grep -Fxq "$game" "$out/open-issues2" || continue
+              echo "  $game: $(ci/pin-issue.sh close-if-open "$game" "$version" "$note")"
+            done
+
+      # LAST, and deliberately so. `ci/pin-refresh.sh` records a failure but exits 0, because failing
+      # there skipped every step above — issues, close sweeps, commits, the PR — and so discarded every
+      # OTHER game's validated rewrite over one transient CDN error. The run must still go red, but only
+      # after the work that must not be lost has landed. `always()`: a failure earlier in the job must
+      # not skip the assertion that explains it.
+      - name: Assert no game failed
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          summary="$RUNNER_TEMP/pins/summary.json"
+          if [ ! -s "$summary" ]; then
+            echo "::warning::no summary.json — the refresh did not get far enough to record anything"
+            exit 0
+          fi
+          failed=$(jq -r '[.[] | select(.status == "failed")] | length' "$summary")
+          if [ "$failed" != "0" ]; then
+            jq -r '.[] | select(.status == "failed") | "::error::\(.game): \(.detail)"' "$summary"
+            echo "$failed game(s) failed unexpectedly (blocked games are NOT failures — they get an issue)" >&2
+            exit 1
+          fi
+          echo "no game failed"

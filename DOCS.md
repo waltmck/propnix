@@ -52,9 +52,14 @@ knobs, how it runs, and credentials.
 - **An account that owns the title (GOG or Steam), and its token.** Payloads are fetched as
   content-addressed FODs pinned in `versions.json` — GOG Windows builds by Galaxy `buildId`, Steam builds by
   `(appId, depotId, manifestId)`. Add an account with `propnix cred add gog` / `propnix cred add steam`
-  (token stored in `/var/lib/propnix`, `nixbld`-readable); the token is **never** copied into the store or
-  printed (download-only). Multiple accounts are supported — the fetcher tries each until one owns the
-  pinned content. See **Credentials** in the README. `--extra-sandbox-paths` requires a **trusted Nix user**.
+  (token stored in `/var/lib/propnix`, readable by the `propnix-fetch` group — `nixbld` off NixOS); the token is
+  **never** copied into the store or printed (download-only). Multiple accounts are supported — the fetcher
+  tries each until one owns the pinned content. See **Credentials** in the README. `--extra-sandbox-paths`
+  requires a **trusted Nix user**.
+- **Nix's classic build users (`auto-allocate-uids = false`).** The builder reads the token through group
+  membership; an auto-allocated build runs as a per-build synthetic uid/gid that is in no host group (and its
+  user namespace doesn't map root), so only a world-readable token would work — which propnix declines to
+  install. `services.propnix.enable` warns when the setting is on.
 - **Build closure.** aarch64 builds the full emulator closure the first time (Hangover wine ~1 h, FEX
   DLLs, ARM64EC DXVK/vkd3d, llvm-mingw); pin nixpkgs to the flake's rev so these substitute rather than
   rebuild. x86_64 builds the same wine source natively (no FEX).
@@ -103,7 +108,7 @@ triple + the guard semantics.
 | `emulators/` | `wine-hangover` (same source both arches), `fex-dlls` + `galaxy-stub` + `llvm-mingw` + `box64` (aarch64), `dxvk-arm64ec`/`dxvk-x86_64`, `vkd3d-proton-arm64ec`/`vkd3d-proton-x86_64`, `wine-prefix-lower` (the read-only system tree) |
 | `pkgs/propnix-launcher/` | the Rust launcher (GTK4 splash + single-instance + env-seal + mount-table orchestration, PREFIX + THIN modes); links `pkgs/propnix-mount/` (the userns bind/overlay layer) and `pkgs/propnix-prefetch/` (the `posix_fadvise` page-cache warmer — run by the wine INNER over the assembled prefix, PE modules only: `.dll`/`.drv`/`.exe`) as library crates — they are not separate packages |
 | `pkgs/games/<name>/` | one game per directory — `default.nix` (the `mkApp` module) + pinned `versions.json` (the `fetchInfo` fetch matrix) + optional `wine-tuning.nix`/`box64-tuning.nix`/`setup.sh`; auto-discovered into the scope + a flake package/app |
-| `nixos/propnix.nix` | host module: binds the credential dir into the build sandbox + loads `ntsync` |
+| `nixos/propnix.nix` | host module: binds the credential dir into the build sandbox, loads `ntsync`, trusts `propnix.cachix.org`, installs the `propnix` CLI, materializes declared credentials (sops-nix/agenix) |
 | `config/` | credential model + host-capability facts (reference) |
 | `docs/DESIGN.md` | the architecture decision record |
 | `preliminaries/` | the validated POCs + historical design docs (`PLAN2.md`, `RESEARCH.md`) |
@@ -116,9 +121,71 @@ Drop a directory under `pkgs/games/<name>/` — it's auto-discovered into the sc
 - **`versions.json`** — the fetch matrix, verbatim: `fetchInfo.<fetcher>.<platform> = [ argset … ]`, each
   arg-set passed as-is to that fetcher (GOG Windows: `pname`/`productId`/`buildId`/`version` + the
   recursive SRI `outputHash`; Steam: `pname`/`appId`/`depotId`/`manifestId`/`outputHash`; several arg-sets
-  = several depots, unioned read-only at launch, first wins). Obtain the hash by running the credentialed
-  fetch once and copying the reported hash. A populated pair *is* availability — an unpinned selection is
-  a legible eval error.
+  = several depots, unioned read-only at launch, first wins). A populated pair *is* availability — an
+  unpinned selection is a legible eval error.
+
+  **Generate it with `propnix pin --new`** rather than by hand: it resolves the newest build and computes
+  the hash by STREAMING the payload, so it needs no disk for the game (the old way — fetch with
+  `lib.fakeHash` and copy the reported hash — needs free space equal to the title, which for a modern AAA
+  game is hundreds of GB). It writes `pkgs/games/<name>/versions.json` itself, creating the directory.
+
+  ```sh
+  # GOG, plus any DLC (repeat --dlc).
+  propnix pin <name> --new --gog --product-id 1238653230 --dlc space-age=1831417704
+
+  # Steam: one --depot per depot you want (the platform is read from the depot's oslist).
+  propnix pin <name> --new --steam --app 281990 --depot 281994 --depot 281991
+  ```
+
+  The `pname`s and the GOG `version` string it emits are correct-but-generic placeholders (`<name>-win`,
+  `<name>-<depotId>`) — rename them to house style. Add `--gog-branch Experimental` to pin a named GOG
+  release track (Factorio is pinned that way), `--branch <name>` for a Steam beta branch, `--os
+  linux`/`--lang`, or `--platform i386-windows` when the build is 32-bit, which nothing upstream tells us.
+
+  Afterwards, `propnix pin <name>` moves a game to the newest build on the branch it already sits on,
+  rewriting `versions.json` **in place** (temp file + same-directory rename, so an interrupted run can
+  never leave a half-written pin; an up-to-date run writes nothing at all, not even an mtime). `--stdout`
+  emits the document instead, for a caller that wants to validate before swapping — `ci/pin-refresh.sh`
+  does. `propnix pin <name> --check` reports whether upstream has moved *without needing any credential*.
+  Two repair modes exist for when a pin looks wrong: `--recompute` keeps the pinned version and recomputes
+  only its `outputHash`, and `--latest` ignores the recorded build and branch entirely. Re-pinning is
+  all-or-nothing per game — base payloads and every DLC together — because moving a base game without its
+  DLC is exactly the mismatch that breaks at runtime.
+
+  A re-pin of a large title runs for hours and **cannot be resumed** — the NAR is hashed strictly in tree
+  order — so every network request it makes is retried: chunks get 13 retries, metadata 7, spaced
+  exponentially (1s, 2s, 4s … capped at 32s). That is enough to ride out a laptop changing networks, a
+  suspend/resume, or a CDN recycling a pooled connection, all of which arrive as a body that ends early.
+  The budget is counted in **attempts**, never as a wall-clock deadline, precisely so time the machine
+  spends asleep does not consume it. Anything the server answered deliberately — 401/403, a withdrawn
+  manifest, a refused depot key — is *not* retried: those are answers, not accidents.
+
+  Multi-account hosts need no per-game selection: `pin` tries every stored account of the relevant type
+  until one owns the title, exactly as the fetchers do. Force one with `--gog-account <name>` /
+  `--steam-account <name>`, or the `PROPNIX_GOG_ACCOUNT` / `PROPNIX_STEAM_ACCOUNT` environment variables
+  (flag beats env beats try-all). A named account the store does not hold is an error listing the ones it
+  does — never a silent fall-through to somebody else's.
+
+  Three row keys are written by `propnix pin` itself rather than by you:
+
+  - **`depsBuildId`** (GOG) — some builds install a dependency *into the game directory* (homeworld-rm's
+    `language_setup`) from GOG's **global** dependency repository, which `buildId` does not pin: the tree
+    can change without the build changing. This records which repository build the pinned `outputHash` was
+    computed against. `fetchGogGalaxyBuild` accepts it but deliberately ignores it — gogdl always fetches
+    whatever the repository currently serves, so drift shows up as an FOD hash mismatch, which is the loud
+    failure we want. The tool inserts and updates it; nobody needs to write it by hand.
+  - **`version`** (Steam) — Steam publishes no human version strings, so this carries the branch **build
+    id** from appinfo. It is provenance only (the fetcher ignores it), but it is what fills the version
+    column of the PR table, the commit message and the update issue. A human may overwrite it with a
+    marketing string ("1.5.78.11"); that survives until the pin next *moves* — and a `pin.version.steam`
+    hold never moves, so a held label is stable.
+  - **`branch`** (Steam, optional) — the Steam branch this manifest came from; absent means `public`. `pin`
+    uses it as the default for both discovery and manifest request codes, so a beta-pinned game
+    auto-updates *on its branch* without anyone remembering a flag (the explicit analogue of GOG's branch
+    inference, which Steam manifests do not support). `--branch` overrides it for one run; the update flow
+    never rewrites it. `fetchSteamDepot` appends `-beta <name>` only when it is not `public`, so existing
+    pins are byte-identical. Passworded/hidden branches are out of scope: appinfo does not list them, and
+    `pin` refuses rather than guessing.
 - **`default.nix`** — a **module** passed to `mkApp`: `pname`/`appid`/`name`, `fetcher` and
   `emulatedPlatform` set with `lib.mkDefault` (so `.apply { fetcher = …; emulatedPlatform = …; }` can
   select any other pinned pair), `fetchInfo = (lib.importJSON ./versions.json).fetchInfo;`, and `exe`.
@@ -138,6 +205,113 @@ See `pkgs/games/hollow-knight/` (the two-axis exemplar), `pkgs/games/stellaris/`
 build under box64), `pkgs/games/outlast/` (`extraSystem32`), `pkgs/games/factorio/` (DLC), and
 `pkgs/games/kerbal-space-program/` (writable game-dir overlay + a seeded tmpfs).
 
+## Keeping pins current
+
+Two workflows keep `versions.json` honest, and both lean on the fact that *detecting* a new upstream
+version is anonymous while only *hashing* one needs an account. (On the GOG side that is GOG's own build
+list; on the Steam side it reads **api.steamcmd.net**, a third-party appinfo mirror — Valve publishes no
+unauthenticated appinfo endpoint, and the credential-free alternative is an anonymous CM PICS session,
+which is the fallback if that mirror ever goes away. What a bad mirror could do is bounded: the
+never-move-backwards guard rejects a rollback, and Steam itself issues the manifest request codes, so a
+fabricated manifest id simply fails to download.)
+
+- **`.github/workflows/auto-update.yml`** (weekly, plus `workflow_dispatch`) builds and pushes the CLI to
+  cachix, then substitutes it (`--max-jobs 0`, so it fails loudly rather than quietly recompiling) and runs
+  `ci/pin-refresh.sh`. Stage 1 checks all 17 games anonymously in a few seconds; only a game that moved
+  reaches stage 2, which streams the payload to recompute hashes. Every game it updates goes into one pull
+  request — never a direct push, so `eval.yml` gates the result. Set the `PROPNIX_APP_ID` variable and
+  `PROPNIX_APP_PRIVATE_KEY` secret if you want that PR to trigger CI by itself; a `GITHUB_TOKEN` PR does
+  not.
+- **`.github/workflows/pin-issues.yml`** (on pushes touching `pkgs/games/*/versions.json`) re-checks the
+  affected games and closes their "pin is behind upstream" issue once the pin genuinely matches upstream.
+  It re-verifies rather than trusting the push, because editing the file is not the same as being current.
+
+The issue lifecycle (`ci/pin-issue.sh`) gives each game **exactly one open issue, ever**: it is edited in
+place when upstream moves again — and only then, so a long-stale game does not notify anyone weekly — and
+closed when the pin catches up. A closed issue is **never reopened**; a later regression opens a fresh one.
+That invariant has a single home: the lookup only ever asks for `--state open`, and nothing calls
+`gh issue reopen`. Identity is a hidden `<!-- propnix-pin: game=… target=… -->` marker rather than the
+title, so issues can be retitled freely, and lookup uses the immediately-consistent list API rather than
+the eventually-consistent search API — a stale search index would mean a duplicate issue.
+
+A game the CI account does not own (or whose DLC it does not own) is reported **blocked**, not failed: the
+run stays green and the issue tells whoever owns it to run one command. So is a game whose upstream cannot
+be resolved at all — an aged-out GOG build, a retired Steam depot — and in that case the check emits a stub
+report carrying the tool's own explanation, so the issue still opens and says why. A game that genuinely
+**fails** does not abort the run either: it is recorded, every other game's work still lands, and a final
+step turns the run red afterwards. Every game it does update becomes its **own commit** in the PR
+(`pkgs/games/<game>: pin -> <version>`), so one bad pin can be reverted without touching the rest.
+
+### Opting a game out, or holding it at a version
+
+An optional top-level `pin` object in the game's `versions.json` overrides the follow-upstream default. A
+`reason` is required whenever either field is set — the same discipline the tuning knobs enforce, because a
+frozen pin with no stated reason is indistinguishable from an oversight six months later.
+
+```json
+{
+  "pin": { "freeze": true, "reason": "2.1.x Experimental is deliberate; do not follow the default branch" },
+  "fetchInfo": { … }
+}
+```
+
+`freeze` takes the game out of automatic updating entirely — it is reported **frozen** (distinct from
+up-to-date, so the summary tells the truth) and never gets an issue.
+
+`version` instead names the exact upstream version to sit at. It is **per store**, because a version
+string means different things to different stores and a game may pin more than one — hollow-knight has
+both a GOG build and two Steam depots:
+
+```json
+{
+  "pin": {
+    "version": { "gog": "1.5.12620", "steam": "1.5.78.11" },
+    "reason": "1.6 regressed the mod loader"
+  },
+  "fetchInfo": { … }
+}
+```
+
+A bare string is shorthand, legal **only** when the game pins exactly one fetcher (Factorio:
+`"version": "2.0.77"` means `gog`); on a mixed-store game it is an error that shows you the object form.
+A store with no entry simply follows upstream, so the two are independent. Unknown store keys, and
+non-string values, are errors — a typo must never quietly mean "follow upstream". `freeze` and `version`
+are mutually exclusive.
+
+What the value *means* is the store's business:
+
+- **GOG** — it is resolved against the builds list, matching a `version_name` or a `buildId`, and the
+  named build is selected. Because that may be *behind* the newest, this also expresses a deliberate
+  **downgrade**, and it suppresses the never-move-backwards guard for exactly that reason. A value
+  upstream does not list is an error naming the versions it does list.
+- **Steam** — a **hold**, not a lookup. Steam publishes no version→manifest mapping, so nothing can
+  resolve `"1.5.78.11"` to a manifest; the value instead asserts that every Steam row's `version` field
+  already equals it. When they all match the pins are simply held (reported up to date, pinned to that
+  version) and the appinfo request is skipped entirely. When one does not, the game goes **blocked** with
+  an issue saying what to do: look the build up (SteamDB), edit that row's `manifestId` and `version` by
+  hand, run `propnix pin <game> --recompute` — or drop `pin.version.steam`.
+
+This lives in `versions.json` rather than the game's `default.nix` on purpose: it is the file
+`propnix pin` already reads and rewrites, so consulting the policy costs nothing and the tool keeps working
+on a plain checkout without evaluating any Nix — `--check` stays a few seconds for all 17 games. (`dlc` is
+the existing precedent for a non-`fetchInfo` key there.) The rewriter preserves it untouched.
+
+### A GOG pin can age out, and that is the intended outcome
+
+GOG's builds API returns only its most recent builds, paginated. A pin that stays put for long enough —
+a `freeze`, a `pin.version.gog` holding an old release, or simply a game nobody has touched in a year —
+eventually names a build the list no longer contains. `propnix pin` then **refuses**: a build's release
+track is inferred from the build itself, so with it gone there is no honest way to tell which track the
+pin belonged to, and guessing could silently move a game from `Experimental` to the default branch (or
+the reverse). The game is reported **blocked**, the run stays green, and the issue asks a human to re-pin
+by hand. That is by design, not a gap: the alternative is a tool that quietly changes which release track
+a game follows.
+
+Credentials reach CI as repository secrets — `PROPNIX_GOG_TOKENS` (the `galaxy_tokens.json` text),
+`PROPNIX_STEAM_STORE_B64` (base64 of the credential tar) and optionally `PROPNIX_STEAM_USERNAME`. A missing
+secret is a skip, not a failure. Note a Steam refresh token is **not** a scoped download token: a client
+session yields steamcommunity cookies, so treat it as full account access.
+
 ## Scope & backlog
 
 **In:** the wine path (x86_64 + i386 Windows builds) and the box64/native thin path (x86_64 Linux builds),
@@ -145,5 +319,5 @@ GOG + Steam fetchers, 17 games — hardware-tested on **aarch64-linux**; **x86_6
 evaluates (unbuilt/untested on real hardware). **Backlog:** building/testing the x86_64 target on real
 hardware; a mechanical x86-guest cache-hit gate in `flake.checks`; MS-Store; MangoHud on non-DXVK
 backends; a winewayland **xdg-activation** patch (would let the game open on the splash's
-monitor/workspace, and extend focus-on-duplicate to GNOME/KDE); `updateScript`/CI. The thin FEX backend is
+monitor/workspace, and extend focus-on-duplicate to GNOME/KDE). The thin FEX backend is
 carried but `meta.broken` on 16K hosts (see `docs/DESIGN.md` D12).

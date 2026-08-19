@@ -75,7 +75,7 @@ pkgs.lib.makeScope pkgs.newScope (
     # The launcher LINKS the mount + prefetch helpers as library crates (path deps), so it's the single
     # build; propnix-mount / propnix-prefetch are no longer separate packages.
     propnix-launcher = callPackage ../pkgs/propnix-launcher { }; # per-app launcher (splash + seal + in-process mount/prefetch + orchestration)
-    propnix-cli = callPackage ../pkgs/propnix-cli { }; # the `propnix` CLI (propnix cred …: credential management)
+    propnix-cli = callPackage ../pkgs/propnix-cli { }; # the `propnix` CLI (cred management + `propnix pin` re-pinning)
 
     # ── the module system (D16) ──
     sealing = import ./sealing.nix { inherit (pkgs) lib; }; # §7 env-seal data model + tuning flatten (pure lib)

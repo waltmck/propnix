@@ -90,6 +90,14 @@
   kind ? "game", # provenance only (game | dlc); not consumed by the download
   generation ? 2, # GOG content-system generation (builds API ?generation=…); provenance only here
   manifestId ? null, # optional manifest pin for future manifest-level reproducibility; unused this pass
+  # PROVENANCE ONLY — deliberately not referenced anywhere in the build. Some builds install a
+  # dependency (e.g. homeworld-rm's `language_setup`) INTO the game directory from GOG's GLOBAL
+  # dependency repository, which `buildId` does not pin: the tree can change without the build changing.
+  # This records WHICH repository build the pinned `outputHash` was computed against, so `propnix pin`
+  # can maintain the pin — and so a human can see what a hash mismatch means. gogdl always fetches
+  # whatever the repository currently serves, so referencing this here would change nothing; drift shows
+  # up as the FOD hash mismatch, which is exactly the loud failure we want.
+  depsBuildId ? null,
   # gogdl download parallelism = `--max-workers` (its ONLY throughput knob — gogdl has no bandwidth throttle,
   # unlike the official Galaxy client). gogdl defaults this to the CPU thread count (~8 here), which badly
   # under-uses the link because GOG's CDN throttles EACH connection: aggregate speed ≈ per-connection cap ×
@@ -154,7 +162,10 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}-${version}")
     dropbase="''${PROPNIX_DROP_DIR:-/propnix/drop}"
     if [ -d "$dropbase/$buildId" ] && [ -n "$(find "$dropbase/$buildId" -mindepth 1 -print -quit)" ]; then
       echo "propnix: using staged drop for build $buildId (skipping network)" >&2
-      cp -a "$dropbase/$buildId"/. "$out/"
+      # The drop lives on a bind-mounted host dir, so this copy is unavoidable (rename/link cannot cross a
+      # mount point — see the download path below); --reflink=auto makes it free where the filesystem
+      # supports block cloning and degrades to a plain copy elsewhere.
+      cp -a --reflink=auto "$dropbase/$buildId"/. "$out/"
     else
       # ── Rung-2: gogdl download ────────────────────────────────────────────────────────────────────
       # Shared credential prologue (credentials.toml check, creddir extraction, account glob): cred-lib.sh.
@@ -178,9 +189,16 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}-${version}")
       # makes multiple GOG accounts transparent (no per-game account selection): a not-owned/expired account
       # fails at manifest resolution (before any bulk download) and we fall through to the next. The output is
       # content-addressed, so WHICH account fetched it never affects the hash.
+      # DOWNLOAD STRAIGHT INTO $out — never stage the tree in $TMPDIR. A Galaxy build can be hundreds of
+      # GB, and staging then copying would require TWICE that free: inside the sandbox /build and
+      # /nix/store are SEPARATE BIND MOUNTS, and Linux refuses rename(2)/link(2) across mount points even
+      # when both sit on one filesystem (man 2 rename, EXDEV), so a `mv` degrades to copy+unlink. Measured
+      # in a real builder: 2 GiB took 322 ms to move $TMPDIR→$out versus 2 ms to rename within /build.
+      # gogdl still creates its own game dir under --path, but promoting that dir's children afterwards is
+      # a set of SAME-DIRECTORY renames inside $out, which move no data. Peak disk stays at 1x the build.
       fetched=0
       for _tok in "''${PROPNIX_ACCOUNT_FILES[@]}"; do
-        rm -rf "$TMPDIR/dl"; mkdir -p "$TMPDIR/dl"
+        rm -rf "$out"; mkdir -p "$out"
         # Build gogdl's auth-config by a PURE file->file transform (no token value ever reaches stdout):
         #   * key it by GOG's Galaxy client id (gogdl's CLIENT_ID) so gogdl finds the tokens
         #   * loginTime:0 forces gogdl to refresh the access_token from the (non-rotating) refresh_token on
@@ -202,8 +220,8 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}-${version}")
             --lang "$lang" \
             ${if dlcId != null then "--dlc-only --with-dlcs --dlcs ${dlcId}" else "--skip-dlcs"} \
             --max-workers ${toString maxWorkers} \
-            --path "$TMPDIR/dl" \
-          && [ -n "$(find "$TMPDIR/dl" -mindepth 1 -type f -print -quit)" ]; then
+            --path "$out" \
+          && [ -n "$(find "$out" -mindepth 1 -type f -print -quit)" ]; then
           fetched=1
           break
         fi
@@ -220,15 +238,36 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}-${version}")
       fi
 
       echo "=====PROPNIX-LAYOUT-BEGIN====="
-      find "$TMPDIR/dl" -maxdepth 2 | sort | head -80
-      echo "  file count: $(find "$TMPDIR/dl" -type f | wc -l)"
+      find "$out" -maxdepth 2 | sort | head -80
+      echo "  file count: $(find "$out" -type f | wc -l)"
       echo "=====PROPNIX-LAYOUT-END====="
 
-      # gogdl installs into a single game dir under $TMPDIR/dl (folder_name from the manifest, e.g.
-      # "Hollow Knight"); publish its contents as $out.
-      inner=$(find "$TMPDIR/dl" -mindepth 1 -maxdepth 1 -type d | head -1)
-      if [ -z "$inner" ]; then echo "no install dir produced" >&2; exit 1; fi
-      cp -a "$inner"/. "$out/"
+      # gogdl installs into a single game dir under --path (folder_name from the manifest, e.g. "Hollow
+      # Knight"); $out must BE that dir's contents. Promote them one level and drop the wrapper. Excluding
+      # gogdl's dot-dirs from the search matters: an unordered `find` could otherwise pick
+      # `.gogdl-download-cache` as the game dir.
+      # EXACTLY ONE candidate, or fail: taking the first of an unordered list would publish an arbitrary
+      # one of two trees, which is neither reproducible nor detectable after the fact.
+      mapfile -t _inner < <(find "$out" -mindepth 1 -maxdepth 1 -type d ! -name '.gogdl-*' | sort)
+      if [ "''${#_inner[@]}" -eq 0 ]; then echo "no install dir produced" >&2; exit 1; fi
+      if [ "''${#_inner[@]}" -gt 1 ]; then
+        echo "gogdl produced ''${#_inner[@]} top-level directories, expected exactly one:" >&2
+        printf '  %s\n' "''${_inner[@]}" >&2
+        exit 1
+      fi
+      inner=''${_inner[0]}
+      # Discard whatever gogdl left OUTSIDE the game dir — same semantics as the previous
+      # `cp -a "$inner"/. "$out/"`, which published only the game dir's contents.
+      # A LITERAL comparison, never `find -path`: `-path` fnmatches, so a GOG folder_name containing
+      # `[`, `?` or `*` (they exist) fails to match its own literal path and the just-downloaded tree is
+      # deleted. Reproduced with findutils 4.10.
+      for _e in "$out"/* "$out"/.[!.]* "$out"/..?*; do
+        [ -e "$_e" ] || [ -L "$_e" ] || continue
+        [ "$_e" = "$inner" ] || rm -rf -- "$_e"
+      done
+      # Same-directory renames within $out: metadata-only, no data copied at any size.
+      find "$inner" -mindepth 1 -maxdepth 1 -exec mv -t "$out" -- {} +
+      rmdir "$inner"
     fi
 
     # ── common post-processing (both rungs) ──────────────────────────────────────────────────────────

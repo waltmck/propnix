@@ -12,7 +12,8 @@
           "os": "windows",
           "lang": "en",
           "kind": "game",
-          "generation": 2
+          "generation": 2,
+          "depsBuildId": "59705672826648994"
         }
       ]
     }

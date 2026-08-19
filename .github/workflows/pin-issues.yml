@@ -1,0 +1,143 @@
+# Close a game's "pin is behind upstream" issue once the pin catches up.
+#
+# This is the CI equivalent of the commit hook one might reach for first. A git hook cannot do the job: it
+# has no GitHub token, no guaranteed network, and it would not run for a squash-merge done in the web UI or
+# for anything pushed by another clone. A `push` trigger on the default branch fires for all of those.
+#
+# It deliberately RE-VERIFIES against upstream instead of trusting the push. Touching versions.json is not
+# the same as being current — a hand edit could move a pin to some intermediate build, and the issue should
+# only close when the game is genuinely at the newest upstream version. `propnix pin --check` is anonymous,
+# so that re-verification costs nothing and needs no secret.
+#
+# The issue is never REOPENED. `ci/pin-issue.sh` only ever queries `state=open` and has no reopen path,
+# so a game that falls behind again gets a fresh issue — which is also the truthful representation, since
+# the second lag is a different event from the first.
+name: pin-issues
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "pkgs/games/*/versions.json"
+  workflow_dispatch:
+    inputs:
+      game:
+        description: Re-check one game and close its issue if it is current (blank = all games)
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # SHARED with the other pin workflow, deliberately. Concurrency groups are repository-wide and match
+  # across workflows, so one literal name means the weekly refresh and the push hook can never be
+  # mid-flight at the same time — no interleaving on the same issue, and no two runs racing the branch.
+  #
+  # CAVEAT, accepted: GitHub keeps at most ONE queued run per group, so a run queued here can be
+  # superseded by a later one and never execute. Harmless in both directions — this job only re-checks
+  # and closes, and the weekly cron re-checks everything anyway.
+  group: propnix-pins
+  cancel-in-progress: false
+
+jobs:
+  close:
+    name: close resolved pin issues
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: a push can carry many commits, and `git diff <before> <after>` needs both ends.
+          # This is only an OPTIMIZATION — every candidate is re-verified against upstream below, so
+          # widening to all games on any ambiguity is free.
+          fetch-depth: 0
+          # This job never pushes; leaving GITHUB_TOKEN in .git/config would only widen what a compromised
+          # step can reach. (Parity with auto-update.yml, which has a stronger reason of its own.)
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - uses: cachix/cachix-action@v16
+        with:
+          name: propnix
+          skipPush: true
+
+      - name: Substitute propnix from cachix
+        run: |
+          set -euo pipefail
+          nix build --max-jobs 0 --print-out-paths \
+            '.#legacyPackages.x86_64-linux.propnix-cli' > /tmp/cli-path
+          echo "$(cat /tmp/cli-path)/bin" >> "$GITHUB_PATH"
+
+      # `${{ }}` splices interpolate BEFORE the shell sees the script, so a value carrying shell syntax
+      # would execute as code. `github.event.inputs.game` is human-supplied and `github.event.before`
+      # comes off the wire; both go through `env:` instead, where the shell treats them as data.
+      - name: Which games to re-check
+        id: which
+        env:
+          INPUT_GAME: ${{ github.event.inputs.game }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_GAME:-}" ]; then
+            printf '%s\n' "$INPUT_GAME" > /tmp/games
+          else
+            before=${PUSH_BEFORE:-}
+            # github.event.before is all-zeroes for a branch's first push, and a force-push can leave it
+            # unreachable. Either way, fall back to examining every game — this job is cheap and
+            # anonymous, so being thorough costs nothing but a minute.
+            if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ] \
+               || ! git cat-file -e "$before^{commit}" 2>/dev/null; then
+              echo "::notice::cannot diff against ${before:-<empty>}; re-checking every game"
+              propnix games --repo . > /tmp/games
+            else
+              git diff --name-only --diff-filter=ACMRT "$before" "$PUSH_SHA" \
+                -- 'pkgs/games/*/versions.json' \
+                | sed -n 's|^pkgs/games/\([^/]*\)/versions.json$|\1|p' | sort -u > /tmp/games
+            fi
+          fi
+          echo "games: $(tr '\n' ' ' < /tmp/games)"
+
+      - name: Close the issue for every game that is now current
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          while read -r game; do
+            [ -n "$game" ] || continue
+            # A game deleted in this push has no versions.json any more; leave its issue alone for a human.
+            if [ ! -f "pkgs/games/$game/versions.json" ]; then
+              echo "  $game: no versions.json (renamed or removed?) — leaving any issue open"
+              continue
+            fi
+            check=$(mktemp)
+            if ! propnix pin "$game" --check --repo . > "$check" 2>/tmp/err; then
+              echo "  $game: check failed ($(head -1 /tmp/err)) — leaving any issue open"
+              continue
+            fi
+            # A FROZEN game also reports upToDate — it is held on purpose, not caught up. Closing it with
+            # "now pinned to the newest upstream version" would be a lie, and its issue (if any) is about
+            # something else, so leave it alone.
+            if [ "$(jq -r '.frozen' "$check")" = "true" ]; then
+              echo "  $game: frozen ($(jq -r '.policyReason // "no reason recorded"' "$check")) — leaving any issue open"
+            elif [ "$(jq -r '.upToDate' "$check")" = "true" ]; then
+              # Only NOW is it safe to close: the pin genuinely matches what it is supposed to be at.
+              # A version-HELD game also reports upToDate, but it is at its PINNED version rather than
+              # the newest — say so, instead of closing it with a sentence that is false.
+              pinned=$(jq -r '.pinnedTo // ""' "$check")
+              if [ -n "$pinned" ]; then
+                echo "  $game: held — $(ci/pin-issue.sh close-if-open "$game" "$pinned" "" held)"
+              else
+                echo "  $game: current — $(ci/pin-issue.sh close-if-open "$game")"
+              fi
+            else
+              echo "  $game: still behind upstream — leaving its issue open"
+            fi
+          done < /tmp/games

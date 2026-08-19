@@ -57,4 +57,11 @@ in
 {
   names = lib.attrNames targets;
   inherit targets;
+
+  # The same auto-discovered games, in THIS allowBroken scope — the pin refresher's post-rewrite
+  # validation gate (ci/pin-refresh.sh). Forcing a `meta.broken` package's drvPath THROWS, so validating
+  # through `legacyPackages` reverted such a game's rewrite and recorded it `failed` every single week,
+  # permanently. Evaluating it here instead keeps the gate (a malformed pin — an unknown key, a bad SRI,
+  # a coerced JSON type — still fails) without dropping brokenness, and without reaching for `--impure`.
+  inherit (scope) games;
 }

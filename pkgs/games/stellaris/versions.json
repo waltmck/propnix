@@ -7,16 +7,18 @@
           "appId": 281990,
           "depotId": 281994,
           "manifestId": "290069498413929006",
+          "version": "4.4.6",
           "outputHash": "sha256-UVq/sjYQ26vNM0r7rx+p4f0OQt7cj3CS6kzYq+oyk1U=",
-          "title": "Stellaris (Linux, 4.4.6)"
+          "title": "Stellaris (Linux, Steam)"
         },
         {
           "pname": "stellaris-linux-data",
           "appId": 281990,
           "depotId": 281991,
           "manifestId": "3922771984290037884",
+          "version": "4.4.6",
           "outputHash": "sha256-sqRDwTBcWMQ4OAPPiHQBLx4IhFcXWvt59nkBZIUFRs4=",
-          "title": "Stellaris (Linux, 4.4.6)"
+          "title": "Stellaris (Linux, Steam)"
         }
       ]
     }

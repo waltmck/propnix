@@ -23,8 +23,9 @@
           "appId": 367520,
           "depotId": 367521,
           "manifestId": "257781644874438846",
+          "version": "1.5.78.11",
           "outputHash": "sha256-skM7BIO//sNu6//klDbglqCetOEOglZKVu4YH9ZvK40=",
-          "title": "Hollow Knight (windows, Steam, 1.5.78.11)"
+          "title": "Hollow Knight (windows, Steam)"
         }
       ],
       "x86_64-linux": [
@@ -33,8 +34,9 @@
           "appId": 367520,
           "depotId": 367523,
           "manifestId": "708613018541602983",
+          "version": "1.5.78.11",
           "outputHash": "sha256-mGQvVdhTu/GAtQTvXzLVFQq1QN9oDjvj8flZnYeqwaM=",
-          "title": "Hollow Knight (linux, Steam, 1.5.78.11)"
+          "title": "Hollow Knight (linux, Steam)"
         }
       ]
     }

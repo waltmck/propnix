@@ -60,7 +60,7 @@
       );
 
       # `nix run .#hollow-knight` on either host arch — emulation handled transparently below the launcher.
-      # One app per auto-discovered game (`nix run .#<name>`), plus `nix run .#propnix -- cred …` (the CLI).
+      # One app per auto-discovered game (`nix run .#<name>`), plus `nix run .#propnix -- cred …` / `-- pin …`.
       # No `default` — the flake default is blank.
       apps = forAllSystems (
         system:
@@ -89,13 +89,21 @@
             config.allowUnfree = true;
           };
         };
+        # The CLI's own unit tests, which `doCheck` runs as part of its build: NAR serialization against
+        # vectors taken from `nix hash path`, the versions.json rewriter (minimal diffs, JSON types
+        # preserved, all-or-nothing transactions), the ordered prefetcher, and the Steam manifest /
+        # credential decoders. Pure and offline — no network, no credentials.
+        cli-tests = scopes.${system}.propnix-cli;
       });
 
       # CI-ONLY (non-standard output): the exhaustive pinned (game × fetcher × emulatedPlatform) eval
       # matrix, driven one-`nix eval`-process-per-target by ci/eval-matrix.sh (.github/workflows/eval.yml)
       # so an infinite recursion in one combo can't mask the rest. Instantiated with allowBroken — a
       # meta.broken title must still EVALUATE (broken refuses building, never enumeration); that's why
-      # this doesn't reuse `scopes` above. See lib/tests/eval-matrix.nix.
+      # this doesn't reuse `scopes` above. It also re-exports `games` from that same allowBroken scope,
+      # which is what ci/pin-refresh.sh validates a rewritten versions.json through — forcing a broken
+      # package's drvPath via `legacyPackages` throws, and would revert such a game's pin every week.
+      # See lib/tests/eval-matrix.nix.
       ci = forAllSystems (
         system:
         import ./lib/tests/eval-matrix.nix {
@@ -131,10 +139,11 @@
           import ./lib { inherit pkgs config; };
       };
 
-      # Host wiring: `services.propnix.enable` binds the credential dir into the build sandbox and loads
-      # ntsync. Arch-agnostic; adds no game packages. See nixos/propnix.nix.
+      # Host wiring: `services.propnix.enable` binds the credential dir into the build sandbox, loads
+      # ntsync, trusts the cachix, and installs the `propnix` CLI. Arch-agnostic; adds no game packages.
+      # Takes `self` so the CLI it installs comes from the pinned nixpkgs above. See nixos/propnix.nix.
       nixosModules = rec {
-        propnix = import ./nixos/propnix.nix;
+        propnix = import ./nixos/propnix.nix { inherit self; };
         default = propnix;
       };
     };

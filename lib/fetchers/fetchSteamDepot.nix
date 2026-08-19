@@ -35,6 +35,27 @@
   outputHashAlgo ? "sha256",
   anonymous ? false, # true → anonymous account (free depots); false → a stored `propnix cred add steam` account
   title ? "this Steam title",
+  # PROVENANCE ONLY — deliberately not referenced in the build. Steam publishes no human version strings,
+  # so a depot pin is identified purely by `manifestId`; this records the branch BUILD ID the pin was
+  # taken at (or a marketing string a human wrote over it), which is what makes the PR table, the commit
+  # message and the update issue say something meaningful. It lives in versions.json rather than here
+  # because referencing it would churn every existing derivation for a label the download ignores.
+  version ? null,
+  # Which Steam branch the manifest belongs to. Absent/"public" is the default; a named branch is passed
+  # to DepotDownloader as `-beta`, and ONLY then — every existing public pin's `dlArgs` must stay
+  # byte-identical. Passworded/hidden branches are out of scope (DepotDownloader's `-betapassword` is
+  # the hook if that is ever wanted); `propnix pin` refuses a branch Steam's appinfo does not list.
+  branch ? "public",
+  # DepotDownloader's `-max-downloads` = concurrent chunk requests. Its default of 8 is the single
+  # biggest throughput limit on a depot fetch: Steam's CDN rate-limits PER CONNECTION, so aggregate
+  # bandwidth is essentially (per-connection cap x connections). Measured against a real depot from this
+  # host — 96 chunks, same set each run:
+  #     1 conn  9.2 Mbit/s | 4 conns 32.8 | 8 conns 49.6 | 16 conns 90.9 | 32 conns 114.4
+  #     and spread over the ~24 content servers Steam offers: 16 conns 105.3, 32 conns 168.6
+  # So the stock 8 caps a fetch near 50 Mbit/s regardless of the link. 32 is ~2.3x that and still well
+  # inside what Steam serves without throttling. A build-time constant only — chunk count and content
+  # are manifest-fixed, so this never affects the content-addressed output.
+  maxDownloads ? 32,
 }:
 runCommand (lib.strings.sanitizeDerivationName "${pname}")
   {
@@ -58,7 +79,9 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}")
       manifestId
       title
       ;
-    dlArgs = "-app ${toString appId} -depot ${toString depotId} -manifest ${toString manifestId}";
+    dlArgs =
+      "-app ${toString appId} -depot ${toString depotId} -manifest ${toString manifestId} -max-downloads ${toString maxDownloads}"
+      + lib.optionalString (branch != "public") " -beta ${branch}";
   }
   ''
     set -euo pipefail
@@ -67,7 +90,24 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}")
     # — so the credential tar (below) must be replayed under THIS dir, and it must be set even anonymously to
     # keep the tool's state contained + deterministic.
     export XDG_DATA_HOME="$TMPDIR/xdg"
-    install -d -m700 "$TMPDIR/dl"
+
+    # DOWNLOAD STRAIGHT INTO $out — never stage the depot in $TMPDIR. A depot can be hundreds of GB, and
+    # staging then moving would require TWICE that free: inside the sandbox /build and /nix/store are
+    # SEPARATE BIND MOUNTS (of /nix/var/nix/builds/… and <drv>.chroot/root/nix/store), and Linux refuses
+    # rename(2)/link(2) across mount points even when both sit on one filesystem (man 2 rename, EXDEV) —
+    # so `mv "$TMPDIR/dl" "$out"` silently degrades to copy+unlink. Measured in a real builder: 2 GiB took
+    # 322 ms to `mv` from $TMPDIR to $out versus 2 ms to rename WITHIN /build. Writing into $out from the
+    # start keeps peak disk at 1x the depot. (Nix's own publish step is a true rename — verified by polling
+    # the final store path, which appears instantly at full size — so 1x holds end to end. The output mode
+    # is irrelevant either way: Nix canonicalizes every store path to dr-xr-xr-x root:root.)
+    #
+    # Everything DepotDownloader does stays inside $out, so its staging→final moves are same-mount renames.
+    reset_out() { rm -rf "$out"; install -d -m755 "$out"; }
+    # A depot counts as fetched only if real CONTENT landed: an account that does not own the depot still
+    # exits 0 having written nothing but the bookkeeping dir, so an exit-code check alone would pass.
+    have_content() {
+      [ -n "$(find "$out" -mindepth 1 -type f -not -path '*/.DepotDownloader/*' -print -quit)" ]
+    }
 
     fetched=0
     ${
@@ -75,8 +115,8 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}")
         ''
           # Anonymous account — free/anonymous depots only.
           install -d -m700 "$HOME" "$XDG_DATA_HOME"
-          if DepotDownloader $dlArgs -dir "$TMPDIR/dl" \
-            && [ -n "$(find "$TMPDIR/dl" -mindepth 1 -type f -not -path '*/.DepotDownloader/*' -print -quit)" ]; then
+          reset_out
+          if DepotDownloader $dlArgs -dir "$out" && have_content; then
             fetched=1
           fi
         ''
@@ -98,10 +138,9 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}")
             # Replay the stored account.config into DepotDownloader's isolated-storage path (path-preserving tar,
             # relative to $XDG_DATA_HOME — where .NET Isolated Storage looks).
             tar -C "$XDG_DATA_HOME" -xf "$_tar"
-            rm -rf "$TMPDIR/dl"; install -d -m700 "$TMPDIR/dl"
+            reset_out
             # -remember-password makes DepotDownloader USE the stored refresh token (no interactive prompt).
-            if DepotDownloader $dlArgs -username "$_user" -remember-password -dir "$TMPDIR/dl" \
-              && [ -n "$(find "$TMPDIR/dl" -mindepth 1 -type f -not -path '*/.DepotDownloader/*' -print -quit)" ]; then
+            if DepotDownloader $dlArgs -username "$_user" -remember-password -dir "$out" && have_content; then
               fetched=1
               break
             fi
@@ -116,10 +155,7 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}")
     fi
 
     # Publish content only — drop DepotDownloader's bookkeeping (manifest cache, depot.config, staging), which
-    # is tool state, not depot content, and could perturb the recursive hash.
-    rm -rf "$TMPDIR/dl/.DepotDownloader"
-    # RENAME the download dir straight to $out (no copy). Depots run tens of GB (Stellaris data ≈ 29.5 GB
-    # uncompressed) so a `cp` would double the disk + wall-clock; $TMPDIR and $out share the build's fs, so this
-    # is an O(1) rename. Content is byte-identical to a copy, so the pinned outputHash is unaffected.
-    mv "$TMPDIR/dl" "$out"
+    # is tool state, not depot content, and would perturb the recursive hash. $out is already the download
+    # dir, so there is nothing left to move.
+    rm -rf "$out/.DepotDownloader"
   ''

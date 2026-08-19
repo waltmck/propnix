@@ -45,12 +45,18 @@
         exeArgs
         workingDir
         maskFiles
-        saveBinds
         env
         icon
         broken
         payloads
+        extraLowers
         ;
+      # `extraBinds` is thin-only (view-relative dst; wine's binds are profile-home-relative) — refuse it
+      # legibly instead of silently dropping the rows.
+      saveBinds =
+        lib.throwIf (cfg.extraBinds != [ ])
+          "propnix (${cfg.pname}): extraBinds is thin-only (view-relative dst semantics) — express the row as `wine.mounts` on the wine backend."
+          cfg.saveBinds;
       resolvedConfig = cfg.wine; # pre-resolved tuning (defaults layer + game + `.apply`, merged by evalModules)
       dlc = cfg.dlc.available;
       inherit enabledDlc;

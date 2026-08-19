@@ -9,8 +9,9 @@
 #   * gog   / x86_64-windows — GOG Galaxy Windows build via wine (aarch64 → FEX + ARM64EC DXVK). The
 #                              sanctioned fallback — a gog-only `preferredFetchers` gets this automatically
 #                              (GOG has no HK Linux pin).
-#   * steam / x86_64-windows — Steam Windows build via wine (same wine path; masks steam_api64.dll instead
-#                              of the GOG Galaxy SDK — the "small tweak" that differs by fetcher).
+#   * steam / x86_64-windows — Steam Windows build via wine (same wine path; steam.emu union-replaces
+#                              steam_api64.dll instead of stubbing the GOG Galaxy SDK — the "small tweak"
+#                              that differs by fetcher).
 #
 # Availability IS the fetch matrix: versions.json is `fetchInfo` verbatim (fetcher → platform → fetch
 # arg-sets), and mkApp's `payloads` default fetches the selected pair or throws a legible error listing the
@@ -56,18 +57,19 @@ mkApp (
       else
         "Hollow Knight.exe";
 
-    # De-store-integration: ERASE the bundled store DLL (whiteout → true absence) so HK's plugin loader
-    # reports "no online subsystems" and runs offline. A Steam build ships libsteam_api.so (Linux) /
-    # steam_api64.dll (Windows), each a Unity native plugin (not statically imported), so absence is clean —
-    # an EMPTY stub would instead fault the loader (proven on Linux). GOG's Galaxy SDK is the opposite (a
-    # static import needing a real no-op stub, `galaxyStubDlls` below), so nothing to mask there.
-    maskFiles = lib.optionals onSteam [
-      (
-        if onLinux then
-          "hollow_knight_Data/Plugins/libsteam_api.so"
-        else
-          "hollow_knight_Data/Plugins/x86_64/steam_api64.dll"
-      )
+    # De-store-integration: every Steam combo runs against the offline emulator now — steam.emu places the
+    # gbe_fork lib AT the paths below (Unity dlopens its native plugins by EXPLICIT PATH, so no preload can
+    # interpose them): the Linux .so is bind-overed at launch, the Windows dll is union-replaced by the
+    # settings tree ranking above the payload. SteamAPI init resolves offline against the emulator; nothing
+    # is masked anymore (a mask would also EINVAL now that the emu's extraLowers make the game dir
+    # multi-lower — see the maskFiles option docs). HK ships Steamworks.NET 2024.8.0 / SDK 1.60, whose
+    # `SteamInternal_SteamAPI_Init` entry point needs gbe_fork — goldberg 0.2.5 lacked it and
+    # black-screened (worse than absence: the lib loaded, init threw). Each payload's own path, declared
+    # unconditionally; each backend consumes only its flavor. GOG's Galaxy SDK is a different mechanism
+    # entirely (a static import needing a real no-op stub): `galaxyStubDlls` below.
+    steam.emu.libPaths = [
+      "hollow_knight_Data/Plugins/libsteam_api.so"
+      "hollow_knight_Data/Plugins/x86_64/steam_api64.dll"
     ];
 
     # Save: HK's Unity persistentDataPath, bound out to the persistent propnix save dir. dst is

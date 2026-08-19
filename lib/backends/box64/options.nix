@@ -21,5 +21,17 @@
       defaultText = lib.literalExpression "_p: [ ]";
       description = "Guest-only x86_64 libraries (glibc, libstdc++, …): `p: [ drv ]` resolved from pkgsX86.";
     };
+    guestPreload = lib.mkOption {
+      type = knobTypes.dedupList lib.types.str;
+      default = [ ];
+      description = ''
+        GUEST-arch libraries (store paths to x86_64 .so files) force-loaded into the emulated process ahead
+        of every other resolution — the interposition hatch (Stellaris: the offline Steam entitlement shim,
+        which must win over the libsteam_api.so shipped beside the exe). Each thin backend translates it to
+        its loader's spelling: BOX64_LD_PRELOAD under box64 (whose guest loader ignores LD_PRELOAD and
+        prepends the exe's own directory to its search list, so nothing weaker interposes), plain
+        LD_PRELOAD on native x86_64 and under FEX (both run the real x86_64 ld.so).
+      '';
+    };
   };
 }

@@ -20,6 +20,8 @@
   resolveStrategy,
   fetchers,
   backends,
+  mkSteamOfflineEntitlement,
+  gbeFork,
   propnixConfig, # the validated instantiation config (lib/default.nix): { preferredFetchers = [ … ]; }
 }:
 spec:
@@ -35,12 +37,22 @@ let
       ;
     inherit (propnixConfig) preferredFetchers;
   };
+  # The `steam.*` namespace + its automatic wiring (offline Steam entitlement for thin Steam games).
+  steamEmu = import ./modules/steam-emu.nix {
+    inherit
+      lib
+      knobTypes
+      mkSteamOfflineEntitlement
+      gbeFork
+      ;
+  };
 
   eval =
     applied:
     lib.evalModules {
       modules = [
         appOptions
+        steamEmu
       ]
       ++ lib.concatMap (b: b.modules) (lib.attrValues backends)
       ++ [ spec ]
@@ -62,7 +74,18 @@ let
 
       # Dispatch: the selected backend's build arm. `backend` is an enum over the registry, so the lookup
       # cannot miss; an unavailable (fetcher, platform) throws from the `payloads` default when forced.
-      drv = backends.${cfg.backend}.build { inherit cfg enabledDlc executables; };
+      # On wine, steam.emu's ONLY mechanism is union-replacement at a declared `.dll` libPath — enabled
+      # with none declared would be a silently-inert shim (the game loads its genuine dll, every DLC reads
+      # unowned), the half-wiring this framework refuses. See modules/steam-emu.nix.
+      drv =
+        lib.throwIf
+          (
+            cfg.steam.emu.enable
+            && cfg.backend == "wine"
+            && !(lib.any (lib.hasSuffix ".dll") cfg.steam.emu.libPaths)
+          )
+          "propnix mkApp (${cfg.pname}): steam.emu on the wine backend needs `steam.emu.libPaths` to name the game's shipped steam_api(64).dll (union-replacement is the only PE mechanism — there is no preload) — declare it, or set `steam.emu.enable = false`."
+          (backends.${cfg.backend}.build { inherit cfg enabledDlc executables; });
 
       # The override surface, promoted to the top level (so `game.apply`, `lib.getExe game` work) AND
       # mirrored into passthru.

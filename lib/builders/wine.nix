@@ -72,6 +72,9 @@
   # multi-lower OVERLAY (DLC-first), merging the trees at mount time with NO store copy of the base.
   dlc ? { },
   enabledDlc ? [ ],
+  # App-level extra trees unioned with the DLC (mkApp's `extraLowers`) — same priority band, same
+  # read-only merge; for content that is neither payload nor DLC.
+  extraLowers ? [ ],
   # Game-dir-relative files to ERASE from the game tree at runtime (propnix-mount `whiteout` rows over
   # C:\game — true absence, no store copy). E.g. a Steam build's steam_api64.dll → the plugin loader
   # reports "no online subsystem" and runs offline. (A STATICALLY imported SDK needs the opposite — a real
@@ -160,7 +163,8 @@ let
   # unions everything at mount time — DLC FIRST (a DLC that modifies a base file wins), then the payloads
   # in their declared order (first wins). `readOnly = true` = lowerdir-only, NO upper; `skeleton = null`
   # (a read-only overlay never copies up; a multi-path lower isn't a single tree to skeletonise anyway).
-  extraGameLowers = map (d: "${d}") enabledDlc ++ map (d: "${d}") coBaseTrees;
+  extraGameLowers =
+    map (d: "${d}") enabledDlc ++ map (d: "${d}") extraLowers ++ map (d: "${d}") coBaseTrees;
   gameMount = {
     "drive_c/game" =
       if extraGameLowers == [ ] then
@@ -173,7 +177,10 @@ let
         {
           type = "overlay";
           lower = lib.concatStringsSep ":" (
-            map (d: "${d}") enabledDlc ++ [ "${payload}" ] ++ map (d: "${d}") coBaseTrees
+            map (d: "${d}") enabledDlc
+            ++ map (d: "${d}") extraLowers
+            ++ [ "${payload}" ]
+            ++ map (d: "${d}") coBaseTrees
           );
           skeleton = null;
           readOnly = true;
@@ -183,17 +190,23 @@ let
   # Derived save-bind rows: one bind mount per `saveBinds` entry, at the wine profile home. `type` is
   # stated explicitly (these rows bypass flattenTuning's `{ type = "mount"; }` stamping); `ro` maps to
   # `mode = "ro"`, omitted when false. Merged BEFORE flat.mounts so the tuning wins per-target.
+  # `dst` is joined onto the profile home BY STRING, so an absolute path would silently produce a nonsense
+  # row — refuse legibly (an absolute target belongs in `wine.mounts`; THIN saveBinds do support them).
   saveMounts = lib.listToAttrs (
     map (
       b:
-      lib.nameValuePair "drive_c/users/${wineUser}/${b.dst}" (
-        {
-          type = "mount";
-          source = b.src;
-          createIfNotExist = b.create or true;
-        }
-        // lib.optionalAttrs (b.ro or false) { mode = "ro"; }
-      )
+      lib.throwIf (lib.hasPrefix "/" b.dst)
+        "propnix (${pname}): wine saveBinds dst must be relative to the wine profile home, got '${b.dst}' — use a wine.mounts row for an absolute target."
+        (
+          lib.nameValuePair "drive_c/users/${wineUser}/${b.dst}" (
+            {
+              type = "mount";
+              source = b.src;
+              createIfNotExist = b.create or true;
+            }
+            // lib.optionalAttrs (b.ro or false) { mode = "ro"; }
+          )
+        )
     ) saveBinds
   );
 

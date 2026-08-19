@@ -21,7 +21,11 @@
 {
   lib,
   mkApp,
+  fetchSteamDepot,
 }:
+let
+  versions = lib.importJSON ./versions.json;
+in
 mkApp (
   { config, ... }:
   {
@@ -32,7 +36,7 @@ mkApp (
     # The Linux binaries depot (281994: the `stellaris` ELF + $ORIGIN-linked libPDXSDK/libnakama-cpp) and
     # the shared data depot (281991), UNIONED READ-ONLY by overlayfs at launch — no build-time merge, no
     # store copy. Binaries FIRST so it wins any overlap with data (arg-set order = overlay priority).
-    fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
+    fetchInfo = versions.fetchInfo;
 
     # The game's own executable icon (a spaceship over a planet, no text), autocropped + recentred into the
     # hicolor theme + splash. It's the low-res 48px `exe_icon.bmp` (the only text-free square icon the
@@ -94,5 +98,42 @@ mkApp (
         dst = ".local/share/Paradox Interactive/Stellaris";
       }
     ];
+
+    # DLC — Paradox ships every Stellaris DLC as its OWN Steam depot under the base app (281990), and the
+    # depotId is the DLC's store appId (which is why no row needs a `dlcAppId` override), so each
+    # versions.json `dlc` entry is just another manifest-pinned
+    # fetchSteamDepot: same appId, one depot, one hash. Each tree is game-root-relative and holds exactly
+    # `dlc/dlcNNN_<slug>/{dlcNNN.dlc, dlcNNN.zip, thumbnail.png}` — a PURE directory union (the base data
+    # depot's own `dlc/` is empty), so no DLC ever modifies a base file. The `.dlc` descriptor is the
+    # ownership marker the engine gates on: the gameplay script for a paid DLC already ships in the base
+    # build, and the `.zip` carries only the DLC-exclusive assets.
+    #
+    # NOT part of the base package: `stellaris` ships vanilla (a default of "all" would make the default
+    # derivation depend on the packager's own entitlements). `stellaris.withAllDlc` /
+    # `.withDlc [ "utopia" … ]` / `.apply { dlc.enabled = [ … ]; }` union the selected trees ABOVE the
+    # base at mount time, so an enabled DLC costs no second copy of the ~28 GiB base payload. Safe on the
+    # thin path despite builders/thin.nix's exec-bit-skeleton caveat (the skeleton, which outranks these
+    # lowers, mirrors the BINARIES depot — and that depot has no `dlc/` at all).
+    #
+    # This is the set the packaging Steam account owns; Steam refuses the decryption key (eresult 15) for
+    # the rest of the catalogue, so an unowned DLC is simply not listed. Nothing here writes
+    # `dlc_load.json`: that file belongs to the bypassed Paradox launcher (and to every third-party mod
+    # manager), and with it absent the game disables nothing.
+    #
+    # STAGING THE TREES IS ONLY HALF THE JOB. Stellaris's Steam build resolves DLC ENTITLEMENT through the
+    # Steam client rather than from the `.dlc` descriptors, and Valve ships no client for 16K-page aarch64 —
+    # so with the depots mounted and nothing else, `SteamAPI_Init` fails ("did not locate a running instance
+    # of Steam"), the engine logs `dlc.cpp: Could not find item in store backend.`, and Additional Content
+    # lists every DLC as unowned. The FRAMEWORK closes that automatically: declaring this `dlc.available`
+    # on a Steam-fetched thin build flips `steam.emu.enable` on (modules/steam-emu.nix), which preloads the
+    # gbe_fork shim and projects the entitlement list from these SAME rows — nothing to wire here. (This is
+    # also why `maskFiles` couldn't be the tool for the shipped libsteam_api.so: the engine LINKS it, and
+    # the preload interposes it instead.)
+    #
+    # Three observables, in the order they fail: `$PROPNIX_SAVE_DIR/stellaris/dlc_signature` exists at all
+    # (the engine saw the trees); `logs/error.log` has no "store backend" line (entitlement resolved); and
+    # the signature is the ENTITLED one, distinct from the value a run with the same trees but no shim
+    # produces. Additional Content is the human check.
+    dlc.available = lib.mapAttrs (_: fetchSteamDepot) versions.dlc;
   }
 )

@@ -30,12 +30,30 @@ in
       executables,
     }:
     let
-      inherit (cfg.box64) bridgingLibs guestLibs;
+      inherit (cfg.box64) bridgingLibs guestLibs guestPreload;
+      # steam-emu's shim (gbe_fork libsteam_api.so) is guest C++ — guarantee its NEEDED set (glibc,
+      # libstdc++/libgcc_s) rides the union even when a game's own triage doesn't list them (duplicate
+      # path entries are harmless).
+      emuLibs =
+        p:
+        lib.optionals cfg.steam.emu.enable [
+          p.glibc
+          p.stdenv.cc.cc.lib
+        ];
       libs =
         if isAarch64 then
-          (bridgingLibs pkgs) ++ (bridgingLibs pkgsX86) ++ (guestLibs pkgsX86)
+          (bridgingLibs pkgs) ++ (bridgingLibs pkgsX86) ++ (guestLibs pkgsX86) ++ (emuLibs pkgsX86)
         else
-          (bridgingLibs pkgs) ++ (guestLibs pkgs);
+          (bridgingLibs pkgs) ++ (guestLibs pkgs) ++ (emuLibs pkgs);
+      # `guestPreload` in the loader's own spelling: box64's guest loader ignores LD_PRELOAD (and prepends
+      # the exe's directory to its search list — nothing weaker interposes), so aarch64 speaks
+      # BOX64_LD_PRELOAD; native x86_64 runs under the real ld.so, so plain LD_PRELOAD. The launcher's
+      # PROPNIX_BENCH branch prepends MangoHud's shim to a baked LD_PRELOAD rather than clobbering it
+      # (thin.rs), so benching keeps the preload live.
+      preloadEnv = lib.optionalAttrs (guestPreload != [ ]) {
+        ${if isAarch64 then "BOX64_LD_PRELOAD" else "LD_PRELOAD"} =
+          lib.concatStringsSep ":" guestPreload;
+      };
     in
     mkThinBuild {
       inherit cfg enabledDlc executables;
@@ -57,6 +75,7 @@ in
             BOX64_NORCFILES = "1";
             BOX64_PREFER_WRAPPED = "1";
           })
+          // preloadEnv
           // cfg.env;
         mangohud = "${mangohud}";
       };

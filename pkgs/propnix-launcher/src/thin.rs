@@ -403,7 +403,16 @@ fn run_inner(cfg: &ThinConfig, settings: &Settings, paths: &Paths, passthrough: 
                 format!("{mhlib}:{}", cfg.ld_library_path)
             };
             cmd.env("LD_LIBRARY_PATH", ld);
-            cmd.env("LD_PRELOAD", format!("{mhlib}/libMangoHud_shim.so"));
+            // Compose with a baked LD_PRELOAD (box64.guestPreload on native — e.g. Stellaris's offline
+            // Steam entitlement shim) instead of clobbering it: benching must not silently drop what the
+            // preload provides (there, every DLC).
+            let preload = match cfg.env.get("LD_PRELOAD") {
+                Some(v) if !v.is_empty() => {
+                    format!("{mhlib}/libMangoHud_shim.so:{}", util::expand_env(v))
+                }
+                _ => format!("{mhlib}/libMangoHud_shim.so"),
+            };
+            cmd.env("LD_PRELOAD", preload);
             let base = match std::env::var("XDG_DATA_DIRS") {
                 Ok(v) if !v.is_empty() => v,
                 _ => "/usr/share".to_string(),

@@ -36,7 +36,15 @@
       inherit (cfg) exe;
       inherit (cfg.box64) bridgingLibs guestLibs;
       primaryTree = builtins.head cfg.payloads;
-      guestSet = p: (bridgingLibs p) ++ (guestLibs p);
+      # + steam-emu's shim NEEDED set when enabled (glibc, libstdc++/libgcc_s) — mirrors the box64 entry.
+      guestSet =
+        p:
+        (bridgingLibs p)
+        ++ (guestLibs p)
+        ++ lib.optionals cfg.steam.emu.enable [
+          p.glibc
+          p.stdenv.cc.cc.lib
+        ];
       # Patch ONLY the main exe's ELF interpreter → the x86_64 glibc loader's store path, in a tiny overlay
       # unioned ABOVE the read-only payload (the store tree can't be patched in place). The bundled .so's
       # need no patch (FEX loads them via LD_LIBRARY_PATH); only the executable carries a PT_INTERP. The
@@ -64,6 +72,13 @@
         # FEX_ROOTFS must be set (unset hangs). The game's unified `env` merges OVER it.
         env = {
           FEX_ROOTFS = "/";
+        }
+        # `guestPreload` in the guest loader's spelling: FEX runs the REAL x86_64 ld.so, which honours
+        # LD_PRELOAD (FEXInterpreter's own aarch64 host link can't load the x86_64 .so and ld.so skips it
+        # with a warning). Untested — this backend is carried meta.broken — but wired so the knob is never
+        # silently dropped by a backend switch.
+        // lib.optionalAttrs (cfg.box64.guestPreload != [ ]) {
+          LD_PRELOAD = lib.concatStringsSep ":" cfg.box64.guestPreload;
         }
         // cfg.env;
         mangohud = "${mangohud}";

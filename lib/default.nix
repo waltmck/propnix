@@ -59,6 +59,7 @@ pkgs.lib.makeScope pkgs.newScope (
   {
     # ── wine + graphics (arch-aware INTERNALLY: same source, arch-appropriate archs/DLL flavor) ──
     wine = callPackage ../emulators/wine-hangover { }; # Hangover fork; arm64ec archs on aarch64, plain on x86_64
+    gbeFork = callPackage ../emulators/gbe-fork.nix { }; # prebuilt guest-x86_64 Steam-API reimplementation (the steam-emu shim)
     prefixLower = callPackage ../emulators/wine-prefix-lower.nix { }; # RO system tree; FEX DLLs only on aarch64 (fexdlls ? null)
     dxvk =
       if isAarch64 then
@@ -155,6 +156,10 @@ pkgs.lib.makeScope pkgs.newScope (
     mkStoreSkeleton = callPackage ./builders/store-skeleton.nix { }; # data-only overlay skeleton (sparse stubs+xattrs → tar)
     mkWineReg = callPackage ./builders/wine-reg.nix { }; # declarative per-game reg hive (wine-gen base + overrides)
     mkSetupScript = callPackage ./builders/setup-script.nix { }; # setup.sh wrapper (pinned PATH + pipefail + ini-lib)
+    # Offline entitlement answers for a Steam engine that asks the (absent) Steam client whether the
+    # owner's already-decrypted DLC is owned: the guest-arch gbe_fork shim (a COPY, so its
+    # beside-the-library settings probe resolves here) + the generated settings tree it reads.
+    mkSteamOfflineEntitlement = callPackage ./builders/steam-offline-entitlement.nix { };
     wineDefaults = callPackage ./backends/wine/defaults.nix { }; # the base wine tuning layer; override to re-base all games
 
     # ── icons ── three SOURCES, one output layout (hicolor theme + share/propnix/<id>.png splash):
@@ -166,6 +171,11 @@ pkgs.lib.makeScope pkgs.newScope (
     fetchGogGalaxyBuild = callPackage ./fetchers/fetchGogGalaxyBuild { }; # GOG Galaxy depot (gogdl; buildId-pinned)
     fetchGogLinuxInstaller = callPackage ./fetchers/fetchGogLinuxInstaller.nix { }; # GOG Linux offline installer (lgogdownloader; latest-only)
     fetchSteamDepot = callPackage ./fetchers/fetchSteamDepot.nix { }; # Steam SteamPipe depot (DepotDownloader; manifest-pinned, permanently reproducible)
+
+    # The GUEST nixpkgs (D7): x86_64 on every host — a second native instantiation on aarch64, `pkgs` itself
+    # on x86_64. Exposed so a game can build a derivation that must be the EMULATED arch (a library loaded
+    # into the guest process), not just list one via `box64.guestLibs`.
+    pkgsGuest = pkgsX86;
 
     # ── games ── auto-discovered from ../pkgs/games/*: drop a pkgs/games/<name>/default.nix and it becomes
     #    scope.<name> + a flake package/app — no wiring here. `games` groups them for the flake to enumerate.

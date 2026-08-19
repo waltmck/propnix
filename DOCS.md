@@ -142,6 +142,31 @@ Drop a directory under `pkgs/games/<name>/` — it's auto-discovered into the sc
   release track (Factorio is pinned that way), `--branch <name>` for a Steam beta branch, `--os
   linux`/`--lang`, or `--platform i386-windows` when the build is 32-bit, which nothing upstream tells us.
 
+  **DLC lives under a sibling top-level `dlc` key**, one named row per DLC, and `--new` only scaffolds the
+  GOG form (`--dlc <name>=<dlcId>`, a second fetch of the same build). A Steam DLC has no `dlcId`: Steam
+  ships it as its own DEPOT of the base app, so its row is an ordinary Steam arg-set (`appId` stays the
+  BASE app; a DLC appid's appinfo lists no depots at all) placed under `dlc` rather than in `fetchInfo`.
+  Paradox-style titles make the depotId the DLC's own store appid; when a game's DLC appid DIFFERS from
+  its depot, state it in the row as `dlcAppId` (optional; unknown keys round-trip through `propnix pin`
+  untouched). Write those rows by hand, with `propnix hash steam --app --depot --manifest` for each
+  `outputHash`; that command also *is* the ownership probe, since Steam refuses the depot key (eresult 15)
+  before a byte is downloaded for a DLC the account does not own. `pkgs/games/stellaris/` is the worked
+  example. Re-pinning needs no extra flag either way — a `dlc` row carrying `appId` is classified as a
+  Steam pin and refreshed from the same appinfo snapshot as the base depots.
+
+  Declaring the rows is the whole job: every Steam-fetched game gets `steam.emu.enable` by default
+  (modules/steam-emu.nix), which places the gbe_fork shim (emulators/gbe-fork.nix, prebuilt release
+  artifacts — packaging its deps from source is backlog) and projects the offline entitlement list from
+  those SAME rows (`dlcAppId`, else `depotId`) — engines that ask the (absent) Steam client whether a DLC
+  is owned get the answer automatically, DLC-less and vanilla builds included (empty list = "own
+  nothing"). Thin (Linux-build) games are served by a preload; an engine that dlopens the `.so` by
+  explicit path (Unity plugins) declares the copy in `steam.emu.libPaths` and gets the shim bound over
+  it. Steam **Windows** builds declare the shipped `steam_api(64).dll` path(s) there instead — the
+  matching gbe_fork dll is union-replaced over them with settings beside it (required on wine: PE has no
+  preload; enabling the emu there with no `.dll` declared is an eval error). One wall: a game built
+  against a newer Steamworks SDK than the gbe_fork pin (currently 1.64) needs the pin bumped first —
+  triage with `nm -D` on the game's genuine lib (modules/steam-emu.nix documents the method).
+
   Afterwards, `propnix pin <name>` moves a game to the newest build on the branch it already sits on,
   rewriting `versions.json` **in place** (temp file + same-directory rename, so an interrupted run can
   never leave a half-written pin; an up-to-date run writes nothing at all, not even an mtime). `--stdout`
@@ -202,8 +227,9 @@ Drop a directory under `pkgs/games/<name>/` — it's auto-discovered into the sc
   `bridgingLibs`/`guestLibs` library triage (`pkgs -> [drv]` functions).
 
 See `pkgs/games/hollow-knight/` (the two-axis exemplar), `pkgs/games/stellaris/` (multi-depot Steam Linux
-build under box64), `pkgs/games/outlast/` (`extraSystem32`), `pkgs/games/factorio/` (DLC), and
-`pkgs/games/kerbal-space-program/` (writable game-dir overlay + a seeded tmpfs).
+build under box64; Steam DLC, where each DLC is its own depot of the base app), `pkgs/games/outlast/`
+(`extraSystem32`), `pkgs/games/factorio/` (GOG DLC, via `dlcId`), and `pkgs/games/kerbal-space-program/`
+(writable game-dir overlay + a seeded tmpfs).
 
 ## Keeping pins current
 

@@ -52,17 +52,20 @@ lib.throwIfNot (lib.hasSuffix "-linux" cfg.emulatedPlatform)
       exeArgs
       workingDir
       maskFiles
-      saveBinds
       icon
       ;
+    # The last-wins save/state rows plus the composable framework/game rows (steam-emu's shim placements).
+    saveBinds = cfg.saveBinds ++ cfg.extraBinds;
     payloads = cfg.payloads;
     executables = b.executables or executables;
     broken = {
       systems = cfg.broken.systems ++ (b.brokenSystems or [ ]);
       reason = if cfg.broken.reason != null then cfg.broken.reason else (b.brokenReason or null);
     };
-    # Enabled DLC union ABOVE the base game (after any backend overlay like FEX's patched exe).
-    extraLowers = (b.extraLowers or [ ]) ++ (map (d: "${d}") enabledDlc);
+    # Enabled DLC + the app's own extra trees union ABOVE the base game (after any backend overlay like
+    # FEX's patched exe).
+    extraLowers =
+      (b.extraLowers or [ ]) ++ (map (d: "${d}") enabledDlc) ++ (map (d: "${d}") cfg.extraLowers);
     inherit (b)
       backend
       emulator

@@ -1,6 +1,7 @@
 # modules/app-options.nix — the top-level option schema every propnix app module is evaluated against
 # (the backend-specific namespaces — `wine.*`, `box64.*` — are declared by the backend registry entries in
-# lib/backends/<name>/options.nix and imported alongside this module by mk-app.nix).
+# lib/backends/<name>/options.nix, and `steam.*` by modules/steam-emu.nix; all imported alongside this
+# module by mk-app.nix).
 #
 # A game file authors a MODULE setting these options, conditionally on the two ORTHOGONAL axes:
 #   * `fetcher`          — WHERE the payload comes from (which store). Picks the payload source + which
@@ -264,6 +265,13 @@ in
         dlopens (a Steam build's libsteam_api.so / steam_api64.dll → the engine reports "no online
         subsystems" and runs offline). An EMPTY stub would instead fault the loader — and a STATICALLY
         imported SDK (GOG Galaxy) needs the opposite, a real no-op stub: `wine.galaxyStubDlls`.
+
+        MECHANISM CONSTRAINT: a whiteout re-overlays the target's PARENT dir in place, using the parent's
+        current contents as lowerdir. A parent that is itself a multi-lower overlayfs (the game dir of a
+        build with enabled DLC or `extraLowers` — including everything steam.emu wires in) is refused by
+        the kernel as a lowerdir: the launch dies with EINVAL. Masks compose with a plain single-payload
+        bind (hollow-knight); a game that needs both DLC/extraLowers AND a mask needs the whiteout moved
+        into the exec-bit skeleton layer first (mkStoreSkeleton already knows how to carry one).
       '';
     };
     workingDir = lib.mkOption {
@@ -297,6 +305,35 @@ in
         per-target). The game writes its native path; the data persists in a propnix dir. NB: this
         expresses BINDS only — overlay-style save persistence (KSP's writable game dir with a
         $PROPNIX_SAVE_DIR upper) stays a hand-written `wine.mounts` row.
+
+        THIN backends additionally accept an ABSOLUTE `dst`, which places the row at that exact path
+        instead of under the view — the launcher joins `dst` onto the view, and an absolute component
+        replaces it. Used to put a file where a bundled runtime insists on finding it, including inside a
+        read-only store path: bind its parent as well and propnix-mount stubs the missing child into a
+        skeleton, all confined to the launch's private mount namespace. Wine joins `dst` onto the profile
+        home by string, so an absolute path there is an eval-time error — use `wine.mounts` on that
+        backend.
+      '';
+    };
+    extraBinds = lib.mkOption {
+      type = knobTypes.dedupList lib.types.raw;
+      default = [ ];
+      apply = map (
+        b:
+        let
+          unknown = lib.subtractLists [ "src" "dst" "ro" "create" ] (lib.attrNames b);
+        in
+        lib.throwIfNot (unknown == [ ] && b ? src && b ? dst)
+          "propnix: an extraBinds entry needs { src; dst; ro?; create?; } — got unknown/missing field(s): ${toString unknown}"
+          b
+      );
+      description = ''
+        THIN-only COMPOSABLE bind rows, same `{ src; dst; ro?; create?; }` shape and view-relative `dst`
+        semantics as `saveBinds` but UNIONED across layers instead of last-wins — so a framework module
+        (steam-emu's shim/settings placements) and the game can each contribute rows without clobbering
+        the other. `dst` may reach inside the game dir (`game/<path>`): binding over an existing file
+        works, and a missing sibling mountpoint is stubbed into the game overlay by propnix-mount's
+        child-skeleton machinery. Not consumed by wine (an eval-time error there — use `wine.mounts`).
       '';
     };
 
@@ -343,6 +380,22 @@ in
         default = null;
         description = "Why (surfaced via meta for humans; does not affect the build).";
       };
+    };
+
+    # ── extra game-dir trees ──
+    extraLowers = lib.mkOption {
+      type = knobTypes.dedupList lib.types.raw;
+      default = [ ];
+      description = ''
+        Extra trees unioned into the game dir ABOVE the payloads, alongside enabled DLC — for content that
+        is neither a payload nor DLC, such as configuration a bundled runtime insists on finding next to
+        the game rather than in the store (pkgs/games/stellaris: the offline Steam entitlement settings).
+        Merged read-only at mount time, so no copy of the base is made.
+
+        THIN backends carry one caveat: these rank below the exec-bit metacopy skeleton, which mirrors the
+        whole `payloads` head — so an entry may ADD paths freely but cannot override one that already
+        exists in that first payload (builders/thin.nix documents the ordering).
+      '';
     };
 
     # ── DLC ──

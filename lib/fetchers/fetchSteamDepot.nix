@@ -46,6 +46,10 @@
   # byte-identical. Passworded/hidden branches are out of scope (DepotDownloader's `-betapassword` is
   # the hook if that is ever wanted); `propnix pin` refuses a branch Steam's appinfo does not list.
   branch ? "public",
+  # For a depot that ships a DLC: the DLC's own STORE appid, when it differs from `depotId`. Paradox-style
+  # titles align the two (the steam-emu entitlement projection falls back to depotId), so most rows omit
+  # it. Eval-only (passthru) — never referenced by the build.
+  dlcAppId ? null,
   # DepotDownloader's `-max-downloads` = concurrent chunk requests. Its default of 8 is the single
   # biggest throughput limit on a depot fetch: Steam's CDN rate-limits PER CONNECTION, so aggregate
   # bandwidth is essentially (per-connection cap x connections). Measured against a real depot from this
@@ -79,6 +83,10 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}")
       manifestId
       title
       ;
+    # Eval-only identity for consumers (the steam-emu entitlement projection reads dlcAppId/depotId/title
+    # off the derivation): passthru never enters the derivation env, so exposing these cannot churn an
+    # existing FOD's drvPath — which is exactly why `version` is surfaced here rather than inherited above.
+    passthru = { inherit version dlcAppId; };
     dlArgs =
       "-app ${toString appId} -depot ${toString depotId} -manifest ${toString manifestId} -max-downloads ${toString maxDownloads}"
       + lib.optionalString (branch != "public") " -beta ${branch}";

@@ -1,7 +1,7 @@
 # Prison Architect (GOG, Windows build) via wine — on aarch64 through FEX + native ARM64EC DXVK, on
 # x86_64 natively. ARCH-AGNOSTIC: this spec is identical on both hosts; the wine builder + the scope pick
 # the arch-appropriate emulator set, and the SAME Windows payload (a content-addressed FOD) is shared
-# across arches. Payload = the pinned GOG Galaxy build fetched with gogdl (D15), delivered as the game
+# across arches. Payload = the pinned GOG Galaxy build fetched by fetchGogGalaxyBuild (D15), delivered as the game
 # tree directly (no InnoSetup). Prison Architect (Introversion) is a 2D management sim on a custom engine.
 #
 #   nix run .#prison-architect --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64-linux or x86_64-linux

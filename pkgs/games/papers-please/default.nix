@@ -4,7 +4,7 @@
 # arches. Papers, Please (1.4.x GOG) is a Unity IL2CPP title (GameAssembly.dll + UnityPlayer.dll,
 # rendering D3D11 → DXVK → Vulkan at a steady 30 fps, its own frame cap; NOT the original custom engine,
 # and NOT Mono — so no managed-assembly overlay issue). Payload = the pinned GOG Galaxy build fetched
-# with gogdl (D15), the game tree directly. Well-behaved on the global wine defaults; only the Unity
+# with fetchGogGalaxyBuild (D15), the game tree directly. Well-behaved on the global wine defaults; only the Unity
 # fullscreen pref (the preset) and the save location are game-specific.
 #
 #   nix run .#papers-please --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64-linux or x86_64-linux

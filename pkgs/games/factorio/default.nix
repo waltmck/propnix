@@ -3,7 +3,7 @@
 # spec runs on both hosts; mkApp + the scope pick the arch-appropriate emulator set, and the SAME Windows
 # payload (a content-addressed FOD) is shared across arches. GOG's Galaxy content-system has NO Linux build
 # for Factorio (Windows + Mac only), so like the other titles we package the Windows build via wine.
-# Payload = the pinned GOG Galaxy build fetched with gogdl (D15), delivered as the game tree directly.
+# Payload = the pinned GOG Galaxy build fetched by fetchGogGalaxyBuild (D15), delivered as the game tree directly.
 #
 #   nix run .#factorio --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64-linux or x86_64-linux
 {

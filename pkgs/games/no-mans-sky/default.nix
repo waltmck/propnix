@@ -4,7 +4,7 @@
 # AGNOSTIC: the same spec runs on both hosts; the wine backend + the scope pick the arch-appropriate
 # emulator set, and the SAME Windows payload (a content-addressed FOD) is shared across arches. Windows-only
 # title (no native Linux build), so it follows the Hollow Knight template. Payload = the pinned GOG Galaxy
-# build fetched with gogdl (D15), delivered as the game tree directly (no InnoSetup).
+# build fetched by fetchGogGalaxyBuild (D15), delivered as the game tree directly (no InnoSetup).
 #
 #   nix run .#no-mans-sky --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64-linux or x86_64-linux
 {
@@ -15,7 +15,7 @@ mkApp {
   pname = "no-mans-sky";
   appid = "no-mans-sky";
   name = "No Man's Sky";
-  # gogdl takes the NUMERIC productId (not the slug); pins verified reproducible (fetchGogGalaxyBuild hdr).
+  # the fetcher takes the NUMERIC productId (not the slug); pins verified reproducible (fetchGogGalaxyBuild hdr).
   fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
   exe = "Binaries/NMS.exe";
   # Full-color icon auto-extracted from the exe's PE resources (icon.auto default). Symbolic vendored (CC BY-SA 4.0).

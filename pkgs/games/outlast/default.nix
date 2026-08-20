@@ -2,7 +2,7 @@
 # natively. Unreal Engine 3 survival-horror (D3D9 SM3 path → DXVK). ARCH-AGNOSTIC: the same spec runs on
 # both hosts; the wine backend + the scope pick the arch-appropriate emulator set, and the SAME Windows
 # payload (a content-addressed FOD) is shared across arches. Windows-only title (no native Linux build),
-# so it follows the Hollow Knight template. Payload = the pinned GOG Galaxy build fetched with gogdl (D15),
+# so it follows the Hollow Knight template. Payload = the pinned GOG Galaxy build fetched by fetchGogGalaxyBuild (D15),
 # delivered as the game tree directly (no InnoSetup).
 #
 #   nix run .#outlast --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64-linux or x86_64-linux
@@ -58,7 +58,7 @@ mkApp (
     pname = "outlast";
     appid = "outlast";
     name = "Outlast";
-    # gogdl takes the NUMERIC productId (not the slug); pins verified reproducible (fetchGogGalaxyBuild hdr).
+    # the fetcher takes the NUMERIC productId (not the slug); pins verified reproducible (fetchGogGalaxyBuild hdr).
     fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
     # UE3 x86_64 game binary launched DIRECTLY (not the 32-bit OutlastLauncher.exe isPrimary stub, which spawns
     # the game then exits → trips the propnix launcher's primary-child teardown). UE3 resolves content relative

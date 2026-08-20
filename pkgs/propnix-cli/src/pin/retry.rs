@@ -47,13 +47,9 @@ impl Policy {
     }
 }
 
-/// Bulk content (chunks). Worth outlasting a real outage: the alternative is discarding every byte
-/// hashed so far and starting the whole title again. 13 retries, ~4.8 minutes of actual waiting.
-pub const CONTENT: Policy = Policy {
-    attempts: 14,
-    first_interval: Duration::from_secs(1),
-    max_interval: Duration::from_secs(32),
-};
+// NB: there is no bulk-content policy here any more. Chunks are not retried in place — a failed block
+// goes back on the engine's queue (pin::engine), which frees its concurrency slot, re-picks an endpoint,
+// and lets the run end on a liveness rule rather than a per-block attempt count.
 
 /// Metadata (build lists, manifests, appinfo, the content-server directory). Retried too — a blink
 /// during the planning phase should not fail the run — but fewer chances, because nothing expensive has
@@ -165,15 +161,13 @@ mod tests {
 
     #[test]
     fn intervals_are_exponential_and_capped() {
-        assert_eq!(CONTENT.interval(1), Duration::from_secs(1));
-        assert_eq!(CONTENT.interval(2), Duration::from_secs(2));
-        assert_eq!(CONTENT.interval(6), Duration::from_secs(32));
-        assert_eq!(CONTENT.interval(13), Duration::from_secs(32), "capped, never unbounded");
+        assert_eq!(METADATA.interval(1), Duration::from_secs(1));
+        assert_eq!(METADATA.interval(2), Duration::from_secs(2));
+        assert_eq!(METADATA.interval(6), Duration::from_secs(32));
+        assert_eq!(METADATA.interval(7), Duration::from_secs(32), "capped, never unbounded");
         // …and no shift or multiply can overflow, however large the attempt number.
-        assert_eq!(CONTENT.interval(u32::MAX), Duration::from_secs(32));
-
-        // The numbers the doc comments quote, so they cannot drift apart from the constants.
-        assert_eq!(CONTENT.total_wait(), Duration::from_secs(287)); // ~4.8 min
+        assert_eq!(METADATA.interval(u32::MAX), Duration::from_secs(32));
         assert_eq!(METADATA.total_wait(), Duration::from_secs(95)); // ~1.5 min
+
     }
 }

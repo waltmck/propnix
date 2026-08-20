@@ -1,7 +1,7 @@
 # Baby Steps (GOG, Windows build) via wine — on aarch64 through FEX + native ARM64EC DXVK, on x86_64
 # natively. ARCH-AGNOSTIC: identical on both hosts; the wine builder + the scope pick the arch-appropriate
 # emulator set, and the SAME Windows payload (a content-addressed FOD) is shared across arches. Payload =
-# the pinned GOG Galaxy build fetched with gogdl (D15), the game tree directly (no InnoSetup).
+# the pinned GOG Galaxy build fetched by fetchGogGalaxyBuild (D15), the game tree directly (no InnoSetup).
 #
 # Well-behaved on the global wine defaults (d3d=dxvk, graphics=wayland): Baby Steps is a Unity IL2CPP
 # title (UnityPlayer.dll + GameAssembly.dll, NO Managed/ dir — native IL2CPP, NOT Mono, so none of the

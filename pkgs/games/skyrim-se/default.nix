@@ -3,7 +3,7 @@
 # renders D3D11 → DXVK → Vulkan. ARCH-AGNOSTIC: this spec is identical on both hosts; mkApp + the scope
 # pick the arch-appropriate emulator set, and the SAME Windows payload (a content-addressed FOD) is shared
 # across arches. Windows-only title (no native Linux build). Payload = the pinned GOG Galaxy build fetched
-# with gogdl (D15), delivered as the game tree directly (no InnoSetup).
+# with fetchGogGalaxyBuild (D15), delivered as the game tree directly (no InnoSetup).
 #
 # The Creation Engine needs SkyrimPrefs.ini's `iSize` to equal the actual display resolution for correct
 # fullscreen (it renders its backbuffer at iSize even in fullscreen — see setup.sh). We launch SkyrimSE.exe

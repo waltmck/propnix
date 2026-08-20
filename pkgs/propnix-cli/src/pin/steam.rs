@@ -100,6 +100,14 @@ fn http_agent() -> ureq::Agent {
         .max_idle_connections_per_host(256)
         .timeout_connect(std::time::Duration::from_secs(20))
         .timeout_read(std::time::Duration::from_secs(60))
+        // OVERALL deadline per call, on top of the per-operation ones above. The per-read timeout only
+        // bounds the wait for the NEXT byte, so a connection that trickles — or one left half-open when the
+        // machine changes network or resumes from suspend — can hang a request forever without ever
+        // tripping it, and then no retry policy gets a chance to run. Not hypothetical: that stranded a
+        // 95%-complete depot twice in one day, with the process burning zero CPU. This agent now serves
+        // only METADATA (build lists, manifests, appinfo); bulk chunks go through pin::engine, which
+        // enforces its own deadline. 120s is far longer than any healthy metadata call.
+        .timeout(std::time::Duration::from_secs(120))
         .build()
 }
 
@@ -841,65 +849,40 @@ pub fn tree(files: &[FileEntry]) -> Result<nar::Node<usize>, Box<dyn std::error:
 }
 
 // ────────────────────────────────────────── chunk transport ───────────────────────────────────────
+/// A chunk's id, hex — it is both the URL path and what the integrity check compares against.
+fn chunk_hex(sha: &[u8; 20]) -> String {
+    sha.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 pub struct ChunkSource {
-    pub agent: ureq::Agent,
     pub hosts: Vec<String>,
     pub depot_id: u32,
     pub key: [u8; 32],
-    rr: std::sync::atomic::AtomicUsize,
+    /// Host choice, scored by the throughput each server actually delivers (pin::hosts). Replaced a
+    /// round-robin counter, which spread requests evenly over servers that are not equally good — and
+    /// kept feeding a downed one its full share, so every one of those requests had to fail first.
+    pool: crate::pin::hosts::HostPool,
 }
 
 impl ChunkSource {
-    pub fn new(agent: ureq::Agent, hosts: Vec<String>, depot_id: u32, key: [u8; 32]) -> Self {
+    pub fn new(hosts: Vec<String>, depot_id: u32, key: [u8; 32]) -> Self {
         Self {
-            agent,
+            pool: crate::pin::hosts::HostPool::new(hosts.len()),
             hosts,
             depot_id,
             key,
-            rr: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
-    /// One chunk: GET, decrypt, decompress, verify. The chunk's id IS sha1 of the plaintext, so the
-    /// integrity check is free and end-to-end.
-    ///
-    /// Retried patiently, rotating hosts as it goes (see `pin::retry`). A depot hash runs for hours and
-    /// cannot be resumed, so a dropped connection must not discard it; and every failure here is
-    /// transport-shaped — Steam's considered refusals (no depot key, no request code) all happened in
-    /// `control()` before a byte moved.
-    pub fn get(&self, c: &ChunkRef) -> Result<Vec<u8>, String> {
-        let hex: String = c.sha.iter().map(|b| format!("{b:02x}")).collect();
-        let label = format!("chunk {hex}");
-        let mut attempt = 0usize;
-        crate::pin::retry::with_retry(&label, &crate::pin::retry::CONTENT, |_: &String| true, || {
-            let i = self
-                .rr
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                .wrapping_add(attempt);
-            attempt += 1;
-            let host = &self.hosts[i % self.hosts.len()];
-            let url = format!("https://{host}/depot/{}/chunk/{hex}", self.depot_id);
-            self.fetch_one(&url, c, &hex)
-        })
-        .map_err(|e| format!("{label}: {e}"))
-    }
-
-    fn fetch_one(&self, url: &str, c: &ChunkRef, hex: &str) -> Result<Vec<u8>, String> {
-        let resp = self.agent.get(url).call().map_err(|e| e.to_string())?;
-        let mut ct = Vec::new();
-        resp.into_reader()
-            .read_to_end(&mut ct)
-            .map_err(|e| e.to_string())?;
+    fn decode_body(&self, ct: &[u8], c: &ChunkRef, hex: &str) -> Result<Vec<u8>, String> {
         // See `decrypt_filename`: the decryptor panics on anything shorter than one AES block, and a
-        // panic in a prefetch worker is a HANG, not a failure.
+        // panic in a decode task would end the run rather than being retried.
         if ct.len() < AES_BLOCK {
             return Err(format!("truncated chunk body ({} bytes)", ct.len()));
         }
-        let plain = steam_vent_crypto::symmetric_decrypt_without_hmac(
-            bytes::BytesMut::from(&ct[..]),
-            &self.key,
-        )
-        .map_err(|e| format!("decrypt: {e}"))?;
+        let plain =
+            steam_vent_crypto::symmetric_decrypt_without_hmac(bytes::BytesMut::from(ct), &self.key)
+                .map_err(|e| format!("decrypt: {e}"))?;
         let data = decompress_chunk(&plain, c.cb_original as usize)?;
         use sha1::Digest;
         let got = sha1::Sha1::digest(&data);
@@ -907,6 +890,98 @@ impl ChunkSource {
             return Err(format!("sha1 mismatch (chunk id {hex})"));
         }
         Ok(data)
+    }
+}
+
+/// The engine's view of a Steam depot: which host to ask, and how to turn a body into content.
+///
+/// There is no retry ladder here on purpose — the engine requeues a failed block, which re-enters
+/// `target()` and so lands on whatever host the scorer now prefers. See `pin::engine`.
+impl crate::pin::engine::ChunkIo for ChunkSource {
+    type Item = ChunkRef;
+
+    fn target(&self, c: &ChunkRef) -> Result<crate::pin::engine::Target, String> {
+        let idx = self.pool.pick();
+        Ok(crate::pin::engine::Target {
+            url: format!(
+                "https://{}/depot/{}/chunk/{}",
+                self.hosts[idx % self.hosts.len()],
+                self.depot_id,
+                chunk_hex(&c.sha)
+            ),
+            endpoint: idx,
+        })
+    }
+
+    fn decode(&self, c: &ChunkRef, body: Vec<u8>) -> Result<Vec<u8>, String> {
+        self.decode_body(&body, c, &chunk_hex(&c.sha))
+    }
+
+    fn observe(&self, _c: &ChunkRef, endpoint: usize, outcome: crate::pin::engine::Outcome) {
+        match outcome {
+            crate::pin::engine::Outcome::Ok { bytes, elapsed } => {
+                self.pool.record_success(endpoint, bytes, elapsed)
+            }
+            crate::pin::engine::Outcome::Failed => self.pool.record_failure(endpoint),
+        }
+    }
+
+    fn label(&self, c: &ChunkRef) -> String {
+        format!("chunk {}", chunk_hex(&c.sha))
+    }
+}
+
+/// The 7-Zip LZMA SDK's one-shot LZMA1 decoder, as an alternative to liblzma for the VZ container.
+///
+/// Takes the 5 raw property bytes and the payload DIRECTLY — which is exactly how the VZ container ships
+/// them, so no `.lzma` header has to be fabricated to satisfy a container-oriented API.
+mod sdk_lzma {
+    use lzma_sdk_sys::{ELzmaFinishMode, ELzmaStatus, ISzAlloc, ISzAllocPtr, LzmaDecode, SZ_OK};
+
+    unsafe extern "C" fn alloc(_p: ISzAllocPtr, size: usize) -> *mut core::ffi::c_void {
+        if size == 0 {
+            return core::ptr::null_mut();
+        }
+        libc::malloc(size)
+    }
+    unsafe extern "C" fn free(_p: ISzAllocPtr, addr: *mut core::ffi::c_void) {
+        libc::free(addr);
+    }
+    static ALLOC: ISzAlloc = ISzAlloc {
+        Alloc: Some(alloc),
+        Free: Some(free),
+    };
+
+    /// `props` = the 5 LZMA1 property bytes; `payload` = the raw LZMA1 stream; `expect` = exact output size.
+    pub fn decode(props: &[u8], payload: &[u8], expect: usize) -> Result<Vec<u8>, String> {
+        if props.len() < 5 {
+            return Err("lzma: short property block".into());
+        }
+        let mut out = vec![0u8; expect];
+        let mut dest_len = expect;
+        let mut src_len = payload.len();
+        let mut status: ELzmaStatus = ELzmaStatus::LZMA_STATUS_NOT_SPECIFIED;
+        // SAFETY: all four buffers are live for the call; the lengths are in/out and read back below.
+        let res = unsafe {
+            LzmaDecode(
+                out.as_mut_ptr(),
+                &mut dest_len,
+                payload.as_ptr(),
+                &mut src_len,
+                props.as_ptr(),
+                5,
+                ELzmaFinishMode::LZMA_FINISH_END,
+                &mut status,
+                &ALLOC,
+            )
+        };
+        if res != SZ_OK as i32 {
+            return Err(format!("lzma: SDK decode failed (SRes {res}, status {status:?})"));
+        }
+        if dest_len != expect {
+            return Err(format!("lzma: SDK produced {dest_len} bytes, manifest says {expect}"));
+        }
+        Ok(out)
     }
 }
 
@@ -925,20 +1000,15 @@ fn decompress_chunk(raw: &[u8], expect: usize) -> Result<Vec<u8>, String> {
         dec.read_exact(&mut o).map_err(|e| format!("zstd: {e}"))?;
         o
     } else if raw.len() >= VZ_MIN && &raw[0..2] == b"VZ" {
-        // Legacy: raw LZMA1. lzma-rs wants a .lzma header, so synthesize one from the 5 property
-        // bytes plus the known output size. VZ_MIN, not 12: the payload slice below is
+        // Legacy: raw LZMA1, which is the ONLY container an older depot uses — and the hot path when one
+        // is pinned, at ~95% of the whole tool's CPU. The container hands over the 5 LZMA1 property bytes
+        // and the raw stream separately, which is precisely the shape the LZMA SDK's one-shot decoder
+        // takes, so nothing has to be reframed. VZ_MIN, not 12: the payload slice below is
         // `raw[12..raw.len()-10]`, so a 12..21-byte body would slice with start > end and panic.
         if !raw.ends_with(b"zv") {
             return Err("VZ footer is not 'zv'".into());
         }
-        let mut framed = Vec::with_capacity(13 + raw.len());
-        framed.extend_from_slice(&raw[7..12]);
-        framed.extend_from_slice(&(expect as u64).to_le_bytes());
-        framed.extend_from_slice(&raw[12..raw.len() - 10]);
-        let mut cur = std::io::Cursor::new(framed);
-        let mut o = Vec::new();
-        lzma_rs::lzma_decompress(&mut cur, &mut o).map_err(|e| format!("lzma: {e}"))?;
-        o
+        sdk_lzma::decode(&raw[7..12], &raw[12..raw.len() - 10], expect)?
     } else {
         let mut o = Vec::new();
         // A bare zip container.
@@ -1322,7 +1392,7 @@ mod tests {
 
     #[test]
     fn truncated_bodies_error_instead_of_panicking() {
-        // All three used to abort the process (or, in a prefetch worker, hang it forever).
+        // All three would otherwise abort the process — and a panic inside a decode task ends the run.
         assert!(unzip_single_deflate_entry(b"PK\x03\x04").is_err());
         let mut hdr = vec![0u8; 30];
         hdr[0..4].copy_from_slice(b"PK\x03\x04");
@@ -1335,6 +1405,195 @@ mod tests {
         assert!(decompress_chunk(&vz, 1).is_err());
         vz.truncate(2);
         assert!(decompress_chunk(&vz, 1).is_err());
+    }
+
+    /// The 'VZ' framing math, round-tripped through a real LZMA1 stream.
+    ///
+    /// The container hoists the 5 LZMA1 property bytes into its own header and leaves the raw stream after
+    /// them, so the decode side has to slice both back out at exactly the right offsets and supply the
+    /// output size from the manifest. Get any of that wrong and chunks decode to garbage — which the sha1
+    /// check would catch in production, but only after a download, and only as an opaque mismatch. This is
+    /// also what pins the decoder itself: swap the backend and this test says whether it still agrees.
+    #[test]
+    fn a_vz_container_round_trips_through_the_lzma_decoder() {
+        // Compressible, but not so uniform that a bug could coincidentally produce it.
+        let original: Vec<u8> = (0..64_000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+
+        // Encode to the `.lzma` alone format, whose first 13 bytes are <5 props><8 size>.
+        let opts = liblzma::stream::LzmaOptions::new_preset(6).unwrap();
+        let stream = liblzma::stream::Stream::new_lzma_encoder(&opts).unwrap();
+        let mut enc =
+            liblzma::read::XzEncoder::new_stream(std::io::Cursor::new(original.clone()), stream);
+        let mut alone = Vec::new();
+        enc.read_to_end(&mut alone).unwrap();
+        assert!(alone.len() > 13);
+
+        // Reframe as Steam does: "VZ", 5 bytes we ignore, the 5 property bytes, the raw payload, then a
+        // 10-byte footer ending "zv". The 8-byte size field of the alone header is DROPPED — the decoder
+        // has to put it back from `expect`, which is the part worth guarding.
+        let mut vz = Vec::new();
+        vz.extend_from_slice(b"VZ");
+        vz.extend_from_slice(&[b'a', 0, 0, 0, 0]);
+        vz.extend_from_slice(&alone[0..5]);
+        vz.extend_from_slice(&alone[13..]);
+        vz.extend_from_slice(&[0u8; 8]);
+        vz.extend_from_slice(b"zv");
+
+        let got = decompress_chunk(&vz, original.len()).expect("a well-formed VZ chunk must decode");
+        assert_eq!(got, original, "VZ round-trip must be byte-identical");
+
+        // A wrong declared size must be an error, not a silently short buffer.
+        assert!(decompress_chunk(&vz, original.len() - 1).is_err());
+    }
+
+    /// Per-stage cost accounting for a chunk, in ms of CPU per MiB of depot content.
+    ///
+    /// Not a correctness test and `#[ignore]`d so it never runs in CI — it exists because "the pin uses a
+    /// lot of CPU" is only answerable with absolute numbers per stage. Run it on an OTHERWISE IDLE machine:
+    ///
+    ///     PROPNIX_BENCH_SAMPLE=/path/to/a/real/game/file \
+    ///       cargo test --release bench_chunk_pipeline -- --ignored --nocapture
+    ///
+    /// Uses real game bytes. Synthetic pseudo-random data is useless here: it compresses to almost
+    /// nothing, so LZMA decode degenerates into a memcpy and measures 50x too fast.
+    #[test]
+    #[ignore]
+    fn bench_chunk_pipeline() {
+        // Point PROPNIX_BENCH_SAMPLE at any real game file (>= 8 MiB).
+        let Some(sample) = std::env::var_os("PROPNIX_BENCH_SAMPLE") else {
+            eprintln!("SKIP: set PROPNIX_BENCH_SAMPLE to a real game file (>= 8 MiB)");
+            return;
+        };
+        let Ok(all) = std::fs::read(&sample) else {
+            eprintln!("SKIP: cannot read {sample:?}");
+            return;
+        };
+        if all.len() < (8 << 20) {
+            eprintln!("SKIP: {sample:?} is under 8 MiB");
+            return;
+        }
+        let plain: Vec<u8> = all[(2 << 20)..(6 << 20)].to_vec();
+        let mib = plain.len() as f64 / 1048576.0;
+
+        // Build the VZ container the fetcher actually receives.
+        let opts = liblzma::stream::LzmaOptions::new_preset(6).unwrap();
+        let stream = liblzma::stream::Stream::new_lzma_encoder(&opts).unwrap();
+        let mut enc = liblzma::read::XzEncoder::new_stream(std::io::Cursor::new(plain.clone()), stream);
+        let mut alone = Vec::new();
+        enc.read_to_end(&mut alone).unwrap();
+        let mut vz = Vec::new();
+        vz.extend_from_slice(b"VZ");
+        vz.extend_from_slice(&[b'a', 0, 0, 0, 0]);
+        vz.extend_from_slice(&alone[0..5]);
+        vz.extend_from_slice(&alone[13..]);
+        vz.extend_from_slice(&[0u8; 8]);
+        vz.extend_from_slice(b"zv");
+        let key = [7u8; 32];
+        let ct = steam_vent_crypto::symmetric_encrypt(bytes::BytesMut::from(&vz[..]), &key);
+
+        let time = |label: &str, reps: usize, mut f: Box<dyn FnMut()>| {
+            let t0 = std::time::Instant::now();
+            for _ in 0..reps {
+                f();
+            }
+            let ms_per_mib = t0.elapsed().as_secs_f64() * 1000.0 / (mib * reps as f64);
+            eprintln!("  {label:<28} {ms_per_mib:>7.2} ms/MiB");
+            ms_per_mib
+        };
+
+        eprintln!(
+            "\nchunk pipeline, {:.0} MiB real sample (compression ratio {:.2}x):",
+            mib,
+            plain.len() as f64 / vz.len() as f64
+        );
+        let a = time("AES-256 decrypt (ECB+CBC)", 24, {
+            let ct = ct.clone();
+            Box::new(move || {
+                steam_vent_crypto::symmetric_decrypt_without_hmac(ct.clone(), &key).unwrap();
+            })
+        });
+        let l = time("LZMA decode (VZ)", 12, {
+            let vz = vz.clone();
+            let n = plain.len();
+            Box::new(move || {
+                decompress_chunk(&vz, n).unwrap();
+            })
+        });
+        let s1 = time("SHA-1 (chunk id verify)", 24, {
+            let plain = plain.clone();
+            Box::new(move || {
+                use sha1::Digest;
+                std::hint::black_box(sha1::Sha1::digest(&plain));
+            })
+        });
+        let s2 = time("SHA-256 (NAR digest)", 24, {
+            let plain = plain.clone();
+            Box::new(move || {
+                use sha2::Digest;
+                std::hint::black_box(sha2::Sha256::digest(&plain));
+            })
+        });
+        eprintln!("  {:<28} {:>7.2} ms/MiB", "SUM", a + l + s1 + s2);
+        eprintln!(
+            "  (LZMA is {:.0}% of the total; a copy of the plaintext is unavoidable on top)",
+            l / (a + l + s1 + s2) * 100.0
+        );
+    }
+
+    /// liblzma vs the 7-Zip LZMA SDK on the SAME container — and a proof they agree byte for byte.
+    ///
+    ///     PROPNIX_BENCH_SAMPLE=/path/to/a/real/game/file \
+    ///       cargo test --release bench_lzma_backends -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_lzma_backends() {
+        let Some(sample) = std::env::var_os("PROPNIX_BENCH_SAMPLE") else {
+            eprintln!("SKIP: set PROPNIX_BENCH_SAMPLE to a real game file (>= 8 MiB)");
+            return;
+        };
+        let Ok(all) = std::fs::read(&sample) else {
+            eprintln!("SKIP: cannot read {sample:?}");
+            return;
+        };
+        let plain: Vec<u8> = all[(2 << 20)..(6 << 20)].to_vec();
+        let mib = plain.len() as f64 / 1048576.0;
+
+        let opts = liblzma::stream::LzmaOptions::new_preset(6).unwrap();
+        let stream = liblzma::stream::Stream::new_lzma_encoder(&opts).unwrap();
+        let mut enc = liblzma::read::XzEncoder::new_stream(std::io::Cursor::new(plain.clone()), stream);
+        let mut alone = Vec::new();
+        enc.read_to_end(&mut alone).unwrap();
+        let mut vz = Vec::new();
+        vz.extend_from_slice(b"VZ");
+        vz.extend_from_slice(&[b'a', 0, 0, 0, 0]);
+        vz.extend_from_slice(&alone[0..5]);
+        vz.extend_from_slice(&alone[13..]);
+        vz.extend_from_slice(&[0u8; 8]);
+        vz.extend_from_slice(b"zv");
+        let props = &vz[7..12];
+        let payload = &vz[12..vz.len() - 10];
+
+        // Correctness first: a faster decoder that disagrees is worthless.
+        let a = decompress_chunk(&vz, plain.len()).unwrap();
+        let b = sdk_lzma::decode(props, payload, plain.len()).unwrap();
+        assert_eq!(a, plain, "liblzma path must reproduce the input");
+        assert_eq!(b, plain, "SDK path must reproduce the input");
+
+        let reps = 12;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(decompress_chunk(&vz, plain.len()).unwrap());
+        }
+        let liblzma_ms = t0.elapsed().as_secs_f64() * 1000.0 / (mib * reps as f64);
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(sdk_lzma::decode(props, payload, plain.len()).unwrap());
+        }
+        let sdk_ms = t1.elapsed().as_secs_f64() * 1000.0 / (mib * reps as f64);
+
+        eprintln!("\nLZMA1 decode, {mib:.0} MiB real sample:");
+        eprintln!("  liblzma (xz 5.8.3)      {liblzma_ms:>7.2} ms/MiB");
+        eprintln!("  7-Zip LZMA SDK 25.01    {sdk_ms:>7.2} ms/MiB   ({:.2}x)", liblzma_ms / sdk_ms);
     }
 
     #[test]
@@ -1424,26 +1683,43 @@ pub fn hash_depot(
     let tree = tree(&files)?;
 
     let order = nar::flatten(&tree);
-    let mut work: Vec<ChunkRef> = Vec::new();
+    let mut occ: Vec<ChunkRef> = Vec::new();
     for &&idx in &order {
         let mut cs: Vec<ChunkRef> = files[idx].chunks.clone();
         cs.sort_by_key(|c| c.offset);
-        work.extend(cs);
+        occ.extend(cs);
     }
 
-    let src = std::sync::Arc::new(ChunkSource::new(agent, ctl.hosts, depot_id, ctl.depot_key));
-    let pf = crate::pin::prefetch::Prefetcher::new(
-        work,
+    // Fetch each DISTINCT chunk once (pin::dedup): a Steam chunk's id IS the sha1 of its plaintext, so
+    // equal ids are equal bytes (declared size included out of paranoia). Duplicates the byte budget can
+    // hold are served from memory at their later occurrences; the rest simply refetch.
+    let keys: Vec<([u8; 20], u32)> = occ.iter().map(|c| (c.sha, c.cb_original)).collect();
+    let occ_sizes: Vec<u64> = occ.iter().map(|c| c.cb_original as u64).collect();
+    let (mut dedup, fetch) = crate::pin::dedup::plan(&keys, &occ_sizes, opts.window_bytes);
+    let (dups, saved) = dedup.stats();
+    if dups > 0 {
+        eprintln!(
+            "  {dups} duplicate chunks will be served from memory ({} MiB of refetch avoided)",
+            saved >> 20
+        );
+    }
+    let items: Vec<ChunkRef> = fetch.iter().map(|&i| occ[i].clone()).collect();
+    let sizes: Vec<u64> = fetch.iter().map(|&i| occ_sizes[i]).collect();
+    let src = std::sync::Arc::new(ChunkSource::new(ctl.hosts, depot_id, ctl.depot_key));
+    let pf = crate::pin::engine::ordered(
+        src,
+        crate::pin::engine::Work { items, sizes },
         opts.workers,
         opts.window_bytes,
-        Box::new(move |c: &ChunkRef| src.get(c)),
-    );
+        crate::pin::engine::Tuning::default(),
+    )?;
 
     let mut seen = 0u64;
     let mut last_pct = 0u64;
     let progress = opts.progress;
+    let mut next = || dedup.next(|| pf.next_chunk());
     let (sri, stats) = nar::nar_hash(&tree, |idx, w| {
-        steam_write(&files[*idx], &pf, &mut seen, w)?;
+        steam_write(&files[*idx], &mut next, &mut seen, w)?;
         if progress {
             let pct = seen.checked_mul(100).and_then(|n| n.checked_div(total)).unwrap_or(100);
             if pct > last_pct {
@@ -1466,6 +1742,194 @@ pub fn hash_depot(
 /// request code); a transport or parse failure aborts immediately, because retrying it against another
 /// account would only bury it. All the ownership checks happen in `control()`, before a byte of content
 /// moves, so a wrong account costs one round trip rather than a download.
+/// Download a pinned depot to `dir` — the same pipeline as `hash_depot`, with files as the sink.
+///
+/// This is what replaces DepotDownloader in the FOD. The tree it writes is the one `tree()` describes,
+/// which is exactly what the existing pins hash, so the FOD's content address does not move; see
+/// `pin::download` for why that is trustworthy and how to re-check it.
+///
+/// UNORDERED, unlike hashing. A NAR is one byte stream, so `hash_depot` must receive chunks in tree order
+/// and a slow block stalls everything behind it. A file tree has no such constraint: every chunk knows its
+/// file and offset, so it can be written with `pwrite` the moment it lands, in whatever order the CDN
+/// happens to answer. That removes head-of-line blocking altogether. The byte window survives, but as a
+/// MEMORY bound rather than an ordering one: admission stays within `window_bytes` of what the sink has
+/// written, so in-flight decoded chunks cannot grow with the governor's limit.
+///
+/// Sparse regions come free as a result: files are pre-sized with `set_len`, so a range no chunk covers is
+/// a hole that reads as zeros — the same bytes `write_file`'s explicit zero-fill produces for the hasher.
+///
+/// Deliberately NOT hashing as it goes: the FOD mechanism already verifies the result.
+pub fn download_depot(
+    app_id: u32,
+    depot_id: u32,
+    manifest_id: u64,
+    branch: &str,
+    auth: Auth,
+    dir: &std::path::Path,
+    opts: &crate::pin::gog::HashOpts,
+) -> Result<crate::pin::download::Written, Box<dyn std::error::Error>> {
+    use crate::pin::download;
+    use std::os::unix::fs::FileExt;
+
+    let ctl = control(app_id, depot_id, &[manifest_id], branch, auth)?;
+    let agent = http_agent();
+    let code = ctl
+        .codes
+        .get(&manifest_id)
+        .copied()
+        .ok_or_else(|| SteamError::Parse(format!("no request code for manifest {manifest_id}")))?;
+    let (files, _created) =
+        fetch_manifest(&agent, &ctl.hosts, depot_id, manifest_id, code, &ctl.depot_key)?;
+
+    // Built for its REFUSALS: `tree` is what rejects a malformed manifest, and download must refuse
+    // exactly what hashing refuses or the two could disagree about a depot.
+    let _ = tree(&files)?;
+    let mut written = download::Written::default();
+    // Explicit directory entries first: an EMPTY directory is part of the tree the pin hashes, so one
+    // that no file happens to create must still exist.
+    for f in files.iter().filter(|f| f.size == u64::MAX) {
+        download::ensure_dir(dir, &f.path)?;
+        written.dirs += 1;
+    }
+
+    // Create every file at its final size, and record where each chunk goes. A DISTINCT chunk is fetched
+    // once and written to every (file, offset) that references it — a chunk's id IS the sha1 of its
+    // plaintext, and manifests reuse ids freely across and within files (declared size in the key out of
+    // paranoia).
+    let mut handles: Vec<std::sync::Arc<std::fs::File>> = Vec::new();
+    let mut work: Vec<ChunkRef> = Vec::new();
+    let mut placement: Vec<Vec<(usize, u64)>> = Vec::new();
+    let mut slot_of: std::collections::HashMap<([u8; 20], u32), usize> = std::collections::HashMap::new();
+    let mut occurrences = 0usize;
+    for f in files.iter().filter(|f| f.size != u64::MAX) {
+        let file = download::create_file(dir, &f.path, f.executable)?;
+        file.set_len(f.size)
+            .map_err(|e| format!("set size of {}: {e}", f.path))?;
+        let slot = handles.len();
+        handles.push(std::sync::Arc::new(file));
+
+        // The overlap/range checks `write_file` performs for the hasher; unordered writes would
+        // otherwise silently accept a manifest that describes an impossible file.
+        let mut cs: Vec<&ChunkRef> = f.chunks.iter().collect();
+        cs.sort_by_key(|c| c.offset);
+        let mut pos = 0u64;
+        for c in cs {
+            if c.offset < pos {
+                return Err(format!("{}: chunks overlap at offset {}", f.path, c.offset).into());
+            }
+            let end = c.offset + c.cb_original as u64;
+            if end > f.size {
+                return Err(format!(
+                    "{}: chunk at {} runs {} bytes past the file's {}",
+                    f.path,
+                    c.offset,
+                    end - f.size,
+                    f.size
+                )
+                .into());
+            }
+            pos = end;
+            occurrences += 1;
+            match slot_of.entry((c.sha, c.cb_original)) {
+                std::collections::hash_map::Entry::Occupied(e) => {
+                    placement[*e.get()].push((slot, c.offset));
+                }
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(work.len());
+                    placement.push(vec![(slot, c.offset)]);
+                    work.push((*c).clone());
+                }
+            }
+        }
+        written.files += 1;
+        written.bytes += f.size;
+    }
+    if occurrences > work.len() {
+        eprintln!(
+            "  {} duplicate chunk references collapse into {} fetches",
+            occurrences - work.len(),
+            work.len()
+        );
+    }
+
+    struct DepotSink {
+        handles: Vec<std::sync::Arc<std::fs::File>>,
+        placement: Vec<Vec<(usize, u64)>>,
+    }
+    impl crate::pin::engine::Sink for DepotSink {
+        fn accept(&self, index: usize, data: Vec<u8>) -> Result<(), String> {
+            for &(slot, offset) in &self.placement[index] {
+                self.handles[slot]
+                    .write_all_at(&data, offset)
+                    .map_err(|e| format!("write at offset {offset}: {e}"))?;
+            }
+            Ok(())
+        }
+    }
+
+    let sizes: Vec<u64> = work.iter().map(|c| c.cb_original as u64).collect();
+    // Progress counts bytes FETCHED (what crosses the wire), so neither deduplicated references nor
+    // sparse ranges no chunk covers can leave the bar short of 100%.
+    let fetch_total: u64 = sizes.iter().sum();
+    let src = std::sync::Arc::new(ChunkSource::new(ctl.hosts, depot_id, ctl.depot_key));
+    let sink = std::sync::Arc::new(DepotSink { handles, placement });
+    let mut progress = download::Progress::new(fetch_total.max(1), opts.progress);
+    crate::pin::engine::unordered(
+        src,
+        crate::pin::engine::Work { items: work, sizes },
+        opts.workers,
+        opts.window_bytes,
+        sink,
+        crate::pin::engine::Tuning::default(),
+        |n| progress.add(n),
+    )?;
+    progress.finish();
+    download::sync_dir(dir)?;
+    Ok(written)
+}
+
+/// `download_depot` over every stored account, mirroring `hash_depot_any`.
+///
+/// Ownership is settled by the depot-key request inside `control()`, before a content byte moves, so a
+/// wrong account costs a round trip rather than a download.
+pub fn download_depot_any(
+    app_id: u32,
+    depot_id: u32,
+    manifest_id: u64,
+    branch: &str,
+    anonymous: bool,
+    dir: &std::path::Path,
+    opts: &crate::pin::gog::HashOpts,
+) -> Result<crate::pin::download::Written, Box<dyn std::error::Error>> {
+    if anonymous {
+        return download_depot(app_id, depot_id, manifest_id, branch, Auth::Anonymous, dir, opts);
+    }
+    let creds = credentials_from_store(&opts.credential_dir, opts.steam_account.as_deref())?;
+    crate::pin::try_accounts(
+        &creds,
+        |c| c.account.clone(),
+        is_not_owned,
+        |tried, last| {
+            Box::new(SteamError::NotOwned(format!(
+                "no stored Steam account can fetch app {app_id} depot {depot_id} manifest {manifest_id} \
+                 (tried: {}). Last refusal: {last}",
+                tried.join(", ")
+            ))) as Box<dyn std::error::Error>
+        },
+        |c| {
+            download_depot(
+                app_id,
+                depot_id,
+                manifest_id,
+                branch,
+                Auth::Account(c.clone()),
+                dir,
+                opts,
+            )
+        },
+    )
+}
+
 pub fn hash_depot_any(
     app_id: u32,
     depot_id: u32,
@@ -1511,14 +1975,14 @@ fn is_not_owned(e: &Box<dyn std::error::Error>) -> bool {
 
 fn steam_write(
     f: &FileEntry,
-    pf: &crate::pin::prefetch::Prefetcher<ChunkRef>,
+    next: &mut dyn FnMut() -> Result<Vec<u8>, String>,
     seen: &mut u64,
     w: &mut dyn std::io::Write,
 ) -> Result<(), nar::NarError> {
     write_file(
         f,
         || {
-            let v = pf.next_chunk()?;
+            let v = next()?;
             *seen += v.len() as u64;
             Ok(v)
         },

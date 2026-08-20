@@ -96,9 +96,9 @@ propnix/
 │   │   └── from-unity.nix         # extractUnityIcon — <exe>_Data/Resources/UnityPlayer.png (build-time find)
 │   ├── fetchers/
 │   │   ├── cred-lib.sh            # the shared credential prologue (sourced by all three)
-│   │   ├── fetchGogGalaxyBuild/   # gogdl FOD, (productId,buildId)-pinned — GOG Windows builds
+│   │   ├── fetchGogGalaxyBuild/   # propnix-download FOD, (productId,buildId)-pinned — GOG Windows builds
 │   │   ├── fetchGogLinuxInstaller.nix  # lgogdownloader FOD, latest-only — GOG Linux builds
-│   │   └── fetchSteamDepot.nix    # DepotDownloader FOD, manifest-pinned — reference-grade determinism
+│   │   └── fetchSteamDepot.nix    # propnix-download FOD, manifest-pinned — reference-grade determinism
 │   └── presets/default.nix        # unity.framePacing / unity.fullscreen fragments + mergeTuning
 ├── emulators/                     # first-class, game-independent, pinned translation layers
 │   ├── wine-hangover/             # arm64ec wine (aarch64) / native wine (x86_64) — same source

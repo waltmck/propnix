@@ -12,9 +12,10 @@ path = "src/main.rs"
 # Subcommand CLI + help/usage. Derive keeps the account-type/subcommand surface declarative + easy to extend.
 clap = { version = "4", features = ["derive"] }
 # Blocking HTTP client with bundled rustls + webpki roots (no system OpenSSL/CA dep, no async runtime) — used
-# for the OAuth code/refresh exchange and the userData lookup, and for ALL bulk pin traffic (manifests and
-# content chunks). Secrets go in the request, never in argv (a curl subprocess would leak the auth code /
-# refresh token via `ps`).
+# for the OAuth code/refresh exchange, the userData lookup, and the METADATA calls (build lists, build
+# meta, depot manifests, appinfo). Bulk chunk traffic goes through reqwest instead — see pin/engine.rs.
+# Secrets go in the request, never in argv (a curl subprocess would leak the auth code / refresh token
+# via `ps`).
 ureq = { version = "2", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 # preserve_order keeps versions.json key order so a rewrite is a MINIMAL diff (verified: all 17 current
@@ -27,7 +28,14 @@ libc = "0.2"
 # ── propnix pin ──────────────────────────────────────────────────────────────────────────────────
 # The only hash we need: the NAR digest IS the Nix fixed-output hash. Base64 (SRI rendering) is
 # hand-rolled in pin/nar.rs to avoid a second crate for 32 bytes.
-sha2 = "0.10"
+#
+# `asm` IS NOT OPTIONAL HERE. sha2 0.10 dispatches its aarch64 backend on `#[cfg(all(feature = "asm",
+# target_arch = "aarch64"))]` and has NO runtime fallback at that level, so without the feature an
+# aarch64 build silently compiles to `sha256::soft` — measured at ~7% of a real depot hash on a CPU that
+# advertises the sha2 extension. The backend itself still probes at runtime (`cpufeatures::new!(…,
+# "sha2")` guarding a `#[target_feature(enable = "sha2")]` fast path), so this needs no RUSTFLAGS and
+# stays correct on a core without the extension.
+sha2 = { version = "0.10", features = ["asm"] }
 # GOG: content-system metadata and every content chunk is a standalone zlib stream. Also .NET's raw
 # DEFLATE, which is how DepotDownloader's account.config is wrapped.
 flate2 = "1"
@@ -45,15 +53,62 @@ steam-vent-proto-steam = "0.5.2"
 # AES-256-CBC): used for BOTH chunk bodies and the encrypted filenames in a manifest.
 steam-vent-crypto = "0.2.1"
 protobuf = "=3.5.1" # must match steam-vent's rust-protobuf pin, not prost
-# steam-vent is async and enables no runtime of its own; the CM control plane runs on a small runtime
-# while the bulk chunk transfer stays on blocking threads (see pin/steam.rs).
-tokio = { version = "1", features = ["rt-multi-thread"] }
+# steam-vent is async and enables no runtime of its own. The runtime is also what the CHUNK ENGINE runs on
+# (pin/engine.rs): `time` for the per-request deadline and retry backoff, `sync` for the notify/queue
+# plumbing, and `rt-multi-thread` both to drive the sockets and to host the blocking pool that CPU decode
+# and disk writes are pushed onto so they can never stall the reactor.
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
+# Async HTTP for bulk chunk traffic (pin/engine.rs). Already in the tree via steam-vent, which uses it for
+# Steam's CM control plane; taken as a direct dependency here so the features it needs are stated.
+#
+# TRUST ROOTS: reqwest resolves trust through rustls-platform-verifier, i.e. the SYSTEM CA store, so bulk
+# traffic now depends on SSL_CERT_FILE being sane — which the wrapper in default.nix already guarantees
+# (including treating a build sandbox's /no-cert-file.crt sentinel as unset). This is a deliberate change
+# from ureq's bundled webpki-roots: one trust source for every request the tool makes, rather than two.
+reqwest = "0.13"
 bytes = "1"         # steam-vent-crypto takes and returns BytesMut
 base64 = "0.22"     # encrypted manifest filenames are base64 before decryption; JWT payloads too
 sha1 = "0.10"       # a chunk's id IS sha1(plaintext) — a free end-to-end integrity check
 zstd = "0.13"       # current chunk container (VSZa)
-lzma-rs = "0.3"     # legacy chunk container (VZ, raw LZMA1)
 tar = "0.4"         # read account.config out of the stored credential tar
+# Legacy chunk container (VZ, raw LZMA1) — the hot path, at ~95% of this tool's CPU when a VZ-era depot
+# is pinned. 7-Zip's LZMA SDK decoder, NOT xz/liblzma: 7-Zip's history records "the speed for LZMA and
+# LZMA2 decompression in arm64 versions for macOS and Linux was increased by 20%-60%" (21.02 alpha), and
+# xz never got that work — it ships no arm64 decoder path at all. Measured head to head on this host at
+# 24.91 vs 33.62 ms/MiB, a 1.35x win, with both backends asserted to produce byte-identical output
+# (`bench_lzma_backends` and `a_vz_container_round_trips_through_the_lzma_decoder` in pin/steam.rs).
+# It also takes the 5 property bytes and the raw stream directly, so the VZ payload needs no reframing.
+#
+# (The pure-Rust `lzma-rs` this all replaced was a further 2x slower again — 69% of total CPU under perf.)
+lzma-sdk-sys = "0.1.2"
 
 [profile.release]
-opt-level = "s"
+# Speed, not size. This is a build-time CLI whose whole job is to push hundreds of GB through a
+# decompressor and a hash; it is compiled rarely and run for hours.
+#
+# `opt-level` also reaches the VENDORED C: cargo hands the profile's level to build scripts as `OPT_LEVEL`,
+# and the `cc` crate turns that into the `-O` flag for the liblzma/zstd sources. An earlier `"s"` here was
+# therefore compiling the chunk decoders for size too. Measured effects of moving "s" → 3, on an idle
+# machine, per MiB of depot content (see `bench_chunk_pipeline` in pin/steam.rs):
+#     AES-256 decrypt   1.46 -> 0.13 ms   (Rust, 11x)
+#     SHA-1             2.83 -> 1.04 ms   (Rust, 2.7x)
+#     SHA-256           0.46 -> 0.46 ms   (already an asm/intrinsics backend)
+#     LZMA decode      33.81 -> 33.59 ms  (C; a wash — its inner loop is bound by data-dependent
+#                                          branches and dictionary memory access, not scheduling)
+#
+# LTO + one codegen unit measured as noise in that same harness, which only exercises single-crate hot
+# loops; kept because the cross-crate paths it CANNOT isolate (rustls, ureq, the NAR sink) are ~15% of a
+# real run, and it cut the binary from 10.9 MB to 8.7 MB. Costs ~124s vs ~82s to build.
+#
+# NOT `panic = "abort"`: with LTO it would force the whole dependency tree to be built twice (cargo builds
+# test targets with unwinding regardless), and it buys nothing here — a panicking fetch worker is already
+# prevented from hanging the pipeline by an unwind guard rather than by catching, so the panic propagates
+# with its message and backtrace intact. See `fetch_one` in pin/engine.rs.
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[dev-dependencies]
+# Only to SYNTHESIZE VZ/LZMA1 fixtures for the decoder tests and benches — the shipped binary decodes with
+# the LZMA SDK and needs no LZMA encoder at all.
+liblzma = "0.4"

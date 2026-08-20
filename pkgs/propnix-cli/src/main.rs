@@ -48,6 +48,15 @@ enum Command {
         #[command(subcommand)]
         what: HashCmd,
     },
+    /// Download a pinned payload to a directory — what the payload FODs run.
+    ///
+    /// The same pipeline as `pin`/`hash` with files as the sink, so it shares the manifest decoders, the
+    /// chunk transport, the failure policy, the throughput governor and the host scoring. The tree it writes
+    /// is the one the pins already hash, so a FOD's content address does not move.
+    Download {
+        #[command(subcommand)]
+        what: DownloadCmd,
+    },
 }
 
 /// `propnix pin`'s flags. A flattenable `Args` struct rather than an inline variant, so the twenty-odd
@@ -117,7 +126,9 @@ struct PinArgs {
     /// Override the propnix emulatedPlatform the scaffolded rows land under (e.g. i386-windows).
     #[arg(long, requires = "new")]
     platform: Option<String>,
-    #[arg(long, default_value_t = 32)]
+    /// CEILING on concurrent chunk requests. The number actually in flight starts small and is moved
+    /// by the throughput governor (see pin::concurrency), so this is a bound, not a setting to tune.
+    #[arg(long, default_value_t = 128)]
     workers: usize,
     #[arg(long, default_value_t = 128)]
     window_mib: u64,
@@ -152,7 +163,8 @@ enum HashCmd {
         deps_build_id: Option<String>,
         #[arg(long)]
         expect: Option<String>,
-        #[arg(long, default_value_t = 32)]
+        /// Ceiling on concurrent chunk requests; the governor picks the working value.
+        #[arg(long, default_value_t = 128)]
         workers: usize,
         #[arg(long, default_value_t = 128)]
         window_mib: u64,
@@ -175,8 +187,66 @@ enum HashCmd {
         steam_account: Option<String>,
         #[arg(long)]
         expect: Option<String>,
-        #[arg(long, default_value_t = 32)]
+        /// Ceiling on concurrent chunk requests; the governor picks the working value.
+        #[arg(long, default_value_t = 128)]
         workers: usize,
+        #[arg(long, default_value_t = 128)]
+        window_mib: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum DownloadCmd {
+    /// Download a Steam depot (replaces DepotDownloader).
+    Steam {
+        #[arg(long)]
+        app: u32,
+        #[arg(long)]
+        depot: u32,
+        #[arg(long)]
+        manifest: u64,
+        #[arg(long, default_value = "public")]
+        branch: String,
+        /// Use Steam's anonymous account (free / anonymous-entitled depots only).
+        #[arg(long)]
+        anonymous: bool,
+        /// Which stored Steam account to use, when the credential holds more than one.
+        #[arg(long)]
+        steam_account: Option<String>,
+        /// Where to write the depot. Created if missing.
+        #[arg(long)]
+        dir: std::path::PathBuf,
+        #[arg(long, default_value_t = 128)]
+        workers: usize,
+        /// MiB of chunks admitted ahead of the disk — the download's memory bound.
+        #[arg(long, default_value_t = 128)]
+        window_mib: u64,
+    },
+    /// Download a GOG Galaxy build (replaces gogdl).
+    Gog {
+        #[arg(long)]
+        product_id: String,
+        #[arg(long)]
+        build_id: String,
+        #[arg(long, default_value = "windows")]
+        os: String,
+        #[arg(long, default_value = "en")]
+        lang: String,
+        #[arg(long)]
+        dlc_id: Option<String>,
+        /// Acknowledge the global dependency-repository build, for titles that install a dependency INTO
+        /// the game directory (their tree is not pinned by buildId alone).
+        #[arg(long)]
+        deps_build_id: Option<String>,
+        /// Which stored GOG account to use, when the credential store holds more than one.
+        #[arg(long)]
+        gog_account: Option<String>,
+        /// Where to write the build. Created if missing.
+        #[arg(long)]
+        dir: std::path::PathBuf,
+        #[arg(long, default_value_t = 128)]
+        workers: usize,
+        /// MiB of chunks admitted ahead of the disk — the download's memory bound.
         #[arg(long, default_value_t = 128)]
         window_mib: u64,
     },
@@ -218,6 +288,7 @@ fn main() -> ExitCode {
             .map_err(Into::into),
         Command::Pin(args) => cmd_pin(args),
         Command::Hash { what } => cmd_hash(what),
+        Command::Download { what } => cmd_download(what),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -375,6 +446,87 @@ fn land(
     }
     eprintln!("  wrote {}", path.display());
     Ok(())
+}
+
+fn cmd_download(what: DownloadCmd) -> Result<(), Box<dyn std::error::Error>> {
+    use pin::{gog, steam};
+    match what {
+        DownloadCmd::Steam {
+            app,
+            depot,
+            manifest,
+            branch,
+            anonymous,
+            steam_account,
+            dir,
+            workers,
+            window_mib,
+        } => {
+            std::fs::create_dir_all(&dir)?;
+            let opts = gog::HashOpts {
+                workers,
+                window_bytes: window_mib * 1024 * 1024,
+                credential_dir: cred_dir(),
+                gog_account: None,
+                steam_account: steam_account.or_else(|| env_account("PROPNIX_STEAM_ACCOUNT")),
+                progress: true,
+            };
+            let w = steam::download_depot_any(
+                app, depot, manifest, &branch, anonymous, &dir, &opts,
+            )?;
+            eprintln!(
+                "  wrote {} files, {} dirs, {} content bytes to {}",
+                w.files,
+                w.dirs,
+                w.bytes,
+                dir.display()
+            );
+            Ok(())
+        }
+        DownloadCmd::Gog {
+            product_id,
+            build_id,
+            os,
+            lang,
+            dlc_id,
+            deps_build_id,
+            gog_account,
+            dir,
+            workers,
+            window_mib,
+        } => {
+            std::fs::create_dir_all(&dir)?;
+            let opts = gog::HashOpts {
+                workers,
+                window_bytes: window_mib * 1024 * 1024,
+                credential_dir: cred_dir(),
+                // Same precedence as `pin`: flag > PROPNIX_GOG_ACCOUNT > try every stored account.
+                gog_account: gog_account.or_else(|| env_account("PROPNIX_GOG_ACCOUNT")),
+                steam_account: None,
+                progress: true,
+            };
+            // Same contract as `hash gog`: be explicit about a tree that buildId alone does not pin.
+            let deps = deps_build_id.map(gog::DepsPin::Expect);
+            let w = gog::download_build(
+                &product_id,
+                &build_id,
+                &os,
+                &lang,
+                dlc_id.as_deref(),
+                deps.as_ref(),
+                &dir,
+                &opts,
+            )?;
+            eprintln!(
+                "  wrote {} files, {} dirs, {} content bytes to {}",
+                w.files,
+                w.dirs,
+                w.bytes,
+                dir.display()
+            );
+            Ok(())
+        }
+    }
 }
 
 fn cmd_hash(what: HashCmd) -> Result<(), Box<dyn std::error::Error>> {

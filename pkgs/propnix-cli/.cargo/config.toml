@@ -1,0 +1,14 @@
+# ARMv8 AES intrinsics for the chunk decryptor.
+#
+# Every Steam chunk is AES-256 decrypted (ECB over the first block to recover the IV, then CBC over the
+# body), so this is on the hot path for the whole byte stream. `aes` 0.8 gates its ARMv8 backend behind a
+# `--cfg` FLAG rather than a cargo feature, so without this an aarch64 build silently uses the constant-
+# time software implementation — an order of magnitude slower than the AES instructions the CPU has.
+#
+# Safe to set unconditionally: with the cfg on, the crate compiles BOTH backends and picks between them at
+# runtime (`cpufeatures::new!(aes_intrinsics, "aes")`), so a core without the extension still works. The
+# cfg is only read under `target_arch = "aarch64"`, so it is inert elsewhere.
+#
+# Kept here as well as in default.nix so a local `cargo build` matches the packaged binary.
+[build]
+rustflags = ["--cfg", "aes_armv8"]

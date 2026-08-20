@@ -3,7 +3,7 @@
 # ARCH-AGNOSTIC: identical on both hosts; the wine backend + the scope pick the arch-appropriate emulator
 # set, and the SAME Windows payload (a content-addressed FOD) is shared across arches. Windows-only title
 # (no native Linux build in the GOG Galaxy content system), so it follows the Hollow Knight template.
-# Payload = the pinned GOG Galaxy build fetched with gogdl (D15), delivered as the game tree directly (no
+# Payload = the pinned GOG Galaxy build fetched by fetchGogGalaxyBuild (D15), delivered as the game tree directly (no
 # InnoSetup).
 #
 #   nix run .#iron-lung --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64-linux or x86_64-linux
@@ -18,7 +18,7 @@ mkApp (
     appid = "iron-lung";
     name = "Iron Lung";
     # GOG-Windows only (no native Linux build in the GOG Galaxy content system).
-    # gogdl takes the NUMERIC productId (not the slug); pins verified reproducible (fetchGogGalaxyBuild hdr).
+    # the fetcher takes the NUMERIC productId (not the slug); pins verified reproducible (fetchGogGalaxyBuild hdr).
     fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
     # Primary task from goggame-1310178756.info (isPrimary FileTask), x86_64 PE — the real Unity player, not a
     # launcher stub. Full-color icon auto-extracted from its PE resources (icon.auto default).

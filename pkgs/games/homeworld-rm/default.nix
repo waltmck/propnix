@@ -2,7 +2,7 @@
 # ARM64EC DXVK, on x86_64 natively. Gearbox's 2015 remaster of Homeworld 1 & 2 (space RTS).
 # ARCH-AGNOSTIC: the same spec runs on both hosts; the wine backend + the scope pick the arch-appropriate
 # emulator set, and the SAME Windows payload (a content-addressed FOD) is shared across arches.
-# Windows-only title (no native Linux build). Payload = the pinned GOG Galaxy build fetched with gogdl
+# Windows-only title (no native Linux build). Payload = the pinned GOG Galaxy build fetched by fetchGogGalaxyBuild
 # (D15), delivered as the game tree directly (no InnoSetup).
 #
 # 32-BIT (i386) TITLE — the one that stretches propnix's usual x86_64/ARM64EC path. HomeworldRM.exe is a

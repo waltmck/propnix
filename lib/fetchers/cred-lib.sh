@@ -2,7 +2,7 @@
 # (fetchGogGalaxyBuild, fetchGogLinuxInstaller, fetchSteamDepot). Sourced into each
 # FOD builder script via `source ${./cred-lib.sh}`; only the genuinely-common steps
 # live here — every fetcher keeps its OWN account-iteration loop and download body
-# (they differ structurally: gogdl auth-config transform vs verbatim token drop-in
+# (they differ structurally: the credential store read directly vs a verbatim token drop-in
 # vs isolated-storage tar replay).
 #
 # The credential store contract (see config/credentials.nix):

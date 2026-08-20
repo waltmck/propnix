@@ -2,7 +2,7 @@
 # natively. Klei's custom C++/Lua engine (renders via OpenGL/D3D). ARCH-AGNOSTIC: the same spec runs on
 # both hosts; the wine backend + the scope pick the arch-appropriate emulator set, and the SAME Windows
 # payload (a content-addressed FOD) is shared across arches. Payload = the pinned GOG Galaxy build fetched
-# with gogdl (D15), delivered as the game tree directly (no InnoSetup).
+# with fetchGogGalaxyBuild (D15), delivered as the game tree directly (no InnoSetup).
 #
 #   nix run .#dont-starve --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64-linux or x86_64-linux
 {

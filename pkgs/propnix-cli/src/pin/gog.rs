@@ -61,7 +61,7 @@ type R<T> = Result<T, GogError>;
 ///
 /// Errors rather than slicing blind: a manifest carrying an empty or malformed `compressedMd5` would
 /// otherwise panic on `&h[0..2]` INSIDE A WORKER THREAD, which used to hang the run forever rather than
-/// fail it (see `prefetch::run`).
+/// fail it (see `engine::unordered`).
 fn galaxy_path(h: &str) -> R<String> {
     if h.contains('/') {
         return Ok(h.to_string());
@@ -98,6 +98,13 @@ fn agent() -> &'static ureq::Agent {
             .max_idle_connections_per_host(256)
             .timeout_connect(std::time::Duration::from_secs(20))
             .timeout_read(std::time::Duration::from_secs(60))
+            // …and an OVERALL deadline on top. The read timeout only bounds the wait for the NEXT byte,
+            // so a connection that trickles — or one left half-open when the machine changes network or
+            // resumes from suspend — can hang a request forever without ever tripping it, and then no
+            // retry policy gets to run. Observed on the Steam side: a 95%-complete depot stranded with the
+            // process burning zero CPU. This agent serves only metadata; bulk chunks go through
+            // pin::engine, which enforces its own.
+            .timeout(std::time::Duration::from_secs(120))
             .build()
     })
 }
@@ -192,19 +199,6 @@ fn redact(url: &str) -> String {
     }
 }
 
-/// A chunk URL is built from `secure_link`'s `url_format`, which may embed signed parameters as PATH
-/// SEGMENTS rather than as a query string — so `redact` is not enough here. Log only scheme + host; the
-/// chunk's own md5 is what identifies the request anyway, and the caller already prints it.
-fn redact_chunk(url: &str) -> String {
-    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
-    let host = rest.split('/').next().unwrap_or("");
-    if scheme.is_empty() {
-        format!("{host}/<redacted>")
-    } else {
-        format!("{scheme}://{host}/<redacted>")
-    }
-}
-
 fn get_json(url: &str, bearer: Option<&str>) -> R<Value> {
     let raw = get_bytes(url, bearer)?;
     // content-system v2 metadata is zlib-wrapped; some endpoints answer plain JSON.
@@ -217,6 +211,14 @@ fn get_json(url: &str, bearer: Option<&str>) -> R<Value> {
 
 fn inflate(b: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut out = Vec::new();
+    flate2::read::ZlibDecoder::new(b).read_to_end(&mut out)?;
+    Ok(out)
+}
+
+/// `inflate` for the case where the manifest states the exact output size: reserve it up front instead of
+/// letting the Vec double-and-copy its way there. Worth ~0.05 ms per MiB — small, but free and certain.
+fn inflate_sized(b: &[u8], expect: usize) -> std::io::Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(expect);
     flate2::read::ZlibDecoder::new(b).read_to_end(&mut out)?;
     Ok(out)
 }
@@ -955,8 +957,16 @@ pub struct Cdn {
     /// measured on Steam's CDN: 9 Mbit/s on one connection, 91 Mbit/s over 16 to a single host, but
     /// 169 Mbit/s over 32 spread across hosts. So chunk requests are round-robined over every endpoint
     /// offered rather than pinned to `urls[0]`.
-    endpoints: Mutex<BTreeMap<String, Vec<Endpoint>>>,
-    rr: std::sync::atomic::AtomicUsize,
+    /// Per product: the endpoints, and the pool that scores them. The pool is rebuilt whenever the
+    /// endpoint list is (a `secure_link` re-resolution can change both the count and the order), so its
+    /// indices always match the vector beside it.
+    endpoints: Mutex<BTreeMap<String, (Vec<Endpoint>, std::sync::Arc<crate::pin::hosts::HostPool>)>>,
+    /// Single-flight guard for `secure_link` resolution. An expired signature requeues EVERY in-flight
+    /// chunk of a product at once, and each retry re-enters `endpoint()` against an empty cache — without
+    /// this, every worker would issue its own resolution (and possibly its own token mint): a herd of
+    /// identical metadata calls against an API that just answered 401. Per-Cdn rather than per-product on
+    /// purpose — cross-product contention is rare, and losing costs one 400ms requeue.
+    resolving: Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -974,7 +984,7 @@ impl Cdn {
             refresh_token,
             access: Mutex::new(None),
             endpoints: Mutex::new(BTreeMap::new()),
-            rr: std::sync::atomic::AtomicUsize::new(0),
+            resolving: Mutex::new(()),
         }
     }
 
@@ -1018,19 +1028,46 @@ impl Cdn {
         Ok(())
     }
 
-    fn endpoint(&self, product: &str) -> R<Endpoint> {
-        {
-            let map = self.endpoints.lock().unwrap();
-            if let Some(v) = map.get(product) {
-                let i = self.rr.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return Ok(v[i % v.len()].clone());
-            }
+    /// Pick an endpoint, returning its index so the caller can report back how it performed.
+    ///
+    /// An even split would give every endpoint the same share regardless of what it actually delivers, and
+    /// keep feeding a degraded one that share while each of those requests fails first. `pin::hosts` scores
+    /// them by observed throughput instead.
+    fn endpoint(&self, product: &str) -> R<(usize, Endpoint, std::sync::Arc<crate::pin::hosts::HostPool>)> {
+        if let Some(hit) = self.pick_cached(product) {
+            return Ok(hit);
+        }
+        // Cache miss: `secure_link` must be resolved — a blocking metadata round trip with its own retry
+        // ladder. SINGLE-FLIGHT it (see `resolving`): one caller resolves, and the rest fail fast with a
+        // transport-shaped error so the engine requeues their block — which frees its concurrency slot —
+        // rather than stacking up behind the winner. By the time the requeue lands, the cache is warm.
+        let Ok(_resolving) = self.resolving.try_lock() else {
+            return Err(GogError::Http(format!(
+                "secure_link for {product} is being re-resolved; retrying this chunk shortly"
+            )));
+        };
+        if let Some(hit) = self.pick_cached(product) {
+            return Ok(hit); // the previous winner repopulated it while we raced for the lock
         }
         let eps = self.fetch_endpoints(product)?;
         let mut map = self.endpoints.lock().unwrap();
-        let v = map.entry(product.to_string()).or_insert(eps);
-        let i = self.rr.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(v[i % v.len()].clone())
+        let (v, pool) = map.entry(product.to_string()).or_insert_with(|| {
+            let n = eps.len();
+            (eps, std::sync::Arc::new(crate::pin::hosts::HostPool::new(n)))
+        });
+        let i = pool.pick();
+        Ok((i, v[i % v.len()].clone(), std::sync::Arc::clone(pool)))
+    }
+
+    fn pick_cached(
+        &self,
+        product: &str,
+    ) -> Option<(usize, Endpoint, std::sync::Arc<crate::pin::hosts::HostPool>)> {
+        let map = self.endpoints.lock().unwrap();
+        map.get(product).map(|(v, pool)| {
+            let i = pool.pick();
+            (i, v[i % v.len()].clone(), std::sync::Arc::clone(pool))
+        })
     }
 
     /// Forget a product's cached endpoints, so the next request re-resolves `secure_link`. The URLs it
@@ -1110,8 +1147,13 @@ impl Cdn {
         Ok(eps)
     }
 
-    fn url(&self, product: &str, compressed_md5: &str) -> R<String> {
-        Ok(match self.endpoint(product)? {
+    fn url(
+        &self,
+        product: &str,
+        compressed_md5: &str,
+    ) -> R<(String, usize, std::sync::Arc<crate::pin::hosts::HostPool>)> {
+        let (idx, ep, pool) = self.endpoint(product)?;
+        Ok((match ep {
             Endpoint::Plain(base) => format!("{base}/{}", galaxy_path(compressed_md5)?),
             Endpoint::Format { url_format, params } => {
                 // task_executor: the `path` parameter gains the chunk's galaxy path, then every
@@ -1129,72 +1171,72 @@ impl Cdn {
                 }
                 out
             }
-        })
+        }, idx, pool))
     }
 
-    /// Fetch one chunk and verify it both compressed and decompressed.
-    ///
-    /// Retried patiently (see `pin::retry`): a hash of a large title runs for hours and cannot be
-    /// resumed, so a dropped connection — a laptop changing network, a CDN recycling a pooled socket —
-    /// must not throw the whole run away. An immediate 4-shot retry was four failures rather than four
-    /// chances; riding out a real outage takes minutes, and is counted in ATTEMPTS so that time the
-    /// machine spends suspended does not consume them.
-    pub fn chunk(&self, product: &str, c: &Chunk) -> R<Vec<u8>> {
-        let label = format!("chunk {}", c.compressed_md5);
-        crate::pin::retry::with_retry(
-            &label,
-            &crate::pin::retry::CONTENT,
-            // Everything transport-shaped, INCLUDING a body that failed its md5: a truncated response is
-            // exactly what a dropped connection looks like once it has been decompressed. Ownership and
-            // parse failures are the server's considered answer and are returned at once.
-            |e: &GogError| matches!(e, GogError::Http(_)),
-            || self.try_chunk(product, c),
-        )
-        .map_err(|e| match e {
-            GogError::Http(m) => GogError::Http(format!("{label} unrecoverable: {m}")),
-            other => other,
-        })
+}
+
+/// The engine's view of a GOG product: which `secure_link` endpoint to ask, and how to verify a chunk.
+///
+/// No retry ladder here — the engine requeues a failed block, which re-enters `target()` and so re-resolves
+/// `secure_link` if it had to be dropped. That is exactly what the expired-signature case needs.
+impl crate::pin::engine::ChunkIo for Cdn {
+    /// (product, chunk): a plan can span several products, and `secure_link` is per-product.
+    type Item = (String, Chunk);
+
+    fn target(&self, (product, c): &Self::Item) -> Result<crate::pin::engine::Target, String> {
+        let (url, idx, _pool) = self
+            .url(product, &c.compressed_md5)
+            .map_err(|e| e.to_string())?;
+        Ok(crate::pin::engine::Target { url, endpoint: idx })
     }
 
-    fn try_chunk(&self, product: &str, c: &Chunk) -> R<Vec<u8>> {
-        // `warm()` already PROVED ownership before a single content byte moved, so a refusal from
-        // re-resolving `secure_link` now cannot mean "you do not own this". Keep it transport-shaped so
-        // the retry loop gets its chances and a persistent failure is a red run — never a false
-        // not-owned issue against an account that demonstrably owns the title.
-        let url = self.url(product, &c.compressed_md5).map_err(|e| match e {
-            GogError::NotOwned(m) => {
-                GogError::Http(format!("re-resolving secure_link for {product}: {m}"))
-            }
-            other => other,
-        })?;
-        let raw = match get_bytes_raw(&url, None) {
-            Ok(v) => v,
-            // A secure_link URL carries a SIGNED EXPIRY, and a large title takes hours to hash — so a
-            // 401/403 mid-stream means the link aged out, NOT that the account lost the game. Mapping it
-            // to NotOwned (as the product endpoints do) filed a false "account does not own this title"
-            // issue. Re-resolve the product's endpoints and let the retry loop try again.
-            Err(HttpFail {
-                status: Some(code @ (401 | 403)),
-                ..
-            }) => {
-                self.drop_endpoints(product);
-                return Err(GogError::Http(format!(
-                    "HTTP {code} for {} — the signed chunk URL expired; re-resolving secure_link",
-                    redact_chunk(&url)
-                )));
-            }
-            Err(e) => {
-                return Err(GogError::Http(format!("{e} for {}", redact_chunk(&url))));
-            }
-        };
-        if md5_hex(&raw) != c.compressed_md5 {
-            return Err(GogError::Http("compressedMd5 mismatch".into()));
+    fn decode(&self, (_product, c): &Self::Item, body: Vec<u8>) -> Result<Vec<u8>, String> {
+        // GOG pins a chunk by md5 BOTH compressed and decompressed; both are checked, as the fetcher did.
+        if md5_hex(&body) != c.compressed_md5 {
+            return Err("compressedMd5 mismatch".into());
         }
-        let out = inflate(&raw).map_err(|e| GogError::Http(format!("inflate: {e}")))?;
+        let out = inflate_sized(&body, c.size as usize).map_err(|e| format!("inflate: {e}"))?;
         if out.len() as u64 != c.size || md5_hex(&out) != c.md5 {
-            return Err(GogError::Http("chunk md5/size mismatch".into()));
+            return Err("chunk md5/size mismatch".into());
         }
         Ok(out)
+    }
+
+    fn observe(
+        &self,
+        (product, _c): &Self::Item,
+        endpoint: usize,
+        outcome: crate::pin::engine::Outcome,
+    ) {
+        // Look the pool up by product: an endpoint index only means something within its own product.
+        let pool = self
+            .endpoints
+            .lock()
+            .unwrap()
+            .get(product)
+            .map(|(_, p)| std::sync::Arc::clone(p));
+        let Some(pool) = pool else { return };
+        match outcome {
+            crate::pin::engine::Outcome::Ok { bytes, elapsed } => {
+                pool.record_success(endpoint, bytes, elapsed)
+            }
+            crate::pin::engine::Outcome::Failed => pool.record_failure(endpoint),
+        }
+    }
+
+    fn on_http_status(&self, (product, _c): &Self::Item, status: u16) {
+        // A secure_link URL carries a SIGNED EXPIRY, and a large title takes hours. So 401/403 mid-stream
+        // means the link aged out, NOT that the account lost the game — treating it as ownership once
+        // filed a false "does not own this title" issue. Drop the endpoints so the requeued block
+        // re-resolves, and keep it transport-shaped.
+        if status == 401 || status == 403 {
+            self.drop_endpoints(product);
+        }
+    }
+
+    fn label(&self, (_product, c): &Self::Item) -> String {
+        format!("chunk {}", c.compressed_md5)
     }
 }
 
@@ -1291,6 +1333,152 @@ pub struct HashOpts {
 }
 
 /// Resolve a build and stream it into a NAR hash. Nothing touches disk.
+/// Download a pinned Galaxy build to `dir` — the same pipeline as `hash_build`, with files as the sink.
+///
+/// This is what replaces gogdl in the FOD. Note the layout: the tree written here is `plan.files` at the
+/// ROOT of `dir`, with no `install_directory` prefix — which is what `tree()` hashes, and what the FOD ends
+/// up with after promoting the children out of the game directory gogdl creates. See `pin::download`.
+pub fn download_build(
+    product_id: &str,
+    build_id: &str,
+    os: &str,
+    lang: &str,
+    dlc_id: Option<&str>,
+    deps: Option<&DepsPin>,
+    dir: &std::path::Path,
+    opts: &HashOpts,
+) -> Result<crate::pin::download::Written, Box<dyn std::error::Error>> {
+    use crate::pin::download;
+
+    let plan = plan(product_id, build_id, os, lang, dlc_id, deps)?;
+    // Built for its REFUSALS alone: `tree` is what rejects a case-only collision, and download has to
+    // refuse exactly what hashing refuses or the two could disagree about a build. (Unordered download
+    // has no use for its shape — chunks land wherever the CDN answers first.)
+    let _ = tree(&plan)?;
+
+    let products: Vec<String> = plan
+        .files
+        .iter()
+        .map(|f| f.product.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let creds = gog_credentials(&opts.credential_dir, opts.gog_account.as_deref())?;
+    let cdn = crate::pin::try_accounts(
+        &creds,
+        |c| c.account.clone(),
+        |e: &GogError| matches!(e, GogError::NotOwned(_)),
+        |tried, last| {
+            GogError::NotOwned(format!(
+                "no stored GOG account can fetch build {build_id} of {product_id}{} (tried: {}). Last \
+                 refusal: {last}",
+                dlc_id.map(|d| format!(" DLC {d}")).unwrap_or_default(),
+                tried.join(", ")
+            ))
+        },
+        |c| {
+            let cdn = Cdn::new(Some(c.refresh_token.clone()));
+            cdn.warm(&products)?;
+            Ok(cdn)
+        },
+    )?;
+
+    let mut written = download::Written::default();
+    // An empty directory is part of the tree the pin hashes, so it must exist even though no file creates it.
+    for d in &plan.empty_dirs {
+        download::ensure_dir(dir, d)?;
+        written.dirs += 1;
+    }
+
+    // Create every file at its final size, and record where each chunk goes. A GOG file is the plain
+    // concatenation of its chunks in manifest order, so a chunk's offset is the running total before it.
+    // A DISTINCT chunk is fetched once and written to every (file, offset) that references it — chunk ids
+    // are content addresses, so a manifest reuses them freely — keyed by (product, compressedMd5, md5,
+    // size); product included because chunks are served through a per-product `secure_link`, and nothing
+    // guarantees another product's link serves the same object path.
+    let mut handles: Vec<std::sync::Arc<std::fs::File>> = Vec::new();
+    let mut work: Vec<(String, Chunk)> = Vec::new();
+    let mut placement: Vec<Vec<(usize, u64)>> = Vec::new();
+    let mut slot_of: std::collections::HashMap<(String, String, String, u64), usize> =
+        std::collections::HashMap::new();
+    let mut occurrences = 0usize;
+    for f in &plan.files {
+        let file = download::create_file(dir, &f.path, f.executable)?;
+        file.set_len(f.size)
+            .map_err(|e| format!("set size of {}: {e}", f.path))?;
+        let slot = handles.len();
+        handles.push(std::sync::Arc::new(file));
+        let mut offset = 0u64;
+        for c in &f.chunks {
+            occurrences += 1;
+            let key = (f.product.clone(), c.compressed_md5.clone(), c.md5.clone(), c.size);
+            match slot_of.entry(key) {
+                std::collections::hash_map::Entry::Occupied(e) => {
+                    placement[*e.get()].push((slot, offset));
+                }
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(work.len());
+                    placement.push(vec![(slot, offset)]);
+                    work.push((f.product.clone(), c.clone()));
+                }
+            }
+            offset += c.size;
+        }
+        if offset != f.size {
+            return Err(format!(
+                "{}: chunks total {offset} bytes but the manifest says {}",
+                f.path, f.size
+            )
+            .into());
+        }
+        written.files += 1;
+        written.bytes += f.size;
+    }
+    if occurrences > work.len() {
+        eprintln!(
+            "  {} duplicate chunk references collapse into {} fetches",
+            occurrences - work.len(),
+            work.len()
+        );
+    }
+
+    struct BuildSink {
+        handles: Vec<std::sync::Arc<std::fs::File>>,
+        placement: Vec<Vec<(usize, u64)>>,
+    }
+    impl crate::pin::engine::Sink for BuildSink {
+        fn accept(&self, index: usize, data: Vec<u8>) -> Result<(), String> {
+            use std::os::unix::fs::FileExt;
+            for &(slot, offset) in &self.placement[index] {
+                self.handles[slot]
+                    .write_all_at(&data, offset)
+                    .map_err(|e| format!("write at offset {offset}: {e}"))?;
+            }
+            Ok(())
+        }
+    }
+
+    let sizes: Vec<u64> = work.iter().map(|(_, c)| c.size).collect();
+    // Progress counts bytes FETCHED (what crosses the wire), so deduplicated references cannot leave the
+    // bar short of 100%.
+    let fetch_total: u64 = sizes.iter().sum();
+    let cdn = std::sync::Arc::new(cdn);
+    let sink = std::sync::Arc::new(BuildSink { handles, placement });
+    let mut progress = download::Progress::new(fetch_total.max(1), opts.progress);
+    crate::pin::engine::unordered(
+        cdn,
+        crate::pin::engine::Work { items: work, sizes },
+        opts.workers,
+        opts.window_bytes,
+        sink,
+        crate::pin::engine::Tuning::default(),
+        |n| progress.add(n),
+    )?;
+    progress.finish();
+    download::sync_dir(dir)?;
+    Ok(written)
+}
+
 pub fn hash_build(
     product_id: &str,
     build_id: &str,
@@ -1304,15 +1492,36 @@ pub fn hash_build(
     let total: u64 = plan.files.iter().map(|f| f.size).sum();
     let tree = tree(&plan)?;
 
-    // The prefetch queue must be built in NAR emission order — nar_hash consumes strictly sequentially.
+    // The occurrence list must be built in NAR emission order — nar_hash consumes strictly sequentially,
+    // and the engine's ordered mode both prioritises and admits blocks by that index.
     let order = nar::flatten(&tree);
-    let mut work = Vec::new();
+    let mut occ = Vec::new();
     for &&idx in &order {
         let f = &plan.files[idx];
         for c in &f.chunks {
-            work.push((f.product.clone(), c.clone()));
+            occ.push((f.product.clone(), c.clone()));
         }
     }
+
+    // Fetch each DISTINCT chunk once (pin::dedup): duplicates the byte budget can hold are served from
+    // memory at their later occurrences, the rest simply refetch. Keyed by (product, compressedMd5, md5,
+    // size) — product included because chunks are served through a per-product `secure_link`, and nothing
+    // guarantees another product's link serves the same object path.
+    let keys: Vec<(&str, &str, &str, u64)> = occ
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.compressed_md5.as_str(), c.md5.as_str(), c.size))
+        .collect();
+    let occ_sizes: Vec<u64> = occ.iter().map(|(_, c)| c.size).collect();
+    let (mut dedup, fetch) = crate::pin::dedup::plan(&keys, &occ_sizes, opts.window_bytes);
+    let (dups, saved) = dedup.stats();
+    if dups > 0 {
+        eprintln!(
+            "  {dups} duplicate chunks will be served from memory ({} MiB of refetch avoided)",
+            saved >> 20
+        );
+    }
+    let items: Vec<(String, Chunk)> = fetch.iter().map(|&i| occ[i].clone()).collect();
+    let sizes: Vec<u64> = fetch.iter().map(|&i| occ_sizes[i]).collect();
 
     // TRY EVERY STORED ACCOUNT, like the fetcher does (see `pin::try_accounts` for the policy).
     // `Cdn::warm` is what makes this cheap: `secure_link` IS the ownership gate, so resolving it here
@@ -1347,14 +1556,13 @@ pub fn hash_build(
     )?;
 
     let cdn = std::sync::Arc::new(cdn);
-    let pf = crate::pin::prefetch::Prefetcher::new(
-        work,
+    let pf = crate::pin::engine::ordered(
+        cdn,
+        crate::pin::engine::Work { items, sizes },
         opts.workers,
         opts.window_bytes,
-        Box::new(move |(product, chunk): &(String, Chunk)| {
-            cdn.chunk(product, chunk).map_err(|e| e.to_string())
-        }),
-    );
+        crate::pin::engine::Tuning::default(),
+    )?;
 
     let mut seen = 0u64;
     let mut last_pct = 0u64;
@@ -1362,7 +1570,7 @@ pub fn hash_build(
     let (sri, stats) = nar::nar_hash(&tree, |idx, w| {
         let f = &plan.files[*idx];
         for _ in 0..f.chunks.len() {
-            let data = pf.next_chunk().map_err(nar::NarError::Fetch)?;
+            let data = dedup.next(|| pf.next_chunk()).map_err(nar::NarError::Fetch)?;
             seen += data.len() as u64;
             w.write_all(&data)?;
         }
@@ -1379,6 +1587,93 @@ pub fn hash_build(
         eprintln!();
     }
     Ok((sri, stats, plan))
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use std::io::Read;
+
+    /// Per-stage cost accounting for a GOG chunk, in ms of CPU per MiB. `#[ignore]`d; run on an idle box:
+    ///
+    ///     PROPNIX_BENCH_SAMPLE=/path/to/a/real/game/file \
+    ///       cargo test --release bench_gog_chunk_pipeline -- --ignored --nocapture
+    ///
+    /// GOG's per-chunk work is: md5 of the COMPRESSED bytes, zlib inflate, then md5 of the DECOMPRESSED
+    /// bytes — so md5 runs over roughly two MiB for every MiB of content, which makes it worth measuring
+    /// separately from the inflate.
+    #[test]
+    #[ignore]
+    fn bench_gog_chunk_pipeline() {
+        let Some(sample) = std::env::var_os("PROPNIX_BENCH_SAMPLE") else {
+            eprintln!("SKIP: set PROPNIX_BENCH_SAMPLE to a real game file (>= 8 MiB)");
+            return;
+        };
+        let Ok(all) = std::fs::read(&sample) else {
+            eprintln!("SKIP: cannot read {sample:?}");
+            return;
+        };
+        let plain: Vec<u8> = all[(2 << 20)..(6 << 20)].to_vec();
+        let mib = plain.len() as f64 / 1048576.0;
+
+        let mut enc =
+            flate2::read::ZlibEncoder::new(std::io::Cursor::new(plain.clone()), flate2::Compression::default());
+        let mut comp = Vec::new();
+        enc.read_to_end(&mut comp).unwrap();
+
+        // Sanity: the production path must reproduce the input.
+        assert_eq!(inflate(&comp).unwrap(), plain);
+
+        let time = |label: &str, reps: usize, mut f: Box<dyn FnMut()>| -> f64 {
+            let t0 = std::time::Instant::now();
+            for _ in 0..reps {
+                f();
+            }
+            let ms = t0.elapsed().as_secs_f64() * 1000.0 / (mib * reps as f64);
+            eprintln!("  {label:<34} {ms:>7.2} ms/MiB");
+            ms
+        };
+
+        eprintln!(
+            "\nGOG chunk pipeline, {:.0} MiB real sample (zlib ratio {:.2}x):",
+            mib,
+            plain.len() as f64 / comp.len() as f64
+        );
+        let m1 = time("md5 of compressed bytes", 16, {
+            let c = comp.clone();
+            Box::new(move || {
+                std::hint::black_box(md5_hex(&c));
+            })
+        });
+        let inf = time("zlib inflate (read_to_end)", 16, {
+            let c = comp.clone();
+            Box::new(move || {
+                std::hint::black_box(inflate(&c).unwrap());
+            })
+        });
+        let pre = time("zlib inflate (pre-sized buffer)", 16, {
+            let c = comp.clone();
+            let n = plain.len();
+            Box::new(move || {
+                let mut out = Vec::with_capacity(n);
+                flate2::read::ZlibDecoder::new(&c[..]).read_to_end(&mut out).unwrap();
+                std::hint::black_box(out);
+            })
+        });
+        let m2 = time("md5 of decompressed bytes", 16, {
+            let p = plain.clone();
+            Box::new(move || {
+                std::hint::black_box(md5_hex(&p));
+            })
+        });
+        eprintln!("  {:<34} {:>7.2} ms/MiB", "SUM (as shipped)", m1 + inf + m2);
+        eprintln!(
+            "  md5 is {:.0}% of it (two passes per chunk); inflate {:.0}%",
+            (m1 + m2) / (m1 + inf + m2) * 100.0,
+            inf / (m1 + inf + m2) * 100.0
+        );
+        eprintln!("  pre-sizing the inflate buffer: {:+.2} ms/MiB", pre - inf);
+    }
 }
 
 #[cfg(test)]
@@ -1566,14 +1861,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    #[test]
-    fn a_chunk_url_never_leaks_its_signed_path() {
-        // secure_link's url_format can put signed parameters in PATH segments, so stripping the query
-        // string is not enough.
-        assert_eq!(
-            redact_chunk("https://cdn.gog.com/token=abc123/expires=99/ab/cd/abcd"),
-            "https://cdn.gog.com/<redacted>"
-        );
-        assert_eq!(redact_chunk("https://h/x?q=1"), "https://h/<redacted>");
-    }
 }

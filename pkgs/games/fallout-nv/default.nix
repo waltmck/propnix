@@ -2,7 +2,7 @@
 # x86_64 natively. Obsidian/Bethesda 2010 title on the Gamebryo/NetImmerse engine (Direct3D 9). ARCH-AGNOSTIC
 # spec: the wine backend + the scope pick the arch-appropriate emulator set, and the SAME Windows payload (a
 # content-addressed FOD) is shared across arches. Windows-only title. Payload = the pinned GOG Galaxy build
-# fetched with gogdl (D15), delivered as the game tree directly (no InnoSetup).
+# fetched by fetchGogGalaxyBuild (D15), delivered as the game tree directly (no InnoSetup).
 #
 # THE 32-BIT STRETCH (SOLVED — renders on aarch64): FalloutNV.exe is a 32-bit (i386) PE — unlike every other
 # title in the suite, which is x86_64. On aarch64 it runs the WoW64 path: wine's i386 PE builtins under box64's

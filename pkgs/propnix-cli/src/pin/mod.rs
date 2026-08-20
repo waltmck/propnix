@@ -10,9 +10,13 @@
 //! Bandwidth is unchanged and cannot be reduced: manifests pin files by MD5/SHA-1, and no SHA-256 can be
 //! derived from those, so every byte must cross the wire once. Only the storage requirement goes away.
 
+pub mod concurrency;
+pub mod dedup;
+pub mod download;
+pub mod engine;
 pub mod gog;
+pub mod hosts;
 pub mod nar;
-pub mod prefetch;
 pub mod retry;
 pub mod steam;
 pub mod versions;

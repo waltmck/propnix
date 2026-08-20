@@ -3,7 +3,7 @@
 # D3D11 → native ARM64EC DXVK → Vulkan. ARCH-AGNOSTIC: the same spec runs on both hosts; the wine backend +
 # the scope pick the arch-appropriate emulator set, and the SAME Windows payload (a content-addressed FOD)
 # is shared across arches. Windows-only title (no native Linux build), so it follows the Outlast template.
-# Payload = the pinned GOG Galaxy build fetched with gogdl (D15), delivered as the game tree directly (no
+# Payload = the pinned GOG Galaxy build fetched by fetchGogGalaxyBuild (D15), delivered as the game tree directly (no
 # InnoSetup).
 #
 # Renders on STOCK wine DEFAULTS (graphics=wayland, d3d=dxvk) — VERIFIED: launches to the first-run gamma-
@@ -25,7 +25,7 @@ mkApp {
   pname = "outlast-2";
   appid = "outlast-2";
   name = "Outlast 2";
-  # gogdl takes the NUMERIC productId (not the slug); pins verified reproducible (fetchGogGalaxyBuild hdr).
+  # the fetcher takes the NUMERIC productId (not the slug); pins verified reproducible (fetchGogGalaxyBuild hdr).
   fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
   # The single x86_64 UE3 game binary (goggame-*.info isPrimary FileTask; no separate 32-bit launcher stub —
   # Outlast2.bat just `start`s this exe). UE3 resolves content relative to the exe location, so cwd = payload

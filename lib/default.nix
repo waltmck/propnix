@@ -168,9 +168,9 @@ pkgs.lib.makeScope pkgs.newScope (
     extractUnityIcon = callPackage ./icons/from-unity.nix { }; # a Unity Linux build's UnityPlayer.png
 
     # ── fetchers (content-addressed FODs) ──
-    fetchGogGalaxyBuild = callPackage ./fetchers/fetchGogGalaxyBuild { }; # GOG Galaxy depot (gogdl; buildId-pinned)
+    fetchGogGalaxyBuild = callPackage ./fetchers/fetchGogGalaxyBuild { }; # GOG Galaxy depot (propnix download; buildId-pinned)
     fetchGogLinuxInstaller = callPackage ./fetchers/fetchGogLinuxInstaller.nix { }; # GOG Linux offline installer (lgogdownloader; latest-only)
-    fetchSteamDepot = callPackage ./fetchers/fetchSteamDepot.nix { }; # Steam SteamPipe depot (DepotDownloader; manifest-pinned, permanently reproducible)
+    fetchSteamDepot = callPackage ./fetchers/fetchSteamDepot.nix { }; # Steam SteamPipe depot (propnix download; manifest-pinned, permanently reproducible)
 
     # The GUEST nixpkgs (D7): x86_64 on every host — a second native instantiation on aarch64, `pkgs` itself
     # on x86_64. Exposed so a game can build a derivation that must be the EMULATED arch (a library loaded

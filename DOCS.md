@@ -104,7 +104,7 @@ triple + the guard semantics.
 | `lib/icons/` | three icon sources over one shared pipeline: `from-png.nix` (game-data raster, preferred), `from-pe.nix` (exe PE resources), `from-unity.nix` (UnityPlayer.png) → hicolor theme + splash |
 | `lib/sealing.nix` | pure-lib data model: the tuning flatten (reason-strip) + the env-seal record + `defaultScrub` |
 | `lib/presets/` | reusable tuning fragments (`unity.framePacing`, `unity.fullscreen`) + `mergeTuning` (collision-throwing compose) |
-| `lib/fetchers/` | `fetchGogGalaxyBuild/` (gogdl FOD, buildId-pinned), `fetchGogLinuxInstaller.nix` (lgogdownloader, latest-only), `fetchSteamDepot.nix` (DepotDownloader, manifest-pinned) + the shared `cred-lib.sh` prologue |
+| `lib/fetchers/` | `fetchGogGalaxyBuild/` (`propnix download gog` FOD, buildId-pinned), `fetchGogLinuxInstaller.nix` (lgogdownloader, latest-only), `fetchSteamDepot.nix` (`propnix download steam` FOD, manifest-pinned) + the shared `cred-lib.sh` prologue |
 | `emulators/` | `wine-hangover` (same source both arches), `fex-dlls` + `galaxy-stub` + `llvm-mingw` + `box64` (aarch64), `dxvk-arm64ec`/`dxvk-x86_64`, `vkd3d-proton-arm64ec`/`vkd3d-proton-x86_64`, `wine-prefix-lower` (the read-only system tree) |
 | `pkgs/propnix-launcher/` | the Rust launcher (GTK4 splash + single-instance + env-seal + mount-table orchestration, PREFIX + THIN modes); links `pkgs/propnix-mount/` (the userns bind/overlay layer) and `pkgs/propnix-prefetch/` (the `posix_fadvise` page-cache warmer — run by the wine INNER over the assembled prefix, PE modules only: `.dll`/`.drv`/`.exe`) as library crates — they are not separate packages |
 | `pkgs/games/<name>/` | one game per directory — `default.nix` (the `mkApp` module) + pinned `versions.json` (the `fetchInfo` fetch matrix) + optional `wine-tuning.nix`/`box64-tuning.nix`/`setup.sh`; auto-discovered into the scope + a flake package/app |
@@ -196,9 +196,9 @@ Drop a directory under `pkgs/games/<name>/` — it's auto-discovered into the sc
   - **`depsBuildId`** (GOG) — some builds install a dependency *into the game directory* (homeworld-rm's
     `language_setup`) from GOG's **global** dependency repository, which `buildId` does not pin: the tree
     can change without the build changing. This records which repository build the pinned `outputHash` was
-    computed against. `fetchGogGalaxyBuild` accepts it but deliberately ignores it — gogdl always fetches
-    whatever the repository currently serves, so drift shows up as an FOD hash mismatch, which is the loud
-    failure we want. The tool inserts and updates it; nobody needs to write it by hand.
+    computed against, and `fetchGogGalaxyBuild` passes it to the download, which ASSERTS the repository
+    still serves that build. So drift is reported as "the dependency repository moved" rather than as an
+    unexplained FOD hash mismatch. The tool inserts and updates it; nobody needs to write it by hand.
   - **`version`** (Steam) — Steam publishes no human version strings, so this carries the branch **build
     id** from appinfo. It is provenance only (the fetcher ignores it), but it is what fills the version
     column of the PR table, the commit message and the update issue. A human may overwrite it with a

@@ -1,0 +1,101 @@
+Subject: [PATCH] Windows: size the call-ret shadow-stack guards by allocation granularity
+
+FEX guards the per-thread call/ret shadow stack with FEX_PAGE_SIZE (4 KiB) pages and derives the
+HandleAccessViolation() recovery window from the same constant. Both assume the host page size is 4 KiB.
+
+On a 16 KiB-page host (aarch64 Linux under wine) that breaks down. The host rounds the MEM_COMMIT of
+CALLRET_STACK_SIZE outwards to its own page size, so the committed r/w region swallows BOTH guard pages:
+
+    reserved  0x7ffffe910000-0x7ffffed11fff   (4 MiB + 2 * 4 KiB)
+    committed 0x7ffffe910000-0x7ffffed13fff   <- starts AT the leading guard, ends 12 KiB past the
+                                                 trailing one; per /proc/PID/maps neither guard exists
+
+Consequences, both observed with Red Dead Redemption 2, whose return-oriented obfuscator drives this
+stack extremely hard:
+
+  * The shadow stack shares host pages with neighbouring allocations, so writes near its ends can touch
+    memory that does not belong to it.
+  * The first genuinely inaccessible byte is at 0x7ffffed14000, which is ABOVE the AllocationEnd computed
+    from FEX_PAGE_SIZE (0x7ffffed12000). HandleAccessViolation() therefore declines, and what should be a
+    routine "call-ret stack inbalance" recovery escapes to the guest as a fatal EXCEPTION_ACCESS_VIOLATION
+    that the guest has no handler for.
+
+GetSystemInfo() cannot be used to size the guards: under wine dwPageSize is reported as 4096 to the guest
+by design, because x86 guest code assumes 4 KiB pages, regardless of the real host page size.
+dwAllocationGranularity is reported honestly (64 KiB) and is >= any page size we are likely to run on, so
+use that for both the guard size and the base offset. This also makes the committed region start on a
+64 KiB boundary, so it no longer rounds outwards at all. Cost is 128 KiB of reserved (uncommitted) address
+space per thread.
+
+With this applied, RDR2 initialises to the point of calling SteamAPI_Init() with zero access violations,
+where before it died during startup.
+
+NOTE: FEX explicitly does not support large page sizes, so this may not be upstreamable as-is; it is kept
+here so the behaviour and the measurements are written down.
+--- a/Source/Windows/Common/CallRetStack.h
++++ b/Source/Windows/Common/CallRetStack.h
+@@ -1,12 +1,37 @@
+ // SPDX-License-Identifier: MIT
+ #pragma once
+ 
++#include <algorithm>
+ #include <FEXCore/Core/Context.h>
+ #include <FEXCore/Utils/Allocator.h>
+ #include <FEXCore/Utils/LogManager.h>
+ #include <FEXCore/Debug/InternalThreadState.h>
+ 
+ namespace FEX::Windows::CallRetStack {
++// GUARD SIZING ON A LARGE-PAGE HOST.
++//
++// The guards either side of the shadow stack must be at least one HOST page, and the committed region
++// must start on a host-page boundary — otherwise the host rounds the commit outwards and swallows them.
++// Observed on a 16 KiB-page host (wine on aarch64): with 4 KiB guards, /proc/PID/maps shows the committed
++// r/w region starting AT the leading guard's address and ending 12 KiB past the trailing one, i.e. NEITHER
++// GUARD EXISTS. The shadow stack then silently overruns into the rounding slack and only faults once it
++// leaves the whole reservation — an address outside the window HandleAccessViolation() checks, so the
++// routine "call-ret stack inbalance" recovery declines and the overflow escapes to the guest as a fatal
++// access violation. (RDR2's return-oriented obfuscator overflows this stack constantly, which is how this
++// surfaced.)
++//
++// GetSystemInfo() cannot be used to size this: under wine it reports dwPageSize=4096 to the guest by
++// design (x86 code assumes 4 KiB) regardless of the real host page size. dwAllocationGranularity IS
++// reported honestly (64 KiB) and is >= any page size we might run on, so use that. Cost is 128 KiB of
++// reservation per thread, none of it committed.
++inline uint64_t CallRetGuardSize() {
++  static const uint64_t Size = [] {
++    SYSTEM_INFO Info {};
++    ::GetSystemInfo(&Info);
++    return std::max<uint64_t>(FEXCore::Utils::FEX_PAGE_SIZE, Info.dwAllocationGranularity);
++  }();
++  return Size;
++}
+ struct CallRetStackInfo {
+   uint64_t AllocationBase;
+   uint64_t AllocationEnd;
+@@ -16,21 +41,21 @@
+ CallRetStackInfo GetInfoThread(FEXCore::Core::InternalThreadState* Thread) {
+   uint64_t Base = reinterpret_cast<uint64_t>(Thread->CallRetStackBase);
+   // Leave some room from the base for the default location to allow for underflows without constant exceptions
+-  return {Base - FEXCore::Utils::FEX_PAGE_SIZE, Base + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + FEXCore::Utils::FEX_PAGE_SIZE,
++  return {Base - CallRetGuardSize(), Base + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + CallRetGuardSize(),
+           Base + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE / 4};
+ }
+ 
+ void InitializeThread(FEXCore::Core::InternalThreadState* Thread) {
+   // Allocate the call-ret stack with guard pages on both sides
+-  const void* CallRetStackAlloc = ::VirtualAlloc(nullptr, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + 2 * FEXCore::Utils::FEX_PAGE_SIZE,
++  const void* CallRetStackAlloc = ::VirtualAlloc(nullptr, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + 2 * CallRetGuardSize(),
+                                                  MEM_RESERVE | MEM_TOP_DOWN, PAGE_NOACCESS);
+ 
+   FEXCore::Allocator::VirtualName("FEXMem_CallRetStacks", CallRetStackAlloc,
+-                                  FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + 2 * FEXCore::Utils::FEX_PAGE_SIZE);
+-  FEXCore::Allocator::VirtualTHPControl(CallRetStackAlloc, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + 2 * FEXCore::Utils::FEX_PAGE_SIZE,
++                                  FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + 2 * CallRetGuardSize());
++  FEXCore::Allocator::VirtualTHPControl(CallRetStackAlloc, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + 2 * CallRetGuardSize(),
+                                         FEXCore::Allocator::THPControl::Disable);
+ 
+-  Thread->CallRetStackBase = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(CallRetStackAlloc) + FEXCore::Utils::FEX_PAGE_SIZE);
++  Thread->CallRetStackBase = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(CallRetStackAlloc) + CallRetGuardSize());
+   ::VirtualAlloc(Thread->CallRetStackBase, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE, MEM_COMMIT, PAGE_READWRITE);
+ 
+   Thread->CurrentFrame->State.callret_sp = GetInfoThread(Thread).DefaultLocation;

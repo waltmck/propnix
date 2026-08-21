@@ -1,15 +1,26 @@
 # galaxy-stub — graceful no-op replacements for the GOG Galaxy SDK DLLs that some GOG games bundle.
 #
-# THE PROBLEM. Several GOG titles statically import GOG's Galaxy SDK (Galaxy64.dll / Galaxy.dll) and the
-# older "POPS" online-services client (pops_api.dll). On startup the SDK spins up its offline network/RPC
-# layer, which under wine faults with a NULL-pointer write inside builtin rpcrt4.dll (write to 0x10) — the
-# process dies before it renders a frame. Reproduced on Prison Architect (Prison Architect64.exe):
-#   wine: Unhandled page fault on write access to 0000000000000010 ... in rpcrt4.
+# WHY. A packaged game must run FULLY OFFLINE, with no cloud dependencies — that is a design principle of
+# this repo, not a per-game workaround. Several GOG titles statically import GOG's Galaxy SDK
+# (Galaxy64.dll / Galaxy.dll) and the older "POPS" online-services client (pops_api.dll), which spin up a
+# network/RPC layer at startup and reach for GOG's services. Neutralizing that is the same policy propnix
+# applies to Steam builds by masking `steam_api64.dll` so the loader reports "no online subsystem": the
+# game plays, nothing phones home, and the result does not depend on a service being reachable — today or
+# in ten years, which is the whole point of packaging these reproducibly.
 #
 # WHY A STUB (and why it can't be an empty DLL). The games *statically* import specific symbols, so the DLL
 # must export exactly those, and the SDK "init" path must return cleanly without doing any RPC/socket work.
 # We build tiny native PE DLLs that export the imported symbols and do nothing but hand back benign,
-# "offline / not-signed-in" values. No RPC is ever attempted, so the rpcrt4 crash cannot happen.
+# "offline / not-signed-in" values. No RPC is ever attempted. Static imports also cannot be turned off with
+# WINEDLLOVERRIDES — wine's loader resolves them from the exe's own directory first — so a bound stub is
+# the only mechanism that works.
+#
+# NOT A CRASH WORKAROUND. The SDK's RPC init used to fault wine's builtin rpcrt4 (`page fault on write
+# access to 0000000000000010`), which is how these stubs were first discovered. That was an ARM64EC
+# variadic exit-thunk defect in the compiler, fixed by the toolchain backport in emulators/llvm-mingw
+# (RESEARCH §23) — VERIFIED 2026-08-21 by running Prison Architect, the original casualty, with the real
+# Galaxy64.dll/pops_api.dll loaded: it reaches a window with no fault. So nothing here is load-bearing for
+# stability; keep it for the offline guarantee, and do not "fix" a crash that no longer exists.
 #
 # THE TWO EXPORT SHAPES (dumped from the games' real DLLs with winedump -j import). Different SDK builds
 # expose the API differently, so the stub exports the UNION so it is a drop-in for either:
@@ -102,11 +113,23 @@ runCommand "galaxy-stub"
     ${cc64} -O2 -shared -o "$out/Galaxy64.dll" ${srcDir}/galaxy_stub.c galaxy64.def
     ${cc64} -O2 -shared -o "$out/pops_api.dll" ${srcDir}/pops_stub.c
 
-    # ── 32-bit stub (Galaxy.dll) — needs the reindexed i386 builtins for __alloca (see note above) ──
+    # ── 32-bit stub (Galaxy.dll) — reindex the i386 builtins only if they actually need it ────────────
+    # On the pinned llvm-mingw (20260616 and 20260812 alike) the i386 archive is clean — 150 members, zero
+    # duplicate names, `__alloca` in the armap — and a plain i686 link succeeds, so the workaround is
+    # skipped. Keep it gated rather than
+    # unconditional: re-archiving is not free of risk — doing it to the ARM64EC builtins on this same
+    # toolchain DESTROYS EC symbol resolution, because it flattens the `obj.arm64ec/` member paths
+    # upstream now uses to disambiguate (RESEARCH §22).
     i386_rt="$(ls ${llvmMingw}/lib/clang/*/lib/windows/libclang_rt.builtins-i386.a | head -1)"
-    mkdir -p rt386
-    python3 ${reindexPy} "$i386_rt" rt386
-    ( cd rt386 && ${llvmAr} rcs libclang_rt.builtins-i386.a $(cat MANIFEST) )
-    ${cc32} -O2 -shared -o "$out/Galaxy.dll" ${srcDir}/galaxy_stub.c galaxy32.def \
-      -Wl,--start-group,"$PWD/rt386/libclang_rt.builtins-i386.a",--end-group
+    rt_args=()
+    if [ "$(${llvmAr} t "$i386_rt" | sort | uniq -d | wc -l)" != 0 ]; then
+      echo "i386 builtins have duplicate member names — reindexing for __alloca"
+      mkdir -p rt386
+      python3 ${reindexPy} "$i386_rt" rt386
+      ( cd rt386 && ${llvmAr} rcs libclang_rt.builtins-i386.a $(cat MANIFEST) )
+      rt_args=(-Wl,--start-group,"$PWD/rt386/libclang_rt.builtins-i386.a",--end-group)
+    else
+      echo "i386 builtins index is upstream-correct — linking without the reindex workaround"
+    fi
+    ${cc32} -O2 -shared -o "$out/Galaxy.dll" ${srcDir}/galaxy_stub.c galaxy32.def "''${rt_args[@]}"
   ''

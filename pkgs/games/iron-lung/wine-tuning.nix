@@ -21,8 +21,8 @@
 
   # De-Galaxy: Iron Lung bundles the GOG Galaxy SDK as a Unity plugin (Iron Lung_Data/Plugins/x86_64/
   # Galaxy64.dll) and GalaxyConfig.json has `stats_on_init: true`, so the engine initializes the SDK at
-  # startup — whose offline RPC init faults wine's builtin rpcrt4 before the first frame on the winefex
-  # (aarch64) path. Bind the graceful no-op stub over it (aarch64 only; omitted on x86_64 native wine).
+  # startup and would talk to GOG's services. Bind the no-op stub over it so the game stays fully offline
+  # (aarch64 only; omitted on x86_64 native wine — see emulators/galaxy-stub for the policy).
   galaxyStubDlls = [
     "Iron Lung_Data/Plugins/x86_64/Galaxy64.dll"
   ];

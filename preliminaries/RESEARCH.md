@@ -836,18 +836,80 @@ gives a clean 60. So DXVK ≈ GL for HK; the value of DXVK is the working Vulkan
   2.7.1 (nixpkgs `dxvk_2.src`). Verified all five DLLs build to `IMAGE_FILE_MACHINE_ARM64EC (0xA641)` with
   populated CHPEMetadata (`llvm-readobj`; a naive COFF-machine read shows `0x8664` — EC images present as
   AMD64 to the machine check, distinguished by CHPE, the same hybrid mechanism as wine's ntdll, §15).
-- **The toolchain blocker and its fix.** Linking any EC C/C++ DLL failed `undefined symbol:
-  #__chkstk_arm64ec`; x86_64 similarly failed `___chkstk_ms`. Root cause: llvm-mingw ships
-  `libclang_rt.builtins-{aarch64,x86_64}.a` as ARM64X **hybrid** archives whose object members appear under
-  **duplicate names**, so `llvm-ar`/`llvm-ranlib`'s symbol index drops the `#`-mangled EC symbols (and
-  `___chkstk_ms`). Fix (`reindex-ar.py`, baked into `llvm-mingw.nix` postFixup): extract members under
-  unique names and re-archive with `llvm-ar rcs` → the index then includes them (verified 0→395 EC symbols;
-  `#__chkstk_arm64ec` present). `--whole-archive` is NOT a fix (fails `unknown file type:
-  outline_atomic_*.S.obj`). mstorsjo llvm-mingw 20260616 (LLVM 22) suffices — no need for bylaws' fork.
+- **The builtins-archive blocker: `undefined symbol: #__chkstk_arm64ec` (EC symbol).** Any EC C/C++ link can
+  fail on this (x86_64 equivalently on `___chkstk_ms`) whenever the ARM64 and ARM64EC objects inside
+  `libclang_rt.builtins-{aarch64,x86_64}.a` end up sharing a **member name**: `llvm-ar`'s symbol index then
+  drops the `#`-mangled EC entries. Two distinct causes, and only one is upstream's:
+  - **llvm-mingw ≤ 20260616 (LLVM ≤ 22) shipped the collision.** Fix = `reindex-ar.py` (extract members
+    under unique names, re-archive with `llvm-ar rcs`; verified 0→395 EC symbols recovered).
+  - **20260812 (LLVM 23) fixes it upstream** by disambiguating with a path instead of a name —
+    `chkstk.S.obj` vs `obj.arm64ec/chkstk.S.obj`, 290 members each, zero duplicates — so the archive links
+    exactly as shipped. Running `reindex-ar.py` on top now *causes* the bug, because flattening
+    `obj.arm64ec/chkstk.S.obj` to `0001_chkstk.S.obj` loses what lld keys EC resolution on. The postFixup
+    is therefore **conditional on real duplicate member names** and self-disables on a fixed toolchain.
+  - **`dontStrip = true` is load-bearing, not cosmetic.** nixpkgs' fixupPhase strips *before* it runs
+    postFixup, and `strip` on a static archive rewrites it while flattening member names to **basenames** —
+    which collapses all 290 `obj.arm64ec/` members onto their ARM64 namesakes and manufactures the very
+    collision upstream removed. The raw tarball links; the stripped copy does not, which is what localises
+    it to us rather than to mstorsjo.
+  - **Read the symptom correctly:** meson reports this as `library 'd3d9' not found`, because
+    `find_library` is a **link test** — the library is present and intact. `--whole-archive` is not a fix
+    either (fails `unknown file type: outline_atomic_*.S.obj`).
 - **meson cross-file:** `cpu_family='aarch64'` (meson has no `arm64ec`; this also keeps DXVK's 32-bit x86
   stdcall branch off), `system='windows'`, binaries = the `arm64ec-w64-mingw32-*` drivers + `llvm-ar`. One
   unrelated **LLVM 22 libc++** workaround: an empty piecewise key-tuple in `dxvk_pipemanager.cpp` trips
   `__try_key_extraction.h` → pass the key explicitly (`std::tuple()`→`std::tuple(key)`); drop if libc++ ≤ 21.
+- **libc++ 23 removed transitive includes**, so pinned third-party sources that reached a `std::` name
+  through some *other* header stop compiling. This is an upstream source bug newly exposed, not a toolchain
+  fault, and it hits every C++ consumer at once — each needs the include it actually uses:
+  `dxvk` `src/util/config/config.cpp` → `<algorithm>` (`std::transform`); `vkd3d-proton`
+  `subprojects/dxil-spirv/scratch_pool.hpp` → `<exception>` (`std::terminate`); `fex-dlls`
+  `FEXCore/Source/Common/StringConv.h` → `<cstdlib>` (`std::strtoull`). Each is applied as an idempotent
+  `grep -q … || sed -i` in postPatch, so it no-ops once upstream fixes it. Prefer this to a blanket
+  `-include` flag: the surgical form documents which file needs what, and a build stops at the *first*
+  error, so a blanket shim would hide the rest.
+  - FEX needed two: `<cstdarg>` in `Source/Windows/Common/CRT/IO.cpp` (va_start), and `<cstdlib>` in
+    `CRT/Alloc.cpp` — the one CRT file that never included it, so it relied on `<cstdint>` to drag in
+    stdlib.h. Without that declaration its `void* malloc(size_t)` definitions get **C++ mangling** rather
+    than C linkage, and the link fails `undefined symbol: malloc (EC symbol)` from libc++.a. That reads
+    like a missing allocator and is not one: FEX implements all four on rpmalloc. The include must go
+    AFTER lines 2-3 (`#define _SECIMP`/`_CRTIMP` to empty), or malloc comes back `dllimport` and the
+    definition still won't match.
+- **fex-dlls is STRUCTURALLY blocked on libc++ 23, and it is the one consumer the bump does not carry.**
+  Past the includes, the EC DLL fails to link: `undefined symbol: __declspec(dllimport) GetACP` /
+  `GetLocaleInfoEx`, referenced from `libc++.a(locale_win32.cpp.obj)`. libc++ 23's Windows locale backend
+  calls kernel32, but `Source/Windows/ARM64EC/CMakeLists.txt` links **`ntdll_ex` only** — deliberately, and
+  it is why FEX ships its own CRT at all: `libarm64ecfex.dll` is loaded by wine's ntdll during process
+  init, before kernel32 exists, so acquiring a kernel32 import is not an option. This is a real conflict
+  between a freestanding PE and a hosted libc++, not an oversight to patch around. FEX-2608 (2026-08-05)
+  predates llvm-mingw 20260812 and so is unlikely to have adapted.
+  **Resolution: don't take LLVM 23 at all — backport the fix onto stable 22.1.8**
+  (`emulators/llvm-mingw/patched-22.nix`). The deciding argument is *maintenance surface*, not build time:
+  an RC pin's cost is recurring and unbounded (every libc++ change lands on our pinned third-party
+  sources) while a source build is a bounded one-time cost that lives in the store. Two facts make the
+  backport cheap and safe: #190933 touches **2 files under `llvm/lib/Target/AArch64/` and no public
+  headers**, and `bin/<triple>-w64-mingw32-clang` is a symlink to `clang-target-wrapper.sh` which execs a
+  **sibling** `clang` — so rebuilding clang/lld from the same commit (`ca7933e47d3a`) and overlaying
+  `bin/` + `lib/` redirects every target driver while keeping the mingw sysroots, libc++ 22 and
+  `lib/clang/22/lib/windows` compiler-rt exactly as mstorsjo shipped them. The graft asserts itself:
+  clang must report 22.1.8, all four target drivers must run, and a variadic exit thunk is checked to
+  confirm it `memcpy`s the payload. Consequently there are **no** libc++-compat patches in
+  dxvk/vkd3d/fex-dlls and no toolchain skew.
+
+  **VERIFIED end-to-end (2026-08-21).** The rebased compiler emits the corrected thunk —
+  `add x8, x5, #0xf` / `bl #__chkstk_arm64ec` / `sub x0, sp, x15, lsl #4` / `mov x1, x4` / `mov x2, x5` /
+  `bl #memcpy`, and no `stp x4, x5` — matching the LLVM 23 shape instruction for instruction. wine built on
+  it ships that codegen in `sechost.dll`, and the reproducer returns a real SCM handle
+  (`[1] -> 00007ffffe476610 err=0`, `[3] done, no fault`) where it previously wrote 0x10.
+
+  Two traps in *checking* this, both of which produced a false negative before the real answer surfaced:
+  * **Read the call target from the RELOCATIONS, not the disassembly.** In an unlinked object
+    `llvm-objdump -d` renders the call as `bl 0x54 <.wowthk$aa+0x54>`; `#memcpy` appears only in
+    `llvm-objdump -r`. Grepping the disassembly for `bl .*memcpy` can never match, and reads as "the patch
+    did not take" against a perfectly good compiler.
+  * **A two-clause assertion can pass for the wrong reason.** Checking "has memcpy AND lacks `stp x4,x5`"
+    against the unpatched compiler proves only that it rejects bad input — the memcpy clause was false in
+    *both* directions. Always confirm an assertion ACCEPTS a known-good input too, or it is not validated.
 - **Applied perf patch (`util_bit.h`):** arm64ec clang defines neither `__aarch64__` nor `_M_ARM64EC`, so
   DXVK detects *neither* x86 nor ARM64 and its spinlocks (`sync_spinlock.h`) fall to a **hintless
   busy-loop** instead of the ARM64 `yield`. Add `|| defined(__arm64ec__)` to the ARM64 `#elif` → spin loops
@@ -897,3 +959,248 @@ caution cleared; the fork's "wrong page size" warning is benign). ntdll is ARM64
 cherry-pick couldn't even compile). DXVK inits on Apple M2 (Honeykrisp) → D3D11 FL 11_1; `wine-prefix-lower`
 rebuilt reproducibly with the FEX-2607 DLLs. CPU at the 60-cap menu ≈ 0.5 cores / ~760 MB RSS (down from
 ~1.0 core / ~1 GB pre-bump — FEX-2607 memory work + the DXVK spin-`yield` patch).
+
+## 23. The ARM64EC rpcrt4 context-handle fault — a variadic call destroyed by its exit thunk (FIXED by a toolchain bump, 2026-08-21)
+
+Every RPC client call that passes more than four arguments through rpcrt4's stubless interpreter is
+corrupted on ARM64EC. It surfaces where an `[out]` context handle is stored through:
+
+```
+NdrContextHandleUnmarshall+0xcc  [dlls/rpcrt4/ndr_marshall.c:7024]  `str xzr, [x19]`  x19 = 0x10
+client_do_args                   [dlls/rpcrt4/ndr_stubless.c:529]
+```
+
+That kills the whole service-control-manager surface — no installer that registers a service can run —
+and the GOG Galaxy SDK. Reproducer, twelve lines of C:
+`emulators/wine-hangover/tests/rpcrt4-context-handle.c`.
+
+### Mechanism
+
+A delay-load slot starts out holding the **linker's x64 delay thunk** (measured: sechost's slot held
+sechost+0x2c5c2, inside its X64 code range). The ARM64EC call checker classifies that as non-EC, so the
+FIRST call through the slot is routed via the exit thunk clang generated for the call site — and that
+thunk is **fixed-arity even though the callee is variadic**:
+
+```
+stp x4, x5, [sp, #0x20]      /* the varargs pointer and size, into argument slots 5 and 6 */
+```
+
+so x4/x5 occupy the x64 argument slots and the real stack arguments never travel. The x64 fast-forward
+sequence then re-enters EC, clang's entry thunk faithfully does `add x4, x4, #0x20`, and the interpreter
+reads the spilled pair as arguments 5 and 6. Argument 6 is the context handle, so it receives x5.
+**0x10 is the varargs size** (`mov w5, #0x10` — two 8-byte stack arguments); the faulting address is
+literally that register.
+
+Resolution happens *inside* that already-corrupted call, which is why patching the slot afterwards cannot
+help: by then the arguments are gone.
+
+Probe on the ARM64EC `NdrClientCall2` entry, before and after the fix:
+
+```
+broken   x4=7ffffe41fd40  x5=0     lr=<rpcrt4 entry-thunk range>  slots 0 0 7ffffe41fd60 10 …
+fixed    x4=7ffffe41fd60  x5=10    lr=<sechost EC stub>           slots 0 0 …0001 <&handle> …
+```
+
+`x5` is the discriminator: an EC caller sets it to the stack-argument byte size, clang's entry thunk
+zeroes it. Broken shows `x5=0` plus the caller's own x4/x5 sitting in parameter slots 2 and 3; fixed shows
+`x5=0x10`, a return address directly in sechost's EC stub, and the real arguments in place.
+
+### Fix: bump the toolchain, and carry NO wine patch
+
+**This is an LLVM bug, and LLVM fixed it.** `llvm/llvm-project#190933` (merged 2026-05-17) makes the
+variadic exit thunk allocate a dynamically-sized frame and **memcpy the x4/x5 payload onto the x64
+stack**, which is what the entry thunk's `+0x20` always assumed and what MSVC has always done. Its PR
+text says so outright: "the generated exit thunk must memcpy these to the x86-64 stack. Current MSVC does
+this correctly." (#179812, superseded, adds that MSVC does not even use x4 — it memcpys from SP using x5.)
+LLVM's source had carried the matching admission all along:
+`FIXME: x5 isn't actually used by the x64 side; revisit once we have proper isel for varargs`.
+
+`emulators/llvm-mingw` is therefore pinned to **20260812 = llvmorg-23.1.0-rc3**, the first release with
+it. Confirmed at instruction level rather than by version number — compiling a variadic EC call with both
+toolchains and diffing `$iexit_thunk$cdecl$i8$varargs`:
+
+| | 22.1.4 | 23.1.0-rc3 |
+| --- | --- | --- |
+| new undefined syms | — | `#memcpy`, `#__chkstk_arm64ec` |
+| body | `stp x4, x5, [sp, #0x20]` | `bl __chkstk_arm64ec` / `sub sp, sp, x15 lsl 4` / `mov x1,x4` / `mov x2,x5` / `bl memcpy` / `sub sp, sp, #0x20` |
+| length | 48 bytes | 164 bytes |
+
+and the same memcpy is present in the shipped `sechost.dll`'s thunk after the wine rebuild.
+
+**Verified end to end with NO wine patch:** the reproducer returns a real SCM handle and exits 0, and the
+Rockstar launcher installer completes (54 files, service registered). An earlier wine-side workaround
+(snapping rpcrt4's delay imports in the loader) has been **deleted** — it worked, but carrying a
+work-around for a fixed compiler bug is how a tree accumulates confusing archaeology.
+
+**The bump required the toolchain unification first**, and this is the non-obvious part. nixpkgs builds
+wine on aarch64 with its OWN copy of llvm-mingw, so bumping `emulators/llvm-mingw` alone would not have
+touched wine at all. Worse, LLVM 23's new thunk emits `#__chkstk_arm64ec` — precisely the symbol
+propnix's `reindex-ar.py` restores to the builtins archive index — so wine on nixpkgs' unpatched copy
+would have failed to LINK. `emulators/wine-hangover` now substitutes our toolchain into wine's
+`nativeBuildInputs` (nixpkgs' is a `let` binding, unreachable by `.override` or an overlay), with an
+assert so a nixpkgs restructure fails loudly.
+
+### Two dead ends, recorded so they are not retried
+
+**Do not re-tune the offsets in ndr_stubless.c.** `stp x2, x3, [x4, #-0x10]! / mov x2, x4` is correct:
+`x4 = first stack argument` is the contract both entry paths deliver, because clang's entry thunk
+normalises it with `add x4, x4, #0x20`. Shifting the body by 0x20 fixes a delay-imported caller by
+breaking every normally-imported one — and only **4** DLLs delay-import rpcrt4 (advapi32, crypt32,
+ntoskrnl.exe, sechost) against roughly **24** that import it normally with widl client stubs. Hangover
+issue #225's reporter tried exactly this patch; so did we, before withdrawing it.
+
+**Redirecting only at resolution time is insufficient.** Storing the EC address in the IAT when
+`LdrResolveDelayLoadedAPI` resolves does nothing for the first call, which is the one that faults.
+
+### Prior art
+
+[Hangover #225](https://github.com/AndreRH/hangover/issues/225), "OpenSCManagerW crashes in ARM64EC when
+called from x86_64" (open since 2026-04-06), is this exact bug down to the same function. AndreRH
+independently reproduced the same disassembly and confirmed the delay-load connection by switching
+sechost from `DELAYIMPORTS = rpcrt4` to a normal import — a two-line workaround equivalent in effect to
+the one we deleted. Jacek Caban identified the LLVM root cause there. No prior discussion exists for §24
+or §25.
+
+## 24. RtlIsEcCode turns any wild pointer into a stack overflow (measured 2026-08-20, fixed)
+
+`RtlIsEcCode` indexes the PEB's EC code bitmap with no upper bound, and `alloc_arm64ec_map` sizes that
+bitmap to cover exactly the user address space — so a pointer past the end of user space reads off the end
+of the mapping. That would be a benign out-of-bounds read anywhere else, but `RtlIsEcCode` runs while an
+exception is being DISPATCHED, so a fault inside it re-enters dispatch, which calls `RtlIsEcCode` again on
+the same value, until the thread's stack is gone. One stray pointer therefore becomes an unrecoverable
+`STATUS_STACK_OVERFLOW` instead of an access violation the application could have handled.
+
+Measured with RDR2: one genuine guest fault turned into
+
+```
+   1 x c0000005  rip=0000000146d1d06c   the real fault, inside RDR2.exe, reading an unmapped page
+1752 x c0000005  rip=00006fffffa3a6dc   RtlIsEcCode+0x10, over and over
+   1 x c00000fd  STATUS_STACK_OVERFLOW  the thread dies
+```
+
+The wild value was `0x1cc00e24a0000`, recovered while unwinding the guest stack — at a 16K page size that
+is ~0.9 TB past the end of the bitmap. **Raising the thread-stack floor to 8 MB did not help** (the
+recursion consumed that too), which is what distinguished unbounded recursion from a stack that was merely
+too small — worth remembering as the diagnostic, since the first symptom looks exactly like patch 0001's
+territory.
+
+Fixed by `emulators/wine-hangover/patches/0004-ntdll-arm64ec-bounds-check-RtlIsEcCode.patch`, which
+queries `SystemBasicInformation.HighestUserAddress` once and returns FALSE above it. After the fix the same
+run produces zero access violations and no stack overflow.
+
+## 25. RDR2 under wine+FEX — where it stops now, and it is NOT the varargs bug (2026-08-21)
+
+With §23 and §24 fixed, the **whole install chain works** on aarch64:
+
+* `Rockstar-Games-Launcher.exe /s /t` completes, exit 0, **54 files** in
+  `C:\Program Files\Rockstar Games\Launcher`, and — the step that used to fault — the service is
+  registered: `[System\ControlSet001\Services\Rockstar Service]` with
+  `ImagePath="…\RockstarService.exe"`. No revert.
+* `Social-Club-Setup.exe /silent` completes, installing `socialclub.dll`,
+  `SocialClubVulkanLayer.dll`, `SocialClubHelper.exe` and the D3D12 renderer in both the 32- and
+  64-bit trees.
+
+Prerequisite for the launcher installer: it spawns a **32-bit** helper, so the prefix needs the
+syswow64/WinSxS staging propnix does (§ the 32-bit WoW64 enabler). A bare build-tree prefix fails with
+`could not load kernel32.dll` even though every i386 builtin exists; populating `syswow64` with symlinks
+to `dlls/*/i386-windows/*.dll` is enough for a manual test.
+
+`RDR2.exe` itself now gets past DRM/launcher resolution into its own code and stops at:
+
+```
+err:seh:call_seh_handlers invalid frame 7fff00000090 (00007FFFFE218000-00007FFFFE320000)
+err:seh:NtRaiseException Exception frame is not in stack limits => unable to dispatch exception.
+```
+
+**Localised.** Instrumenting the failing unwind step gives:
+
+```
+FRPROBE ControlPc=6fffffa57944 ImageBase=6fffff970000 Rsp=7fff00000090 Rip=0 isEc(pc)=1
+```
+
+ControlPc is ntdll RVA 0xe7944, which resolves to **`$iexit_thunk$cdecl$i8$i8i8i8+0x18`** — a
+compiler-generated **EC->x64 exit thunk**. So `virtual_unwind` cannot unwind THROUGH an exit-thunk frame:
+it yields `Rip=0` and a garbage `Rsp`, and `is_valid_arm64ec_frame` then rejects the frame and dispatch
+gives up. The game takes one access violation in its own code first, which is expected for anti-tamper
+that probes memory deliberately and catches the fault; wine cannot deliver it because unwinding the mixed
+EC/x64 stack breaks at the boundary.
+
+**LLVM 23 does NOT fix this.** Re-tested on llvmorg-23.1.0-rc3 (which does fix §23): the failure is
+byte-for-byte identical, same frame value `7fff00000090`. So it is an independent defect, not a second
+symptom of the varargs thunk — even though the new thunk has a dynamically-sized frame, both old and new
+are FP-based (`add fp, sp, #48`) and the unwinder fails on them equally.
+
+So this is the same FAMILY as §23 — the EC<->x64 thunks — but in the unwinder rather than the argument
+marshalling, and it sits in wine's most safety-critical path. A fix belongs in
+`signal_arm64ec.c`'s unwind handling of exit-thunk frames (they need the same special-casing the entry
+side gets), and it should not be attempted without a way to regression-test exception handling broadly.
+That is why RDR2 stays `meta.broken`.
+
+### 25.1 The RDR2 access violation is NOT an exception the game expects (measured 2026-08-21)
+
+The earlier assumption — that the AV is anti-tamper deliberately probing memory and catching the fault —
+is **wrong**, and the consequence matters: **fixing the exit-thunk unwind will not make RDR2 run.** It
+converts "unable to dispatch exception" into an ordinary unhandled crash at the same instruction.
+Three independent checks, two of them at runtime:
+
+* **No `.pdata` coverage.** All 191,762 `RUNTIME_FUNCTION` entries within the exception directory were
+  parsed; none covers the faulting RVA (it lives in a 19.4 MB second `.text` appended AFTER the original
+  link). Corroborated by `llvm-readobj --unwind`, and the same parser positively finds 493
+  `UNW_FLAG_EHANDLER` entries elsewhere, so it is not silently failing.
+* **No dynamic function table.** Wine's `RtlLookupFunctionEntry` consults tables registered via
+  `RtlAddFunctionTable`; the trace shows the unwinder walking past this frame without calling a handler.
+* **No vectored handler.** The protector imports `AddVectoredExceptionHandler`, but wine's
+  `call_vectored_handlers` TRACEs on the `seh` channel that was enabled, and that line never appears
+  between `dispatch_exception` and `call_seh_handlers`.
+
+**Disposition: we do NOT patch this.** It belongs upstream — it sits in wine's most safety-critical path,
+and the risk of carrying and maintaining a local patch outweighs the benefit when it is not even the
+blocker. Filing a bug report upstream is still worthwhile (no maintenance burden). For anyone who does:
+wine's ARM64EC unwinder is Julliard's (Feb-Mar 2024) and Jacek Caban owns the 2026 work on this boundary;
+note also that wine's own suite already waives the `Rbp` assertion on arm64ec at a thunk boundary
+(`dlls/ntdll/tests/exception.c:5911`, "x29 modified by entry thunk"), and no test unwinds through an
+*exit* thunk at all. Microsoft documents cross-boundary unwinding only for ENTRY thunks; corsix's ARM64EC
+notes deliberately omit unwinding entirely, so there is no public specification of this case.
+
+Adding `.seh` unwind info to FEX's dispatch stubs would NOT help: `Source/Windows/ARM64EC/Module.S`
+switches to the emulator stack, so FEX's own frames are structurally absent from the guest-stack unwind —
+consistent with the observed `ControlPc` landing in ntdll's `$iexit_thunk$…` rather than in
+`libarm64ecfex.dll`.
+### 25.2 What actually blocked RDR2: FEX's shadow-stack guards on a 16 KiB-page host (fixed 2026-08-21)
+
+**The blocker was never wine's exception delivery — it was a FEX memory bug**, and the fix is
+`emulators/fex/patches/0001-callret-stack-guards-must-be-host-page-sized.patch`.
+
+FEX guards the per-thread call/ret shadow stack with `FEX_PAGE_SIZE` (a hardcoded 4096) and derives the
+`HandleAccessViolation()` recovery window from the same constant. On this 16 KiB-page host the host rounds
+the `MEM_COMMIT` outwards and swallows BOTH guards — wine's own `+virtual` view dump shows the committed
+r/w region starting AT the leading guard's address and ending 12 KiB past the trailing one:
+
+```
+View: 0x7ffffe910000-0x7ffffed11fff (valloc)     reserved 4 MiB + 2*4 KiB
+      0x7ffffe910000-0x7ffffe910fff  -----       intended leading guard
+      0x7ffffe911000-0x7ffffed10fff  c-rw-       4 MiB of data  => Base
+      0x7ffffed11000-0x7ffffed11fff  -----       intended trailing guard
+      AllocationEnd = Base + 4 MiB + 4 KiB     = 0x7ffffed12000
+      observed fault                            = 0x7ffffed14000   (8 KiB higher)
+```
+
+`HandleAccessViolation` requires `Address < AllocationEnd`, so it declines and a routine overflow escapes
+to the guest as a fatal AV. `GetSystemInfo()` cannot size this correctly: **under wine `dwPageSize` is
+reported as 4096 to the guest by design** (x86 code assumes 4 KiB) — measured, not assumed.
+`dwAllocationGranularity` (64 KiB) is honest, so the patch uses that for the guards and the base offset,
+which also makes the commit host-aligned so it stops rounding outwards.
+
+**Result: RDR2 went from 48 log lines and a fatal AV to 8158 lines, zero faults, full engine init and a
+live renderer.** Note the recovery path logs no "call-ret stack inbalance" afterwards, so the fix works by
+making the region properly aligned and guarded rather than by letting the recovery fire — i.e. the
+4 KiB-guard layout was also a corruption hazard, not merely a defeated guard.
+
+Method note: `/proc/PID/maps` **coalesces** adjacent wine views with equal permissions, which made this
+look like one 4 MiB region and sent two hypotheses down dead ends (the `EcCodeBitMap`, then LookupCache's
+L2 index — both refuted arithmetically). Wine's `WINEDEBUG=+virtual` view dump is the reliable view.
+
+Separate latent bug, same family, worth reporting upstream: `Source/Windows/ARM64EC/Module.S`
+`check_target_ec` reads `EcCodeBitMap[target >> 18]` with **no bounds check**, and that shift assumes one
+bit per 4 KiB page while wine sizes the bitmap by HOST page size.
+

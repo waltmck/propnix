@@ -17,10 +17,16 @@ assert data[:8] == b'!<arch>\n', 'not an ar archive'
 pos = 8
 longnames = b''
 members = []  # (name, bytes)
+def _clean(raw):
+    """Header fields are space-padded by GNU ar but NUL-padded by some writers (an UNSTRIPPED llvm-mingw
+    archive is one), so strip both. Getting this wrong yields names containing NULs, and the only symptom
+    is `ValueError: embedded null byte` from open() much further down."""
+    return raw.decode('latin1').rstrip(' \0').rstrip()
+
 while pos + 60 <= len(data):
     hdr = data[pos:pos + 60]
-    name = hdr[0:16].decode('latin1').rstrip()
-    size = int(hdr[48:58].decode('latin1').strip())
+    name = _clean(hdr[0:16])
+    size = int(_clean(hdr[48:58]) or '0')
     body = data[pos + 60:pos + 60 + size]
     pos += 60 + size
     if pos % 2 == 1:
@@ -32,8 +38,12 @@ while pos + 60 <= len(data):
         continue  # symbol map — regenerated on re-archive
     if name.startswith('/') and name[1:].isdigit():  # GNU long-name reference '/<offset>'
         off = int(name[1:])
-        end = longnames.find(b'\n', off)
-        name = longnames[off:end].decode('latin1').rstrip('/')
+        # GNU terminates long-name entries with '/\n', but not every writer does — take whichever of
+        # newline / NUL / end-of-table comes first. A bare find(b'\n') returning -1 silently slices to
+        # len-1 and drags NULs into the name.
+        ends = [e for e in (longnames.find(b'\n', off), longnames.find(b'\0', off)) if e != -1]
+        end = min(ends) if ends else len(longnames)
+        name = longnames[off:end].decode('latin1').rstrip('\0').rstrip().rstrip('/')
     else:
         name = name.rstrip('/')
     members.append((name, body))

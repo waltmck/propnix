@@ -47,6 +47,9 @@
   stdenv,
   fetchFromGitHub,
   wineWow64Packages,
+  # The ARM64EC toolchain, aarch64 only (absent from the scope on x86_64, where nixpkgs uses its
+  # pkgsCross mingw gccs instead). See the substitution below for why we override nixpkgs' copy.
+  llvmMingw ? null,
 }:
 let
   isAarch64 = stdenv.hostPlatform.isAarch64;
@@ -93,4 +96,22 @@ in
   patches = (old.patches or [ ]) ++ extraPatches;
 
   dontStrip = isAarch64;
+
+  # ONE ARM64EC TOOLCHAIN FOR THE WHOLE TREE. On aarch64 nixpkgs builds wine with its OWN copy of
+  # mstorsjo's llvm-mingw — a `let` binding in its packages.nix, reachable neither by `.override`
+  # (that only sees wine/default.nix's args) nor by an overlay (it is not a top-level attr). So swap
+  # it out here, in nativeBuildInputs. Same upstream tarball either way; ours adds the reindex-ar fix
+  # (emulators/llvm-mingw) and a pin we control. Without this the tree compiles wine with one LLVM and
+  # DXVK/vkd3d/FEX with another, and a toolchain bump aimed at wine does nothing to wine.
+  #
+  # The assert is the point: if nixpkgs ever renames or drops that input, this must fail loudly rather
+  # than quietly go back to building wine with a toolchain we are not pinning.
+  nativeBuildInputs =
+    let
+      inputs = old.nativeBuildInputs or [ ];
+      isTheirs = d: lib.hasPrefix "llvm-mingw" (d.pname or "");
+      hits = lib.length (lib.filter isTheirs inputs);
+    in
+    assert isAarch64 -> hits == 1;
+    map (d: if isTheirs d then llvmMingw else d) inputs;
 })

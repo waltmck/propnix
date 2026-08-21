@@ -1,9 +1,8 @@
 winewayland: emit WM_MOUSEWHEEL for continuous (touchpad) scroll
 
-STATUS: UNTESTED reminder patch — NOT yet in emulators/wine-hangover/patches/ (drop it there,
-git-add it, and rebuild wine to activate; that is a ~1h wine rebuild). Verify trackpad scrolling
-works in a windowed game (e.g. prison-architect, iron-nest) and tune WAYLAND_AXIS_STEP if the
-scroll speed feels off.
+STATUS: active and CONFIRMED WORKING — trackpad scrolling was verified in a windowed game with the
+default WAYLAND_AXIS_STEP. Raise or lower WAYLAND_AXIS_STEP (surface units per detent) to retune
+the scroll speed.
 
 Root cause: winewayland's wl_pointer `axis` callback (continuous smooth scroll) was an empty stub, so
 only the discrete `axis_value120`/`axis_discrete` paths produced Windows wheel events. A mouse wheel

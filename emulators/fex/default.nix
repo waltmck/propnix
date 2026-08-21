@@ -38,6 +38,7 @@
 #   llvm-readobj --file-headers $out/libwow64fex.dll   | grep Machine   # ARM64   (0xAA64)
 #   llvm-readobj --file-headers $out/wowbox64.dll      | grep Machine   # ARM64   (0xAA64)
 {
+  lib,
   stdenv,
   fetchFromGitHub,
   cmake,
@@ -56,6 +57,11 @@ let
   # private-header struct rename (IMAGE_LOAD_CONFIG_CODE_INTEGRITY). NEITHER is functional arm64ec code, so
   # building the newer upstream FEX-2607 tag (which also has the x87/THP/memory wins) needs no fork.
   rev = "FEX-2607";
+  # Content-addressed so only the patches' bytes feed the build (see `patches` below).
+  patchesDir = builtins.path {
+    path = ./patches;
+    name = "fex-patches";
+  };
   revHash = "1cc4b93e7a71c883ec021b71359f136394dc1f3c";
 
   # --- box64 (AndreRH/box64, branch wow64) → wowbox64.dll ------------------------------------------
@@ -129,6 +135,22 @@ stdenv.mkDerivation {
   pname = "fex-wine-dlls";
   version = "FEX-2607";
 
+  # Every file under ./patches becomes a FEX patch — drop a `NNNN-name.patch` in to add one, delete it to
+  # remove it; no code change. Applied in NUMERIC-PREFIX order via naturalSort, exactly as
+  # wine-hangover/default.nix does. `patchesDir` is content-addressed by the patches' BYTES, so unrelated
+  # repo edits never perturb this build — only touching ./patches does.
+  #
+  # `--fuzz=0`: these are rebases against a pinned FEX tag, and a hunk landing at an approximate location
+  # in an emulator's memory-management code is not a risk worth taking (the wine toolchain backport taught
+  # us that lesson the hard way — see emulators/llvm-mingw/patched-22.nix).
+  patches = map (f: "${patchesDir}/${f}") (
+    lib.naturalSort (builtins.attrNames (builtins.readDir patchesDir))
+  );
+  patchFlags = [
+    "-p1"
+    "--fuzz=0"
+  ];
+
   # fetchSubmodules = true mirrors FEX CI's `git submodule update --init` (setup-env action). For this
   # exact config (BUILD_TESTING=False, ENABLE_ZYDIS default off, VIXL sim/disasm off, jemalloc off for
   # MINGW) only rpmalloc/fmt/xxhash/unordered_dense/range-v3 (+ in-tree tiny-json/SoftFloat-3e/cephes)
@@ -166,6 +188,14 @@ stdenv.mkDerivation {
   # Nix source) and stamps the real version instead of "FEX-Unknown". TUNE_CPU=none disables the
   # native -mcpu probe (Scripts/aarch64_fit_native.py against /proc/cpuinfo — wrong for a cross build /
   # unavailable in the sandbox) and is also the documented fix for spurious `.seh directives` errors.
+  # NO libc++-compat postPatch here, and if a future toolchain bump seems to need one, read this first.
+  # FEX's Windows CRT compiles as-is against libc++ 22, which is what llvmMingw provides. Against libc++
+  # 23 it needs <cstdarg> in CRT/IO.cpp and <cstdlib> in CRT/Alloc.cpp (libc++ 23 dropped a batch of
+  # transitive includes) — and even WITH both, the link still fails: libc++ 23's locale_win32.cpp calls
+  # kernel32's GetACP/GetLocaleInfoEx, while libarm64ecfex.dll is freestanding because wine's ntdll loads
+  # it before kernel32 exists. That wall is why propnix backports its one ARM64EC codegen fix onto stable
+  # LLVM 22 instead of tracking 23. Adding includes here would only hide the real problem. RESEARCH §22.
+
   commonFlags = [
     "-G Ninja"
     "-DCMAKE_BUILD_TYPE=Release"

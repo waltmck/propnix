@@ -48,6 +48,15 @@ enum Command {
         #[command(subcommand)]
         what: HashCmd,
     },
+    /// Check a payload ALREADY on disk against the store's own per-chunk hashes.
+    ///
+    /// The arbiter when `hash` and `download` disagree: both are candidate answers, and `hash` is what
+    /// produced the pins, so agreeing with the pin proves little. This reads the bytes back and re-hashes
+    /// them at every offset the manifest declares, so the verdict comes from the store, not from us.
+    Verify {
+        #[command(subcommand)]
+        what: VerifyCmd,
+    },
     /// Download a pinned payload to a directory — what the payload FODs run.
     ///
     /// The same pipeline as `pin`/`hash` with files as the sink, so it shares the manifest decoders, the
@@ -196,6 +205,30 @@ enum HashCmd {
 }
 
 #[derive(Subcommand)]
+enum VerifyCmd {
+    /// Verify a Steam depot tree on disk against its manifest.
+    Steam {
+        #[arg(long)]
+        app: u32,
+        #[arg(long)]
+        depot: u32,
+        #[arg(long)]
+        manifest: u64,
+        #[arg(long, default_value = "public")]
+        branch: String,
+        /// Use Steam's anonymous account (free / anonymous-entitled depots only).
+        #[arg(long)]
+        anonymous: bool,
+        /// Which stored Steam account to use, when the credential holds more than one.
+        #[arg(long)]
+        steam_account: Option<String>,
+        /// The tree to check.
+        #[arg(long)]
+        dir: std::path::PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum DownloadCmd {
     /// Download a Steam depot (replaces DepotDownloader).
     Steam {
@@ -289,6 +322,7 @@ fn main() -> ExitCode {
         Command::Pin(args) => cmd_pin(args),
         Command::Hash { what } => cmd_hash(what),
         Command::Download { what } => cmd_download(what),
+        Command::Verify { what } => cmd_verify(what),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -695,4 +729,56 @@ fn cmd_rm(username: &str, type_filter: Option<&str>) -> Result<(), String> {
     let removed_type = store.remove(username, type_filter)?;
     println!("propnix: removed {removed_type} account '{username}'");
     Ok(())
+}
+
+/// `propnix verify steam` — read a tree back and check it against the manifest's per-chunk hashes.
+fn cmd_verify(what: VerifyCmd) -> Result<(), Box<dyn std::error::Error>> {
+    use pin::{gog, steam};
+    match what {
+        VerifyCmd::Steam {
+            app,
+            depot,
+            manifest,
+            branch,
+            anonymous,
+            steam_account,
+            dir,
+        } => {
+            let account = steam_account.or_else(|| env_account("PROPNIX_STEAM_ACCOUNT"));
+            let opts = gog::HashOpts {
+                workers: 1,
+                window_bytes: 0,
+                credential_dir: cred_dir(),
+                gog_account: None,
+                steam_account: account,
+                progress: true,
+            };
+            let rep = steam::verify_depot_any(app, depot, manifest, &branch, anonymous, &dir, &opts)?;
+            println!(
+                "{} files, {} dirs, {} chunks checked",
+                rep.files, rep.dirs, rep.chunks
+            );
+            if rep.gap_bytes > 0 {
+                println!(
+                    "  {} bytes in ranges no chunk covers (must read as zeros)",
+                    rep.gap_bytes
+                );
+            }
+            for p in &rep.problems {
+                println!("  MISMATCH {p}");
+            }
+            if rep.ok() {
+                println!("the tree matches the manifest");
+                Ok(())
+            } else {
+                Err(format!(
+                    "{} bad chunks, {} bad files ({} problems shown)",
+                    rep.bad_chunks,
+                    rep.bad_files,
+                    rep.problems.len()
+                )
+                .into())
+            }
+        }
+    }
 }

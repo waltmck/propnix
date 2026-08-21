@@ -884,6 +884,68 @@ mod tests {
     }
 
     #[test]
+    fn unordered_mode_delivers_every_block_exactly_once_through_failures() {
+        // THE case the other two tests miss between them: the requeue path tested in UNORDERED mode.
+        // `a_failing_block_is_requeued_until_it_succeeds` drives ordered mode, and
+        // `unordered_mode_delivers_every_block_exactly_once` drives a server that never fails — so the
+        // combination that a lossy link actually produces was untested. It matters here more than in
+        // ordered mode: the ordered emitter would notice a hole (it blocks forever waiting for the
+        // block), whereas the unordered sink writes at offsets and a block that silently never arrives
+        // just leaves the file's initial zeros behind. Same size, same file count, wrong bytes.
+        //
+        // Every third block fails its first two attempts, one of them by dropping the connection.
+        let tries = Arc::new(Mutex::new(std::collections::HashMap::<usize, usize>::new()));
+        let t = Arc::clone(&tries);
+        let base = serve(move |p| {
+            let i = idx_of(p);
+            if i % 3 == 0 {
+                let mut m = t.lock().unwrap();
+                let n = m.entry(i).or_insert(0);
+                *n += 1;
+                return match *n {
+                    1 => Reply::Status(502),
+                    2 => Reply::Hangup,
+                    _ => Reply::Body(body(i)),
+                };
+            }
+            Reply::Body(body(i))
+        });
+        let (io, _) = io_for(base);
+        struct Collect(Mutex<Vec<(usize, Vec<u8>)>>);
+        impl Sink for Collect {
+            fn accept(&self, index: usize, data: Vec<u8>) -> Result<(), String> {
+                self.0.lock().unwrap().push((index, data));
+                Ok(())
+            }
+        }
+        let sink = Arc::new(Collect(Mutex::new(Vec::new())));
+        let mut bytes = 0u64;
+        let n = 60usize;
+        unordered(
+            io,
+            work(n),
+            8,
+            (LEN * 4) as u64,
+            Arc::clone(&sink) as Arc<dyn Sink>,
+            fast(),
+            |b| bytes += b,
+        )
+        .unwrap();
+        let got = sink.0.lock().unwrap();
+        let seen: BTreeSet<usize> = got.iter().map(|(i, _)| *i).collect();
+        let missing: Vec<usize> = (0..n).filter(|i| !seen.contains(i)).collect();
+        assert!(
+            missing.is_empty(),
+            "blocks never written (their bytes would be silent zeros on disk): {missing:?}"
+        );
+        assert_eq!(got.len(), n, "and none written twice");
+        for (i, d) in got.iter() {
+            assert_eq!(d, &body(*i), "block {i} content");
+        }
+        assert_eq!(bytes, (n * LEN) as u64, "progress must account for every byte");
+    }
+
+    #[test]
     fn a_dead_link_fails_on_stall_rather_than_hanging() {
         // Liveness, not attempt counts: nothing ever succeeds, so the run must end by itself — and say
         // why — rather than requeueing forever.

@@ -1118,6 +1118,83 @@ mod tests {
     }
 
     #[test]
+    fn the_two_write_paths_agree_on_a_file_past_4_gib() {
+        // win-data is the first depot this tree pins that holds files over 4 GiB (seven at ~8 GiB), and
+        // it is the first whose ordered hash and unordered download disagree. Every depot that verified
+        // clean tops out below the boundary (win-binaries 2.83 GB, dlcpacks 2.88 GB, Hollow Knight far
+        // less), so a 32-bit step somewhere in the offset arithmetic is the first thing to rule out.
+        //
+        // A chunk's LENGTH is legitimately u32 — chunks are ~1 MiB — but its OFFSET must stay u64 on
+        // both paths: the ordered writer reaches it by accumulating a running position and zero-filling
+        // the gaps, the unordered one pwrites there directly. This checks the two produce identical
+        // bytes for chunks placed either side of 4 GiB, using a sparse file so it costs no real disk.
+        use std::os::unix::fs::FileExt;
+        const G: u64 = 1 << 30;
+        const CH: u32 = 4096;
+        let f = FileEntry {
+            path: "big.rpf".into(),
+            size: 5 * G,
+            executable: false,
+            chunks: vec![
+                ChunkRef { sha: [1u8; 20], offset: 0, cb_original: CH },
+                ChunkRef { sha: [2u8; 20], offset: 4 * G - CH as u64, cb_original: CH },
+                ChunkRef { sha: [3u8; 20], offset: 4 * G, cb_original: CH },
+                ChunkRef { sha: [4u8; 20], offset: 5 * G - CH as u64, cb_original: CH },
+            ],
+        };
+        let payload = |n: u8| vec![n; CH as usize];
+
+        // Ordered: stream the file's bytes the way the NAR hasher consumes them.
+        struct Digest(sha2::Sha256);
+        impl std::io::Write for Digest {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                use sha2::Digest as _;
+                self.0.update(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let mut seq = 1u8;
+        let mut d = Digest(<sha2::Sha256 as sha2::Digest>::new());
+        write_file(&f, || { let v = payload(seq); seq += 1; Ok(v) }, &mut d).unwrap();
+        let ordered_digest = {
+            use sha2::Digest as _;
+            d.0.finalize().to_vec()
+        };
+
+        // Unordered: pre-size the file, then pwrite each chunk at its declared offset.
+        let dir = std::env::temp_dir().join(format!("propnix-4gib-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.rpf");
+        {
+            let h = std::fs::File::create(&path).unwrap();
+            h.set_len(f.size).unwrap();
+            for (i, c) in f.chunks.iter().enumerate() {
+                h.write_all_at(&payload(i as u8 + 1), c.offset).unwrap();
+            }
+            h.sync_all().unwrap();
+        }
+        let unordered_digest = {
+            use sha2::Digest as _;
+            let mut h = <sha2::Sha256 as sha2::Digest>::new();
+            let mut file = std::fs::File::open(&path).unwrap();
+            let mut buf = vec![0u8; 1 << 20];
+            loop {
+                let n = std::io::Read::read(&mut file, &mut buf).unwrap();
+                if n == 0 { break; }
+                h.update(&buf[..n]);
+            }
+            h.finalize().to_vec()
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            ordered_digest, unordered_digest,
+            "the ordered writer and the unordered pwrite disagree about a file spanning 4 GiB"
+        );
+    }
+
+    #[test]
     fn symlink_flagged_entries_become_ordinary_regular_files() {
         // DepotDownloader 3.4.0 never reads the Symlink flag (verified in ContentDownloader.cs: the
         // only flags it branches on are Directory and Executable), so such an entry is materialized as
@@ -2103,4 +2180,198 @@ pub fn parse_app_info(body: &str, app_id: u32, branch: &str) -> R<AppInfo> {
         );
     }
     Ok(AppInfo { build_id, depots })
+}
+
+// ──────────────────────────────────── ground-truth tree verification ─────────────────────────────────
+/// What `verify_depot` found. `problems` is capped — the first few are diagnostic, the thousandth is not.
+#[derive(Default)]
+pub struct VerifyReport {
+    pub files: usize,
+    pub dirs: usize,
+    pub chunks: usize,
+    pub bad_chunks: usize,
+    pub bad_files: usize,
+    pub gap_bytes: u64,
+    pub problems: Vec<String>,
+}
+
+impl VerifyReport {
+    fn note(&mut self, msg: String) {
+        if self.problems.len() < 40 {
+            self.problems.push(msg);
+        }
+    }
+    pub fn ok(&self) -> bool {
+        self.bad_chunks == 0 && self.bad_files == 0
+    }
+}
+
+/// Check a tree ON DISK against the manifest, chunk by chunk — the arbiter when the ordered hasher and
+/// the unordered downloader disagree about a depot.
+///
+/// Neither of those can settle such an argument: each is a candidate answer, and `hash_depot` computed
+/// the pins, so "the pin matches the hasher" is very nearly a tautology. This is independent of both.
+/// A Steam chunk's id IS the sha1 of its plaintext, so the manifest states, for every (file, offset),
+/// exactly which bytes belong there — and that statement comes from Valve, not from this tool.
+///
+/// Note what this does NOT re-check: the transport already compares each delivered chunk's sha1 against
+/// its id before either sink sees it, so chunk CONTENT is sound by construction in both paths. What can
+/// still differ is PLACEMENT — which chunk was written where — which is precisely what reading the bytes
+/// back and re-hashing them at each declared offset tests.
+///
+/// Costs one small metadata fetch plus a full sequential read of the tree; no content download.
+pub fn verify_depot(
+    app_id: u32,
+    depot_id: u32,
+    manifest_id: u64,
+    branch: &str,
+    auth: Auth,
+    dir: &std::path::Path,
+    progress: bool,
+) -> Result<VerifyReport, Box<dyn std::error::Error>> {
+    use sha1::Digest;
+    use std::os::unix::fs::{FileExt, PermissionsExt};
+
+    let ctl = control(app_id, depot_id, &[manifest_id], branch, auth)?;
+    let agent = http_agent();
+    let code = ctl
+        .codes
+        .get(&manifest_id)
+        .copied()
+        .ok_or_else(|| SteamError::Parse(format!("no request code for manifest {manifest_id}")))?;
+    let (files, _created) =
+        fetch_manifest(&agent, &ctl.hosts, depot_id, manifest_id, code, &ctl.depot_key)?;
+
+    let mut rep = VerifyReport::default();
+    let total: u64 = files.iter().filter(|f| f.size != u64::MAX).map(|f| f.size).sum();
+    let mut read_so_far = 0u64;
+    let mut last_pct = 0u64;
+
+    for f in &files {
+        let path = f.path.split('/').fold(dir.to_path_buf(), |p, part| p.join(part));
+        if f.size == u64::MAX {
+            if !path.is_dir() {
+                rep.bad_files += 1;
+                rep.note(format!("{}: manifest declares a directory, not present", f.path));
+            }
+            rep.dirs += 1;
+            continue;
+        }
+        rep.files += 1;
+        let file = match std::fs::File::open(&path) {
+            Ok(h) => h,
+            Err(e) => {
+                rep.bad_files += 1;
+                rep.note(format!("{}: cannot open: {e}", f.path));
+                continue;
+            }
+        };
+        let md = file.metadata()?;
+        if md.len() != f.size {
+            rep.bad_files += 1;
+            rep.note(format!(
+                "{}: on-disk size {} != manifest size {}",
+                f.path,
+                md.len(),
+                f.size
+            ));
+        }
+        let is_exec = md.permissions().mode() & 0o111 != 0;
+        if is_exec != f.executable {
+            rep.bad_files += 1;
+            rep.note(format!(
+                "{}: exec bit {} but manifest says {}",
+                f.path, is_exec, f.executable
+            ));
+        }
+
+        // Walk the chunks in offset order so gaps (ranges no chunk covers, which must read as zeros)
+        // are visible as well as misplaced content.
+        let mut cs: Vec<&ChunkRef> = f.chunks.iter().collect();
+        cs.sort_by_key(|c| c.offset);
+        let mut pos = 0u64;
+        let mut buf = Vec::new();
+        for c in cs {
+            if c.offset > pos {
+                rep.gap_bytes += c.offset - pos;
+            }
+            pos = c.offset + c.cb_original as u64;
+            buf.resize(c.cb_original as usize, 0);
+            if let Err(e) = file.read_exact_at(&mut buf, c.offset) {
+                rep.bad_chunks += 1;
+                rep.note(format!("{} @{}: read failed: {e}", f.path, c.offset));
+                continue;
+            }
+            rep.chunks += 1;
+            let got: [u8; 20] = sha1::Sha1::digest(&buf).into();
+            if got != c.sha {
+                rep.bad_chunks += 1;
+                rep.note(format!(
+                    "{} @{} ({} bytes): sha1 {} but the manifest says {}",
+                    f.path,
+                    c.offset,
+                    c.cb_original,
+                    chunk_hex(&got),
+                    chunk_hex(&c.sha)
+                ));
+            }
+            read_so_far += c.cb_original as u64;
+            if progress {
+                let pct = read_so_far
+                    .checked_mul(100)
+                    .and_then(|n| n.checked_div(total.max(1)))
+                    .unwrap_or(100);
+                if pct > last_pct {
+                    last_pct = pct;
+                    eprint!("\r  {pct:3}%  {} / {} MiB verified", read_so_far >> 20, total >> 20);
+                }
+            }
+        }
+        if pos < f.size {
+            rep.gap_bytes += f.size - pos;
+        }
+    }
+    if progress {
+        eprintln!();
+    }
+    Ok(rep)
+}
+
+/// `verify_depot` over every stored account, mirroring `download_depot_any`.
+pub fn verify_depot_any(
+    app_id: u32,
+    depot_id: u32,
+    manifest_id: u64,
+    branch: &str,
+    anonymous: bool,
+    dir: &std::path::Path,
+    opts: &crate::pin::gog::HashOpts,
+) -> Result<VerifyReport, Box<dyn std::error::Error>> {
+    if anonymous {
+        return verify_depot(app_id, depot_id, manifest_id, branch, Auth::Anonymous, dir, opts.progress);
+    }
+    let creds = credentials_from_store(&opts.credential_dir, opts.steam_account.as_deref())?;
+    crate::pin::try_accounts(
+        &creds,
+        |c| c.account.clone(),
+        is_not_owned,
+        |tried, last| {
+            Box::new(SteamError::NotOwned(format!(
+                "no stored Steam account can fetch app {app_id} depot {depot_id} manifest \
+                 {manifest_id} (tried: {}). Last refusal: {last}",
+                tried.join(", ")
+            ))) as Box<dyn std::error::Error>
+        },
+        |c| {
+            verify_depot(
+                app_id,
+                depot_id,
+                manifest_id,
+                branch,
+                Auth::Account(c.clone()),
+                dir,
+                opts.progress,
+            )
+        },
+    )
 }

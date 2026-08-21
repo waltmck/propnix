@@ -188,13 +188,29 @@ pkgs.lib.makeScope pkgs.newScope (
   # ── aarch64-only: the ARM64EC toolchain + FEX/box64 emulators. Absent on x86_64, where wine is native,
   #    so `prefixLower`'s `fexdlls ? null` default applies and nothing references llvm-mingw. ──
   // pkgs.lib.optionalAttrs isAarch64 {
-    llvmMingw = callPackage ../emulators/llvm-mingw { }; # shared mstorsjo toolchain (arm64ec + reindex fix)
-    fexdlls = callPackage ../emulators/fex-dlls.nix { }; # FEX-2607 from source (+ box64 wowbox64); uses llvmMingw
+    # THE ARM64EC TOOLCHAIN, in two pieces. `llvmMingwPrebuilt` is mstorsjo's stable 20260616 release
+    # (clang 22.1.8) as shipped; `llvmMingwPatched` grafts onto it a clang built from the SAME commit with
+    # llvm/llvm-project#190933 — the ARM64EC variadic exit-thunk fix, without which every `[out]` context
+    # handle is corrupted and no Windows installer can register a service (RESEARCH §23).
+    #
+    # Only the compiler is rebuilt; the mingw sysroots, libc++ 22 and compiler-rt builtins stay exactly as
+    # upstream shipped them. The alternative — pinning 20260812 (clang 23.1.0-rc3), the only release
+    # carrying the fix — was implemented, measured and rejected: libc++ 23 drops transitive includes and
+    # needs a patch per third-party source, and it hard-blocks fex-dlls outright. `llvmMingw` is what every
+    # consumer in this scope resolves, so nothing can accidentally build against the unpatched base.
+    llvmMingwPrebuilt = callPackage ../emulators/llvm-mingw { };
+    llvmMingwPatched = callPackage ../emulators/llvm-mingw/patched-22.nix {
+      prebuilt = llvmMingwPrebuilt;
+    };
+    llvmMingw = llvmMingwPatched;
+    fexdlls = callPackage ../emulators/fex { }; # FEX-2607 from source + ./patches (+ box64 wowbox64)
+
     # FEXInterpreter — the LINUX x86_64-on-aarch64 emulator for the THIN FEX backend (distinct from
     # fexdlls, the Windows/ARM64EC DLLs wine loads). The thin FEX path is research/meta.broken on 16K.
     fexInterpreter = pkgs.fex;
-    # Graceful no-op GOG Galaxy SDK DLLs (Galaxy64/Galaxy/pops_api): bound over a game's bundled copies so
-    # the SDK's offline RPC init can't fault wine's rpcrt4 (winefex path; x86_64 = native wine, no stub).
+    # Graceful no-op GOG Galaxy SDK DLLs (Galaxy64/Galaxy/pops_api): bound over a game's bundled copies so a
+    # statically-imported online SDK never reaches GOG's services — propnix games run fully offline, the
+    # same policy as masking Steam's steam_api64.dll (winefex path; x86_64 = native wine, no stub).
     galaxyStub = callPackage ../emulators/galaxy-stub { }; # uses llvmMingw
     # box64 re-export: pass nixpkgs' box64 explicitly (else callPackage resolves `box64` from this scope →
     # itself → infinite recursion).

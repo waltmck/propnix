@@ -25,9 +25,9 @@
 
   # HomeworldRM.exe STATICALLY imports Galaxy.dll (the 32-bit GOG Galaxy SDK, bundled beside the exe in
   # HomeworldRM/Bin/Release), pulling in the GalaxyFactory statics (CreateInstance/GetInstance/ResetInstance/
-  # GetErrorManager — verified in the PE import table). The SDK's offline RPC init faults wine's builtin
-  # rpcrt4 before the first frame (same class as Prison Architect), so bind the graceful no-op stub over it
-  # (aarch64). galaxy-stub builds a 32-bit Galaxy.dll matching the game's arch; a no-op on x86_64 native wine.
+  # GetErrorManager — verified in the PE import table), so bind the no-op stub over it (aarch64) to keep
+  # the game fully offline with no cloud dependencies (see emulators/galaxy-stub). galaxy-stub builds a
+  # 32-bit Galaxy.dll matching the game's arch; a no-op on x86_64 native wine.
   galaxyStubDlls = [ "HomeworldRM/Bin/Release/Galaxy.dll" ];
 
   # The HWRM engine requires WRITE access to its own install folder — with a read-only game bind it aborts at

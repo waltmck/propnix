@@ -1,0 +1,80 @@
+ntdll: bounds-check RtlIsEcCode so a wild pointer cannot become a stack overflow.
+
+RtlIsEcCode indexes the PEB's EC code bitmap with no upper bound:
+
+    const UINT64 *map = (const UINT64 *)NtCurrentTeb()->Peb->EcCodeBitMap;
+    ULONG_PTR page = ptr / page_size;
+    return (map[page / 64] >> (page & 63)) & 1;
+
+The bitmap is allocated to cover exactly the user address space (alloc_arm64ec_map: one bit per page of
+`address_space_limit`), so any pointer past the end of user space reads off the end of the mapping.
+
+On its own that would be a benign-looking out-of-bounds read. It is not, because RtlIsEcCode runs while
+an exception is being DISPATCHED (raise_func_trampoline / unwind, to decide whether a PC is EC code). A
+fault inside it re-enters dispatch, which calls RtlIsEcCode again on the same wild value, and the thread
+recurses until its stack is gone -- so one stray pointer anywhere in a process turns into an
+unrecoverable STATUS_STACK_OVERFLOW instead of an access violation the application could have handled.
+
+MEASURED with Red Dead Redemption 2 on Hangover 11.15-arm64ec under FEX. The game takes one access
+violation in its own code (rip inside RDR2.exe, reading an unmapped page), and that single fault became:
+
+    1  x c0000005 at rip=0000000146d1d06c   <- the real fault, in guest code
+ 1752  x c0000005 at rip=00006fffffa3a6dc   <- RtlIsEcCode+0x10, over and over
+    1  x c00000fd (STATUS_STACK_OVERFLOW)   <- the thread finally dies
+
+The wild value was 0x1cc00e24a0000, recovered while unwinding the guest stack; at a 16K page size that
+indexes about 0.9 TB past the end of the bitmap. Raising the thread stack floor to 8 MB did NOT help --
+the recursion simply consumed that too -- which is what identified it as unbounded recursion rather than
+a stack that was merely too small.
+
+With the check in place the same run produces zero access violations and no stack overflow, and the
+guest's original fault is delivered normally. (RDR2 then stops for an unrelated reason, an SEH frame
+pointer whose low half is missing -- see preliminaries/RESEARCH.md.)
+
+The limit is queried once via SystemBasicInformation rather than hard-coded, so it tracks whatever the
+process's user address space actually is.
+
+diff --git a/dlls/ntdll/signal_arm64ec.c b/dlls/ntdll/signal_arm64ec.c
+index 0c7032f..33911af 100644
+--- a/dlls/ntdll/signal_arm64ec.c
++++ b/dlls/ntdll/signal_arm64ec.c
+@@ -1405,6 +1405,23 @@ __ASM_GLOBAL_FUNC( "#KiUserCallbackDispatcher",
+                    "brk #1" )
+ 
+ 
++/* Highest user address, cached: the EC bitmap covers exactly this much address space. */
++static ULONG_PTR ec_map_limit(void)
++{
++    static ULONG_PTR limit;
++
++    if (!limit)
++    {
++        SYSTEM_BASIC_INFORMATION info;
++
++        if (!NtQuerySystemInformation( SystemBasicInformation, &info, sizeof(info), NULL ))
++            limit = (ULONG_PTR)info.HighestUserAddress;
++        else
++            limit = (ULONG_PTR)1 << 47;  /* conservative fallback */
++    }
++    return limit;
++}
++
+ /**************************************************************************
+  *              RtlIsEcCode (NTDLL.@)
+  */
+@@ -1412,6 +1429,15 @@ BOOLEAN WINAPI RtlIsEcCode( ULONG_PTR ptr )
+ {
+     const UINT64 *map = (const UINT64 *)NtCurrentTeb()->Peb->EcCodeBitMap;
+     ULONG_PTR page = ptr / page_size;
++
++    /* The bitmap holds one bit per page of USER address space and nothing more, so an address past
++     * the end of user space indexes off the end of the mapping. That matters far more here than the
++     * bounds check might suggest: RtlIsEcCode is called while DISPATCHING an exception, so faulting
++     * inside it turns one wild pointer into an unrecoverable loop -- the fault re-enters dispatch,
++     * which calls RtlIsEcCode again, until the thread's stack is gone. Observed with RDR2: a single
++     * guest access violation became 1752 identical faults at RtlIsEcCode+0x10 and then
++     * STATUS_STACK_OVERFLOW, the wild value being 0x1cc00e24a0000 recovered while unwinding. */
++    if (ptr >= ec_map_limit()) return FALSE;
+     return (map[page / 64] >> (page & 63)) & 1;
+ }
+ 

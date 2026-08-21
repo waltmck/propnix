@@ -54,10 +54,10 @@ mkApp {
         script = ./setup.sh;
         withIniLib = true;
       };
-      # SkyrimSE.exe STATICALLY imports the GOG Galaxy SDK (Galaxy64.dll, at the payload root — verified via the
-      # PE import table); its offline RPC init faults wine's builtin rpcrt4 before the first frame, so bind the
-      # graceful no-op stub over it (aarch64) via a mount row (same de-Galaxy pattern as HK / Prison Architect;
-      # a no-op on x86_64 native wine).
+      # SkyrimSE.exe STATICALLY imports the GOG Galaxy SDK (Galaxy64.dll, at the payload root — verified via
+      # the PE import table), so bind the no-op stub over it via a mount row: propnix games run fully offline,
+      # with no cloud dependencies (see emulators/galaxy-stub). Same de-Galaxy pattern as HK / Prison
+      # Architect; aarch64 only, a no-op on x86_64 native wine.
       galaxyStubDlls = [ "Galaxy64.dll" ];
     }
   ];

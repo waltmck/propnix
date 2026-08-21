@@ -26,11 +26,12 @@ let
   # ── Derived mount rows (module-system): computed from other tuning knobs against the FINAL config, so an
   # `.apply` that changes `galaxyStubDlls`/`extraSystem32` re-derives these rows. ──────────────────
 
-  # De-Galaxy stubs. Some GOG titles bundle the GOG Galaxy SDK (Galaxy64.dll / Galaxy.dll) and the older POPS
-  # online client (pops_api.dll) and STATICALLY import them from the exe's own directory, where the SDK's
-  # offline RPC init faults wine's builtin rpcrt4 (null write to 0x10) before the first frame (reproduced on
-  # Prison Architect). Because they're static imports in the app dir, wine's loader resolves them there FIRST —
-  # a system32/WINEDLLOVERRIDES stub can't shadow them — so bind a graceful no-op stub over each (at its path
+  # De-Galaxy stubs. Some GOG titles bundle the GOG Galaxy SDK (Galaxy64.dll / Galaxy.dll) and the older
+  # POPS online client (pops_api.dll) and STATICALLY import them from the exe's own directory, where the
+  # SDK spins up a network/RPC layer at startup. A packaged game must run FULLY OFFLINE with no cloud
+  # dependencies, so that gets neutralized. Because they're static imports in the app dir, wine's loader
+  # resolves them there FIRST — a system32/WINEDLLOVERRIDES stub can't shadow them — so bind a graceful
+  # no-op stub over each (at its path
   # under drive_c/game). `config.galaxyStubDlls` (payload-relative paths the game declares) → one `mount` row
   # apiece with the store-path stub as source. aarch64 only (galaxyStub != null); on x86_64 the game runs
   # under native wine and these are omitted.

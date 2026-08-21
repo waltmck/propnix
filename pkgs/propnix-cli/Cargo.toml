@@ -80,6 +80,11 @@ tar = "0.4"         # read account.config out of the stored credential tar
 # It also takes the 5 property bytes and the raw stream directly, so the VZ payload needs no reframing.
 #
 # (The pure-Rust `lzma-rs` this all replaced was a further 2x slower again — 69% of total CPU under perf.)
+#
+# SETTLED: keep the crate; do NOT vendor LzmaDec.c. Vendoring was considered (it would drop a dependency
+# and shrink the build a little) and rejected as not worth it: this works, and the binary is already
+# small enough that trimming it buys nothing. Vendoring would also mean owning the SDK sources and their
+# updates by hand. Revisit only if the crate goes unmaintained or its pin blocks something.
 lzma-sdk-sys = "0.1.2"
 
 [profile.release]

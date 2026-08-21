@@ -28,13 +28,14 @@ mkApp {
   ];
 
   # NOTE: no graphics/d3d override. PA is an OpenGL title (builtin OPENGL32.dll), so d3d=dxvk is a no-op
-  # for it. Without the stubs below, Prison Architect64.exe faults in rpcrt4 (write to null+0x10) during
-  # the GOG Galaxy SDK's network/RPC init — identically on graphics=wayland and graphics=x11, so it is
-  # NOT a rendering issue and no graphics knob is set.
+  # for it, and nothing here is a rendering workaround.
   wine = {
-    # PA statically imports the GOG Galaxy SDK + POPS client (Galaxy64.dll + pops_api.dll are STATIC
-    # imports, so they cannot be disabled via WINEDLLOVERRIDES; its offline RPC init faults wine's
-    # rpcrt4); stub all three via mount rows so the SDK never runs.
+    # PA statically imports the GOG Galaxy SDK + POPS client (Galaxy64.dll + pops_api.dll), which cannot be
+    # disabled via WINEDLLOVERRIDES — wine resolves static imports from the exe's own directory first. Bind
+    # the no-op stubs over all three so the SDK never reaches GOG's services: propnix games run FULLY
+    # OFFLINE, with no cloud dependencies (emulators/galaxy-stub states the policy). PA is the title that
+    # first surfaced the need, and it runs fine WITH the real SDK today — this is the offline guarantee, not
+    # a crash fix.
     galaxyStubDlls = [
       "Galaxy64.dll"
       "Galaxy.dll"

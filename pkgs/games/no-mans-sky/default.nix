@@ -43,10 +43,10 @@ mkApp {
   ];
 
   wine = {
-    # NMS.exe STATICALLY imports Galaxy64.dll (the GOG Galaxy SDK, bundled beside it in Binaries/ — confirmed
-    # in the PE import table). Its offline RPC init faults wine's builtin rpcrt4 (null write to 0x10) before the
-    # first frame (the Prison Architect / Hollow Knight failure mode), so bind the graceful no-op stub over it
-    # (aarch64 only; x86_64 runs it under native wine). The DRM-free GOG build plays fully offline without it.
+    # NMS.exe STATICALLY imports Galaxy64.dll (the GOG Galaxy SDK, bundled beside it in Binaries/ —
+    # confirmed in the PE import table), so bind the no-op stub over it (aarch64 only; x86_64 runs it under
+    # native wine). The DRM-free GOG build plays fully offline without the SDK, which is exactly the
+    # guarantee propnix wants — see emulators/galaxy-stub for the policy.
     galaxyStubDlls = [ "Binaries/Galaxy64.dll" ];
     # NB: NMS also imports MSVCP140/VCRUNTIME140(_1) (VC++ 2015-2022) — NOT staged via extraSystem32. Wine's
     # ARM64EC builtins for the modern VC140/UCRT runtime load cleanly under FEX (used by HK/Papers Please/

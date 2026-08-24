@@ -42,6 +42,8 @@
   exe, # executable relative to the game dir, e.g. "Hollow Knight.exe"
   # Launch arguments for the exe (the single, backend-shared source of exe args).
   exeArgs ? [ ],
+  # Offline enforcement: false → the launcher unshares a netns for the game (see app-options `online`).
+  online ? true,
   # Optional launch working directory, RELATIVE to the game dir (C:\game). Null → the game dir itself.
   # For engines that resolve assets from the CWD rather than the exe path (Don't Starve: "bin").
   workingDir ? null,
@@ -344,6 +346,7 @@ let
       # Launch cwd relative to C:\game (null → the game dir); toJSON drops a null field.
       workingDir = workingDir;
       exeArgs = exeArgs;
+      online = online;
       icon = splashIcon; # largest extracted icon (for the splash), or null
       payload = "${payload}"; # the primary game tree; the launch cwd (store DLLs are stubbed/whited-out via mount rows)
       emulators = {

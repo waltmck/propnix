@@ -157,6 +157,7 @@ fn run_outer(
         entries,
         unseal,
         passthrough,
+        cfg.online,
     ) {
         Ok(pair) => pair,
         Err(e) => {

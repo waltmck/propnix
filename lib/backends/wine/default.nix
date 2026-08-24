@@ -43,6 +43,7 @@
         name
         exe
         exeArgs
+        online
         workingDir
         maskFiles
         env

@@ -239,6 +239,21 @@ in
       type = knobTypes.lastWins;
       description = "The executable, RELATIVE to the game dir (payload root).";
     };
+    online = lib.mkOption {
+      type = knobTypes.lastWins;
+      default = true;
+      description = ''
+        Whether this app is allowed to reach the network. `false` makes the launcher unshare a NETWORK
+        NAMESPACE for the game, leaving it loopback-only — so propnix's offline guarantee is enforced by the
+        kernel rather than by trusting the app and its bundled online SDKs. Display and audio are
+        unaffected: Wayland, X11 and PulseAudio are UNIX sockets, which live in the mount namespace.
+
+        Default `true`, deliberately: silently cutting a game off would break anything with legitimate
+        online features and is miserable to debug. Set `false` per game once it is known not to need the
+        network, or to hold an SDK to its offline path — e.g. a launcher that opens an online sign-in flow
+        when it can reach its servers but takes a working offline route when it cannot.
+      '';
+    };
     exeArgs = lib.mkOption {
       type = knobTypes.lastWins;
       default = [ ];

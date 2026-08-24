@@ -70,6 +70,10 @@ pub fn code_of(status: ExitStatus) -> i32 {
 /// runs inside the assembled prefix. stdout+stderr merge into a PIPE we read; own process group so a cancel
 /// can signal the whole tree at once.
 ///
+/// `online = false` (the app declares itself offline) additionally unshares a NETWORK namespace in that
+/// same child, so the game gets loopback and nothing else. Display/audio are unaffected — they are UNIX
+/// sockets, which live in the mount namespace.
+///
 /// SAFETY: the `pre_exec` closure runs post-fork / pre-exec, so it (and the fs writes + mount syscalls in
 /// `enter_and_mount`) is only safe if the CALLER is SINGLE-THREADED at this point. `run_outer` guarantees
 /// that — it calls this BEFORE spawning the worker thread or the GTK splash.
@@ -80,6 +84,7 @@ pub fn spawn_mounted(
     entries: Vec<propnix_mount::Entry>,
     unseal: bool,
     passthrough: &[String],
+    online: bool,
 ) -> std::io::Result<(Child, std::io::PipeReader)> {
     let me = std::env::current_exe()?;
     let mut cmd = Command::new(&me);
@@ -102,7 +107,7 @@ pub fn spawn_mounted(
     let tar = tar.to_string();
     unsafe {
         cmd.pre_exec(move || {
-            propnix_mount::enter_and_mount(&root, &entries, &tar)
+            propnix_mount::enter_and_mount(&root, &entries, &tar, !online)
                 .map_err(|e| std::io::Error::other(format!("prefix assembly: {e}")))
         });
     }

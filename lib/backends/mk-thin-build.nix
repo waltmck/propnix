@@ -50,6 +50,7 @@ lib.throwIfNot (lib.hasSuffix "-linux" cfg.emulatedPlatform)
       name
       exe
       exeArgs
+      online
       workingDir
       maskFiles
       icon

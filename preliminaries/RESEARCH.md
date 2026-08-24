@@ -1204,3 +1204,330 @@ Separate latent bug, same family, worth reporting upstream: `Source/Windows/ARM6
 `check_target_ec` reads `EcCodeBitMap[target >> 18]` with **no bounds check**, and that shift assumes one
 bit per 4 KiB page while wine sizes the bitmap by HOST page size.
 
+## 26. The Rockstar launcher and its Chromium UI on wine+FEX (measured 2026-08-21)
+
+**Chromium (CEF) renders the Rockstar sign-in page under wine ARM64EC + FEX, but its child processes crash
+repeatedly while doing so.** The sign-in form paints, accepts credentials, and reaches Rockstar's email
+verification step; meanwhile CEF children keep faulting and being respawned.
+
+**TWO SETTINGS ARE LOAD-BEARING for the window to paint at all:**
+* **`--js-flags=--jitless`.** Without it the window maps and stays blank forever — V8 cannot execute the
+  page script, so the browser paints its background and nothing else. With it, the sign-in form appears.
+  This is the single difference between "grey window" and "working prompt", A/B'd both directions.
+* **DXVK in the prefix** (`d3d11,dxgi,d3d10core,d3d9=n` with the DLLs staged into system32). Without it no
+  launcher window maps.
+
+**The page lifecycle in `socialclub_launcher.log` is NOT a rendering metric.** These transitions
+
+```
+WAIT_BROWSER_WINDOW > LOADING > WAITING_FOR_PAGE_LOAD > WAITING_FOR_PAGE_READY > PAGE_READY
+  > START_SIGN_IN > FINISHED
+```
+
+all complete while the window is blank. Judging "does it render" requires looking at pixels — screenshot
+the window and measure. Two further traps in doing that: a stale `Exception raised` window from an earlier
+crashed run sits at the same geometry and gets grabbed instead of the live one (select by the LIVE pid, and
+pre-clean every window before a run), and a login form legitimately has few distinct colours, so a
+colour-count threshold reports a painted form as blank (~1140 colours, sd 0.43, for a form that is plainly
+rendered).
+
+**THE ACTUAL CAUSE OF THE HANG: a Steam shim in the LAUNCHER's own directory.** Putting gbe_fork at
+`Launcher/ThirdParty/Steam/steam_api64.dll` trips RGL's integrity repair — it renames the shim to `.old`,
+restores its own copy, and re-enters `Launcher.exe -upgrade`, which then stalls at "Connecting to Rockstar
+Games Services" and finally reports *"timed out loading both its online and offline content"*. Proven by
+direct A/B: shim present → HANGS with an empty state list; shim absent → RENDERS, twice more to confirm.
+So: **shim the GAME's `steam_api64.dll` (entitlement), never the launcher's.** A read-only bind does not
+help here — blocking the repair is what causes the stall.
+
+**WHERE TO LOOK.** `Documents/Rockstar Games/Social Club/socialclub_launcher.log` is UTF-16LE
+(`iconv -f UTF-16LE`) and prints every state transition plus `RgscUi::LoadUrl()` and Chromium net errors
+(`Page load error, code -1003` = ERR_NAME_NOT_RESOLVED). `Documents/Rockstar Games/Launcher/launcher.log`
+carries the launcher's own HTTP (`idownloader ... status: 0/200`). The state names come from
+`socialclub.dll`. The UI is CEF: `libcef.dll` + `vk_swiftshader.dll` hosted in `SocialClubHelper.exe`,
+which the launcher drives with `--off-screen-rendering-enabled` and an `--rgsc-ipc-channel-name` handshake.
+
+**LAUNCHER SWITCHES** (from its own log strings — it has a large, undocumented set):
+`-noupdate` ("Not updating due to -noupdate flag."), `-noearlyselfupdate` ("Skipping pre-login
+self-update…"), `-noScInstallerVersionCheck`, `-scOfflineOnly` (companion string: "Running in offline only
+mode, unable to launch title" — so it likely refuses to launch games), `-scuiUrl` (ignored in this form),
+`-doneUpgrade`, `-reinstall_sc`, `-dontStartService`. They work **on argv**;
+**`launcher_commandline.txt` is NOT read at all** — a claim I accepted from research and disproved by
+putting `--enable-logging` in it and getting nothing.
+
+**THE CEF CHILD CRASHES.** Rockstar's own crash handler writes minidumps to
+`AppData/Local/Rockstar Games/Launcher/CrashLogs/` — decode them, because **wine's log contains no
+`Unhandled page fault` for most of these** and they are otherwise invisible. Six distinct sites observed,
+every one inside `libcef.dll`:
+
+| exception | detail | RVA |
+|---|---|---|
+| `C0000005` | READ of `0x0` | `+0x43bc253` (recurs exactly across runs) |
+| `C0000005` | READ of `0xD0` | `+0x3b9763c` |
+| `C0000005` | READ of `0x10` | `+0x4e4df4` |
+| `C0000005` | READ of `0x12F` | `+0x17f40c7` |
+| `C0000005` | READ of `0x8` | `+0xfff2ac` |
+| `C000001D` | illegal instruction | `+0xeae431` |
+
+Disassembling those RVAs (`.text` is raw `0x600` / VA `0x1000`; ImageBase `0x180000000`) identifies what
+they are, and rules out an emulator instruction-coverage gap:
+* `+0xeae431` is `0f 0b` = **UD2** — Chromium's own `IMMEDIATE_CRASH()`/trap, i.e. the process aborting
+  itself deliberately, not FEX failing to implement an opcode. Child exit codes confirm the family:
+  `0xC000001D` (ud2) and `0x80000003` STATUS_BREAKPOINT (the adjacent `int3`).
+* `+0x4e4df4` is `48 8b 40 10` = `mov rax,[rax+0x10]` with `rax=0` — a member load off a **null `this`**.
+* `+0x43bc253` is `48 3b 04 11` = `cmp rax,[rcx+rdx]`, repeated at `+8`/`+0x10` — an **inlined memcmp**
+  over a null buffer pointer.
+
+**FEX itself reports nothing.** With `FEX_SILENTLOG=0` (the ARM64EC module does read `FEX_*`:
+`Source/Windows/ARM64EC/Module.cpp:585` passes `_environ` into `FEX::Config::LoadConfig`) FEX emits no
+unimplemented-instruction or invalid-op message across a full crashing run, so `UnimplementedOp` is never
+reached. Related knobs for future work: `FEX_HOSTFEATURES=disableavx`
+(`FEXCore/Source/Interface/Config/Config.json.in`) turns off the single `SupportsAVX` flag that
+`CPUID.cpp` uses to advertise AVX, AVX2, BMI1, BMI2, FMA3 and F16C together.
+
+**LEADING HYPOTHESIS (untested): 4 KiB page-protection granularity.** wine reports `dwPageSize=4096` to
+guests while this host's pages are 16 KiB (§25.2). Chromium's PartitionAlloc is by far the heaviest user of
+fine-grained page protection and guard pages in this stack, and a 16 KiB host cannot honour 4 KiB-granular
+`VirtualProtect`. That would explain why every other title works and only Chromium corrupts itself at
+scattered addresses. Same family as the FEX guard-page bug in §25.2.
+
+**HOW TO SEE CHROMIUM'S OWN OUTPUT.** These processes get no console, so stderr is discarded. Do NOT solve
+that with `--enable-logging`: on Windows Chromium allocates a CONSOLE per process, so every CEF child spawns
+a `conhost` window — dozens of empty focus-stealing windows. A console-subsystem wrapper does the same. The
+working method is **std-handle redirection**: the shim creates `C:\schout-<pid>.log` with
+`bInheritHandle=TRUE` and passes it as `hStdOutput`/`hStdError` via `STARTF_USESTDHANDLES`, no console
+involved. `LOG(ERROR)` does reach that file (Crashpad's "not connected" shows up), and **no `FATAL`/`CHECK`
+text ever precedes the faults** — so these are real memory faults plus unlogged trap-instruction aborts,
+not logged assertion failures. CEF's own `debug.log` stays useless regardless: the app pins
+`CefSettings.log_severity`, which overrides `--log-file`/`--log-severity`.
+
+**DEAD ENDS, all tested:**
+* `--disable-features=CalculateNativeWinOcclusion` — the standard Chromium-under-wine mitigation, and it
+  changes nothing here: 7 child crashes in a 170 s window with it active. (wine's
+  `DwmGetWindowAttribute` stub is still called ~1950 times per session.)
+* `--disable-features=AsyncDns` — not needed; the -1003 was a symptom of the stalled launcher, not DNS.
+* `--in-process-gpu` does genuinely stop a 32-respawn GPU-process churn, but is not required to render.
+* `ncrypt` stubs (`NCryptOpenStorageProvider`, `NCryptCreatePersistedKey` → "Persistent keys are not
+  supported", `map_ntstatus 0xc0000002`) are Chromium probing platform key storage for `ChromeMetricsTestKey`
+  and are not the crash. They may matter later for whether a device-bound "Remember me" token can persist.
+
+**Wrapping CEF's children is fine.** The launcher itself passes `--browser-subprocess-path` at
+`SocialClubHelper.exe`, so a shim installed there is re-entered for every child (12 instances in one run,
+all launching `SocialClubHelper.real.exe`) and the page still renders. What a shim must get right is to
+splice the RAW command line rather than rebuild it from `argv` — the launcher passes paths containing
+spaces and CEF children carry IPC handle values, both of which `argv` round-tripping corrupts.
+
+**CLEANING UP AFTER A RUN — two traps that leak processes.** Linux truncates `comm` to 15 characters, so
+`pkill -x socialclubhelper.real` matches NOTHING (only `socialclubhelpe` does); match on the full cmdline
+with `pgrep -f` instead. And `for p in $pids` over a newline-separated list collapses to one argument. Both
+bugs together left **95** stale processes across a session (16 `winedevice`, 39 `plugplay`, 40 `services`)
+plus ~30 `explorer.exe /desktop` husks holding mapped windows that neither the compositor's `closewindow`
+nor a batch `kill` removed. A wineserver kill plus per-pid `kill -9` clears them.
+
+**WHAT REMAINS.** RDR2 needs one **interactive online sign-in** (with "Remember me"), after which
+Rockstar's documented offline mode applies. `OfflinePlayTime` is a server-controlled tunable, so permanent
+offline is not a supported state — expect periodic online launches.
+
+Sign-in progress reached so far: the form renders, credentials are accepted, and Rockstar advances to
+"Verify your email" — then answers *"Unfortunately we are unable to send your verification email at this
+time"*. That message is generated server-side after Rockstar's own API call fails and no local setting
+influences it; repeated attempts in one evening make rate limiting the likely cause. Notably the flow gets
+that far **despite** the libcef child crashes, so those crashes are disruptive (they reload the page and
+discard 2FA state) rather than an absolute blocker.
+
+Before the first successful online sign-in, pin the device-fingerprint inputs (the C: volume serial in the
+prefix's `.windows-serial`, hostname, username) so the cached credential stays valid across rebuilds.
+
+## 27. VirtualProtect below the host page size is silently unenforced (measured 2026-08-21)
+
+**On this 16 KiB-page host, a `PAGE_NOACCESS` guard page smaller than 16 KiB does nothing, while both
+`VirtualProtect` and `VirtualQuery` report success.** Measured with `pagegran.c` (an x86_64 PE run under
+wine+FEX; `IsBadReadPtr` does the SEH-guarded probe so the test needs no MSVC extensions):
+
+```
+GetSystemInfo: dwPageSize=4096 dwAllocationGranularity=65536
+VirtualProtect(base+0x1000, 0x1000, NOACCESS) -> TRUE (old=READWRITE)
+  VirtualQuery(+0x1000): RegionSize=0x1000 Protect=NOACCESS     <- bookkeeping is faithful
+  read base+0x1000: OK                                          <- but the access SUCCEEDS
+  read base+0x0000 / +0x2000 / +0x3000: OK                      <- no collateral over-protection either
+
+TEST 2, at host granularity:
+VirtualProtect(aligned+0x4000, 0x4000, NOACCESS) -> TRUE
+  read aligned+0x4000 / +0x5000 / +0x6000 / +0x7000: FAULT      <- enforced
+  read aligned+0x0000 (outside): OK
+```
+
+So protection is honoured **exactly at host-page granularity and silently fails below it**.
+
+**Mechanism, from wine's source** (`dlls/ntdll/unix/virtual.c`). wine keeps a faithful per-4-KiB-guest-page
+protection map (`pages_vprot`), which is why `VirtualQuery` answers correctly. But when it must call
+`mprotect` it can only act on whole host pages, and `mprotect_range` resolves the conflict by taking the
+**most permissive union** of the guest pages inside each host page:
+
+```c
+static int mprotect_range( void *base, size_t size, BYTE set, BYTE clear ) {
+    char *addr = ROUND_ADDR( base, host_page_mask );   /* round DOWN to 16 KiB */
+    size = ROUND_SIZE( base, size, host_page_mask );   /* round UP   to 16 KiB */
+    vprot = get_host_page_vprot( addr );               /* for (i..host/guest) vprot |= vprot_ptr[i] */
+    prot  = get_unix_prot( (vprot & ~clear) | set );
+    ...
+```
+
+Permissive means no `SIGSEGV` is raised at all, so wine never gets the chance to consult its own map and
+enforce the finer protection. This is upstream's deliberate trade-off, not a propnix or Hangover bug —
+Hangover's "You are running with the wrong page size, expect problems!" banner is warning about this class.
+
+**Why it matters beyond one game.** Any Windows program that relies on a guard page smaller than the HOST
+page runs unprotected here: overruns and use-after-free **silently succeed** instead of trapping at the
+point of error, and the corruption surfaces later at unrelated code. This is the same failure shape as the
+FEX shadow-stack guard bug in §25.2 — one layer up, in wine rather than FEX.
+
+**This scales with page size, so state it in terms of the host page, never a literal.** A 4 KiB guard leaves
+up to 12 KiB silently writable on a 16 KiB host and up to **60 KiB** on a 64 KiB host. Everything below is
+therefore phrased as "host page size"; the measured numbers above are this host's 16 KiB instance. (The FEX
+guard fix in §25.2 is already written this way — it sizes guards by `dwAllocationGranularity`, 64 KiB, which
+is >= every aarch64 page size, so it is correct unchanged on 4/16/64 KiB hosts.)
+
+It is the leading explanation for §26's `libcef.dll` crashes, and the inference (not yet proven) runs:
+Chromium's PartitionAlloc leans on guard pages and poisoned slots; unenforced, heap errors propagate
+silently; later reads go through garbage pointers, giving the scattered `0x0`/`0x8`/`0x10`/`0xD0`/`0x12F`
+faults at six unrelated sites; and where PartitionAlloc/BackupRefPtr does detect an inconsistency it calls
+`IMMEDIATE_CRASH()` — a bare `ud2` with no log line, which is exactly the `0f 0b` observed and explains the
+absent `FATAL` text. Confirming it requires checking PartitionAlloc's actual guard alignment, since guards
+that happen to be 16 KiB-aligned WOULD still be enforced.
+
+**THE RULE FOR ANY GUARD PAGE WE ALLOCATE: it must be a whole multiple of the HOST page, aligned to it.**
+Two ways to satisfy that, both valid on 4, 16 and 64 KiB hosts:
+* Use the real host page size where it is available — e.g. wine's thread-stack guard headroom,
+  `2 * host_page_size` (`emulators/wine-hangover/patches/0001-*`). Exact, and no waste.
+* Otherwise use `dwAllocationGranularity` (64 KiB), which is >= every aarch64 page size and so is always a
+  host-page multiple without needing to query one — e.g. the FEX call/ret shadow-stack guards,
+  `std::max(FEX_PAGE_SIZE, Info.dwAllocationGranularity)` (§25.2). Costs up to 60 KiB per guard on a 4 KiB
+  host, which is why it is the fallback rather than the default.
+Never use a literal, and never use the GUEST page size: `GetSystemInfo` reports `dwPageSize=4096` here
+regardless of the host (measured above), which is exactly the trap §25.2 fell into.
+Both guards this tree owns satisfy the rule, verified by reading them.
+
+**What CANNOT be fixed by aligning, and why forcing it would be worse.** The guards that matter here belong
+to PartitionAlloc inside a prebuilt `libcef.dll`; we do not control their placement. The tempting wine-side
+"fix" — rounding a `PAGE_NOACCESS` request OUTWARD to the host page so it becomes enforceable — is
+destructive: an allocator's guard is one small page adjacent to live slots, so expanding it would render up
+to 12 KiB (16 KiB host) or **60 KiB (64 KiB host)** of valid heap inaccessible, converting silent corruption
+into hard faults on good memory. wine's permissive union is the correct default precisely because the
+alternative breaks working programs. Do not patch `mprotect_range` this way.
+
+**Fix directions for the general case**, none free, and all must hold for 4/16/64 KiB alike:
+* Report `dwPageSize` = the host page size so applications align their guards to it. Correct for Chromium
+  (it already runs on 16 KiB-page macOS/arm64) but a broad ABI change: Windows on ARM64 uses 4 KiB pages, so
+  other guests may assume 4096. Must read the real page size at runtime — never a compiled-in 16384.
+* Enforce restrictively and emulate the permitted accesses from the `SIGSEGV` handler. Faithful but costly,
+  and needs instruction emulation for the allowed-access case.
+* Leave it, and treat 4 KiB guard pages as advisory on large-page hosts (upstream's current position).
+
+## 28. RDR2.exe <-> Rockstar launcher: the interface, and why launcher-free startup is closed (measured 2026-08-22)
+
+**RDR2 IS NOT PACKAGED, and the sections below are a postmortem.** The title fails two of this project's
+standing criteria, independently of each other:
+* **It cannot run offline.** `OfflinePlayTime` is a server-controlled ~7-day leash, so a packaged copy stops
+  working without periodic re-authentication (the offline design principle).
+* **It cannot run reproducibly.** The Rockstar launcher SELF-UPDATES: the version that actually executes is
+  chosen by Rockstar's servers on first contact, not by any lockfile. The 120 GB of content pins byte-exactly;
+  what runs on top of it does not.
+Those two are not independent of the DRM, and that is the honest summary of this whole investigation: the
+launcher is unpinnable precisely BECAUSE it is the enforcement path, and the only builds that are pinnable are
+the ones that removed it. Reproducible packaging and this DRM are mutually exclusive, so the title is out of
+scope. Keep the findings below — several generalise (§27 especially) — but do not restart the packaging.
+
+**Running `RDR2.exe` without the launcher is CLOSED, on a cryptographic ground.** Recorded so nobody
+re-opens it: the startup path performs an **Authenticode verification of `steam_api64.dll`**, a file it never
+loads. `WINEDEBUG=+wintrust` shows `WinVerifyTrust` called twice with
+`WINTRUST_ACTION_GENERIC_VERIFY_V2 {00aac56b-cd44-11d0-8cc2-00c04fc295ee}`, `dwUnionChoice=1`
+(WTD_CHOICE_FILE), `dwStateAction=1` (VERIFY), `pcwszFilePath` = the game directory's `steam_api64.dll`, and
+`RDR2.exe` imports `WINTRUST.dll` directly. Verifying a DLL you do not load detects a substituted or
+emulated Steam API. Proceeding here would mean defeating a signature check, which is out of scope.
+
+**It currently "passes" only because wine's wintrust is incomplete.** `WinVerifyTrust` returns `00000000`
+while wine logs `CryptDecodeObjectEx Unsupported decoder for lpszStructType 1.3.6.1.4.1.311.2.1.4`
+(`SPC_INDIRECT_DATA`) **10 times** in the same run — it cannot decode the signature content and succeeds
+anyway. Both the depot's Valve DLL and gbe_fork's Windows release carry certificate tables, but gbe_fork's
+would not chain to Valve's on a faithful verifier. So RDR2's Steam shim rests on a broken verifier, unlike
+the Steam-client-absence argument that justifies gbe_fork elsewhere. RDR2-specific: nothing indicates
+Stellaris or Hollow Knight verify their Steam API.
+
+**The interface, characterised** (static analysis of the shipped binaries plus `WINEDEBUG=+loaddll`):
+* `PlayRDR2.exe` (496 KB) is, per its own manifest, the **"Rockstar Games Launcher Redirector"**: it turns a
+  Steam launch into an RGL launch, installing RGL if needed. Data-driven from `x64/metadata.dat` — an opaque
+  container (`\x02META2019-11-`, 1.9 MB) which the redirector decrypts via bcrypt. Its JSON schema is visible
+  in its strings: `executableName`, `principalFileName`, `steamAppIds`, `steamInstallerPath`,
+  `steamSerialRegKey`, `epicProductName`, `installFolderRegKey`, `installshieldGuid`, `cdKey`, `locKey`,
+  `noRageArgs`, `appdataFolderName`.
+* `RDR2.exe` (86 MB) has **no static import** of `socialclub.dll`, any launcher DLL, or `steam_api64.dll`. It
+  builds the path `\Rockstar Games\` + `Social Club` + `\socialclub.dll` and loads it dynamically.
+* **Started directly, `RDR2.exe` re-execs the launcher and exits.** The module trace ends
+  `… bink2w64.dll, 12on7\D3D12.DLL, C:\Program Files\Rockstar Games\Launcher\Launcher.exe` then `exit=0`,
+  with `steam_api64.dll` and `socialclub.dll` **never loaded**. So there is no Steam-only startup mode; the
+  Steam machinery is used inside a launcher-mediated session, not instead of one.
+* Auth model: `steamAuthTicket` -> `TicketScSteam` / `TicketScAuthToken` / `ScAuthToken` / `SessionTicket` /
+  `RockstarId`. Steam establishes ownership (`FinaliseSteamPurchase`, `steamAppId`); the launcher obtains the
+  Social Club session the game expects.
+* Entitlements are a Rockstar **web** API (`entitlements.asmx/RequestEntitlementScan`, `GetEntitlements`,
+  `GetEntitlementBlock`) whose vocabulary is purchase-shaped: `Consumable`, `Durable`, `InstanceId`,
+  `ExpireDateUtc`.
+* Per-storefront single-player identities exist in the binary: `rdr2_sp_steam`, `rdr2_sp_rgl`,
+  `rdr2_sp_epic`, `rdr2_sp`, `rdr2_box`, plus `rdr2_rdo` for online and `STEAM_ERROR` /
+  `STEAM_AUTH_FAILED` states.
+
+**On intent.** The per-storefront SP identifiers and the Steam-derived ownership chain are consistent with
+"the Rockstar login gates online services, and startup gating followed from the distribution model". But
+`OfflinePlayTime` being a SERVER-CONTROLLED tunable with a ~7-day expiry argues the other way: an accidental
+gate does not ship with an adjustable leash. Treat the session as the licence mechanism.
+
+**STATIC analysis of the launcher protocol is closed — the whole game code is encrypted at rest.** Note the
+scope of this claim: it rules out deriving the protocol from the BINARIES, not launcher emulation as such
+(black-box RE remains open — see the subsection after next). To reimplement the launcher you must speak its
+IPC protocol (`\\.\pipe\RDR2Launcher_Pipe` + `rockstar_event`, both named in `RDR2.exe`); to read that
+protocol out of the code, the code must be readable; and it is ciphertext on disk:
+* `RDR2.exe` `.text` entropy is **8.00** (maximally random) at every sampled offset, both `.text` sections;
+  `.rdata` is a normal 4.26. The entry point (RVA `0x2e4fc44`) is INSIDE the encrypted `.text`.
+* Pipe APIs are imported normally (`CreateNamedPipeW`, `TransactNamedPipe`, `ReadFile`, `WaitNamedPipeW`,
+  `SetNamedPipeHandleState`) but there is **zero static reference** — no code RIP-relative `lea`, no data
+  pointer — to the `RDR2Launcher_Pipe` string, which the game demonstrably uses at runtime. The referencing
+  code does not exist in cleartext; an anti-tamper stub decrypts `.text` at runtime (Arxan/Digital.ai-class,
+  standard on Rockstar PC titles).
+* The pipelog experiment confirmed the game re-execs `Launcher.exe` BEFORE probing the pipe, via an in-code
+  parentage check that is now encrypted. So neither static nor dynamic analysis of the protocol is possible
+  without unpacking the protected section = defeating a TPM. Out of scope (and forbidden by the project's
+  own "never break crypto" rule).
+
+**Recording the pipe wire (black-box API RE) is LEGITIMATE AND NOT RULED OUT — it is blocked only on
+obtaining a credential.** Do not restate this as "launcher emulation is closed": that conflates two
+different claims. Observing a running interface touches no protected code, so an emulator written from
+recorded behaviour is ordinary interop work, of the kind wine itself is built on. What blocks it TODAY is
+solely that the pipe carries no traffic until the game is spawned by a signed-in launcher. Two measurements
+establish the blocker, and its scope:
+* `.text` entropy: `Launcher.exe` 7.99, `RockstarService.exe` 7.99 (both ENCRYPTED, like the game).
+  Only `socialclub.dll` (6.42) and `SocialClubHelper` (6.20) are readable — and those are the ROS
+  server-auth (HMAC-signed HTTPS to Rockstar) and the CEF sign-in UI, NOT the game<->launcher pipe. So the
+  protocol code is behind anti-tamper on BOTH sides; there is no unprotected component to read it from.
+* Running the COMPLETE real launcher first (Launcher.exe up, RockstarService up, pipe + `rockstar_event`
+  present) and then launching `RDR2.exe` separately: the game STILL re-execs, 0 connections to the pipe. So
+  the parentage check is "was I spawned by the launcher with signal X", not "is the launcher present" — and
+  the launcher only spawns the game (setting X) after sign-in. The wine-level pipe logger (clean, invisible
+  to the guest, touches no protected code) would work, but there is never any traffic to log.
+* The ONE precondition: a single genuine sign-in on a supported channel (x86_64; this hardware cannot pass
+  the reCAPTCHA of §26). After
+  that the real launcher spawns the game, wine-level pipe logging captures the whole protocol as pure
+  observation, and an emulator can be written from it. So the standing order is: credential → record →
+  reimplement. Nothing in that chain unpacks protected code.
+
+**So RDR2's remaining path is BLOCKED, not closed.** Precisely: launching with no launcher at all, and
+deriving the protocol statically, are both ruled out on principle; obtaining a credential and then doing
+black-box RE is open, and is the route to pursue. One judgement to make deliberately at the end of it: an
+emulator that also removes the server-controlled ~7-day `OfflinePlayTime` expiry is no longer only
+interoperability, because that timer IS the licence mechanism — reimplementing the protocol for preservation
+and extending the leash are different acts even where one implementation does both.
+
+So all three RDR2 online routes are closed: direct launch (Authenticode check on `steam_api64.dll` +
+re-exec, §28 above), launcher sign-in (reCAPTCHA Enterprise, §26 — unfixable without bot evasion), and
+launcher emulation (full-code anti-tamper encryption, here). Two of the three are crypto/anti-tamper walls
+whose defeat the project rules out. The full-executable protection is also the strongest evidence that the
+launcher gate is intentional, not an oversight.

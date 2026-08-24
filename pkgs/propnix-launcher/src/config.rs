@@ -30,6 +30,10 @@ pub const THIN_BINFIX_DIR: &str = ".propnix-binfixed";
 pub struct Config {
     /// Interface version; bumped when this shape changes incompatibly.
     pub schema: u32,
+    /// Whether the app may reach the network. `false` → the launcher unshares a NETWORK NAMESPACE for the
+    /// game (loopback only), enforcing propnix's offline guarantee at the kernel rather than by trusting the
+    /// app. Display and audio are unaffected (UNIX sockets live in the mount ns).
+    pub online: bool,
     /// The launcher-dispatch tag ("prefix" — `ModeProbe` routes on it before this struct loads). Declared
     /// here as well so `deny_unknown_fields` accepts the baked field.
     pub mode: String,
@@ -281,6 +285,10 @@ impl ModeProbe {
 #[serde(deny_unknown_fields)]
 pub struct ThinConfig {
     pub schema: u32,
+    /// Whether the app may reach the network. `false` → the launcher unshares a NETWORK NAMESPACE for the
+    /// game (loopback only), enforcing propnix's offline guarantee at the kernel rather than by trusting the
+    /// app. Display and audio are unaffected (UNIX sockets live in the mount ns).
+    pub online: bool,
     /// The launcher-dispatch tag ("thin"; see `ModeProbe`). Declared here as well so `deny_unknown_fields`
     /// accepts the baked field.
     pub mode: String,

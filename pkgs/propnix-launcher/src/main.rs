@@ -291,6 +291,7 @@ fn run_outer(
         entries,
         args.unseal,
         &args.passthrough,
+        cfg.online,
     ) {
         Ok(pair) => pair,
         Err(e) => {

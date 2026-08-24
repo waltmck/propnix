@@ -325,11 +325,56 @@ fn build_child_skeleton(idx: usize, missing: &[(String, bool)]) -> Result<String
 /// persists and its child-skeleton lower exposes every sub-mount's mountpoint); being parent-first it's laid
 /// first. As a fallback, a table with NO root entry gets a fresh ephemeral tmpfs at the root instead.
 /// `tar_bin` extracts overlay `skeleton` tars. Any failure is returned as a message.
-pub fn enter_and_mount(root: &str, entries: &[Entry], tar_bin: &str) -> Result<(), String> {
+
+/// Bring `lo` up inside the current (fresh) network namespace, via SIOCSIFFLAGS on an AF_INET socket.
+/// `libc`'s `ifreq` is not portable enough to rely on, so declare the ABI shape we need: 16 bytes of name
+/// then the union, of which we touch only the leading `short` (the flags).
+unsafe fn loopback_up() -> Result<(), String> {
+    const SIOCGIFFLAGS: libc::c_ulong = 0x8913;
+    const SIOCSIFFLAGS: libc::c_ulong = 0x8914;
+    #[repr(C)]
+    struct IfReq {
+        name: [libc::c_char; 16],
+        flags: libc::c_short,
+        _union_pad: [u8; 22],
+    }
+    let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
+    if fd < 0 {
+        return Err(format!("socket(AF_INET): {}", oserr()));
+    }
+    let mut req: IfReq = std::mem::zeroed();
+    req.name[0] = b'l' as libc::c_char;
+    req.name[1] = b'o' as libc::c_char;
+    let mut rc = libc::ioctl(fd, SIOCGIFFLAGS, &mut req as *mut IfReq);
+    if rc == 0 {
+        req.flags |= (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
+        rc = libc::ioctl(fd, SIOCSIFFLAGS, &req as *const IfReq);
+    }
+    let err = oserr();
+    libc::close(fd);
+    if rc != 0 { Err(format!("ioctl(SIOCSIFFLAGS, lo): {err}")) } else { Ok(()) }
+}
+
+pub fn enter_and_mount(
+    root: &str,
+    entries: &[Entry],
+    tar_bin: &str,
+    isolate_network: bool,
+) -> Result<(), String> {
     unsafe {
         let (uid, gid) = (libc::getuid(), libc::getgid());
-        if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) != 0 {
-            return Err(format!("unshare(userns|mountns): {}", oserr()));
+        // CLONE_NEWNET when the app is declared offline (`allowNetwork = false`): the game gets a fresh
+        // network namespace with no interfaces but loopback, so nothing it does can reach the network. It
+        // must be in the SAME unshare as the userns — the new netns is then owned by the new userns, which
+        // is what gives us CAP_NET_ADMIN over it (needed to bring `lo` up below) without any privilege.
+        // Display/audio are unaffected: Wayland, X11 and PulseAudio all reach the host over UNIX sockets,
+        // which live in the mount namespace, not the network one.
+        let mut ns = libc::CLONE_NEWUSER | libc::CLONE_NEWNS;
+        if isolate_network {
+            ns |= libc::CLONE_NEWNET;
+        }
+        if libc::unshare(ns) != 0 {
+            return Err(format!("unshare(userns|mountns{}): {}", if isolate_network { "|netns" } else { "" }, oserr()));
         }
         // Identity uid/gid map (map only our own id — the ns creator keeps CAP_SYS_ADMIN in-ns, and
         // keeping our real uid means files/sockets/XDG all resolve normally). setgroups=deny first, as
@@ -339,6 +384,14 @@ pub fn enter_and_mount(root: &str, entries: &[Entry], tar_bin: &str) -> Result<(
             || std::fs::write("/proc/self/gid_map", format!("{gid} {gid} 1")).is_err()
         {
             return Err(format!("writing uid/gid map: {}", oserr()));
+        }
+        // A fresh netns has `lo` present but DOWN, and plenty of software expects loopback to work (local
+        // IPC, a game's own helper processes, anything that binds 127.0.0.1). Bring it up; failing that is
+        // not fatal — an app that never touches loopback still runs — so warn rather than abort.
+        if isolate_network {
+            if let Err(e) = loopback_up() {
+                eprintln!("propnix-mount: warning: could not bring up loopback in the network namespace: {e}");
+            }
         }
         // Make our mount tree private so nothing propagates out (it's ns-private regardless).
         let slash = CString::new("/").unwrap();

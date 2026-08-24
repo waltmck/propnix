@@ -38,6 +38,8 @@
   maskFiles ? [ ],
   exe, # the executable, RELATIVE to the game dir
   exeArgs ? [ ],
+  # Offline enforcement: false → the launcher unshares a netns for the game (see app-options `online`).
+  online ? true,
   workingDir ? null,
   # Save/state binds: `{ src; dst; ro ? false; create ? true; }` — bind `src` (persistent,
   # `$VAR`-expandable) at `dst` under the game's $HOME view (the game writes its native path; data
@@ -128,6 +130,7 @@ let
           ;
         workingDir = workingDir;
         exeArgs = exeArgs;
+        online = online;
         ldLibraryPath = ldLibraryPath;
         inherit scrubPrefixes;
         binds = map (b: {

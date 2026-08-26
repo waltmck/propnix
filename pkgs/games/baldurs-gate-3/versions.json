@@ -1,0 +1,20 @@
+{
+  "fetchInfo": {
+    "gog": {
+      "x86_64-windows": [
+        {
+          "pname": "baldurs-gate-3-win",
+          "productId": "1456460669",
+          "buildId": "59822030551802208",
+          "version": "Release - v4.1.1.7398727 - Patch Patch8_HotFix9",
+          "outputHash": "sha256-Rw9GTTuXjkvvx1fUzm4eyzjSQzM9C0u+Yp/QWr1/KFA=",
+          "outputHashMode": "recursive",
+          "os": "windows",
+          "lang": "en",
+          "kind": "game",
+          "generation": 2
+        }
+      ]
+    }
+  }
+}

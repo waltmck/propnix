@@ -1,0 +1,40 @@
+msvcrt: mark a bare rethrow in the filter, not only in the __EXCEPT body.
+
+`cxx_rethrow_filter` recognises a bare `throw;` (a CXX_EXCEPTION record whose object and
+type parameters are both NULL) and returns EXCEPTION_EXECUTE_HANDLER, but it leaves
+`ctx->rethrow` alone — that flag is only set inside the corresponding __EXCEPT body in
+call_catch_block4.
+
+The __EXCEPT body runs *after* the unwind, and `cxx_catch_cleanup` (the __FINALLY for the
+same catch) can run first. It then calls __CxxUnregisterExceptionObject() with in_use =
+FALSE, which destroys the exception object even though the exception is about to be
+rethrown. wine subsequently dispatches the next catch handler with a pointer to that
+destroyed object; the handler reads a member the destructor has already cleared and
+dereferences NULL.
+
+Exception filters run before any unwinding, so setting the flag there is always early
+enough. The __EXCEPT body still sets it, so this only tightens the ordering.
+
+Observed in Baldur's Gate 3 (x86_64 guest under wine-arm64ec + FEX): a khonsu engine
+exception thrown during level load is caught by an inner Anubis binding handler which
+rethrows; the object is destroyed between the two handlers and the outer handler faults
+reading offset 0x18 of the freed object. Verified by logging the exception object pointer
+at throw, at destruction and in the catch funclet — all three were the same address, and
+the destroy was recorded before the second dispatch. With this change the same session
+loads a level, plays and round-trips a savegame with no faults.
+
+Not arch-specific in principle: any x64 application that rethrows from a nested catch can
+hit it. Not upstreamable due to WINE's AI contribution policy.
+--- a/dlls/msvcrt/handler4.c
++++ b/dlls/msvcrt/handler4.c
+@@ -380,7 +380,10 @@
+     cxx_catch_ctx *ctx = c;
+
+     if (rec->ExceptionCode == CXX_EXCEPTION && !rec->ExceptionInformation[1] && !rec->ExceptionInformation[2])
++    {
++        ctx->rethrow = TRUE;
+         return EXCEPTION_EXECUTE_HANDLER;
++    }
+
+     FlsSetValue(fls_index, (void*)(DWORD_PTR)ctx->search_state);
+     if (rec->ExceptionCode != CXX_EXCEPTION)

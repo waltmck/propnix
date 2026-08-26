@@ -11,45 +11,94 @@
   lib,
   mkApp,
 }:
-mkApp {
-  pname = "no-mans-sky";
-  appid = "no-mans-sky";
-  name = "No Man's Sky";
-  # the fetcher takes the NUMERIC productId (not the slug); pins verified reproducible (fetchGogGalaxyBuild hdr).
-  fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
-  exe = "Binaries/NMS.exe";
-  # Full-color icon auto-extracted from the exe's PE resources (icon.auto default). Symbolic vendored (CC BY-SA 4.0).
-  icon.symbolic = ./no-mans-sky-symbolic.svg;
+mkApp (
+  { config, lib, ... }:
+  {
+    pname = "no-mans-sky";
+    appid = "no-mans-sky";
+    name = "No Man's Sky";
+    # the fetcher takes the NUMERIC productId (not the slug); pins verified reproducible (fetchGogGalaxyBuild hdr).
+    fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
+    exe = "Binaries/NMS.exe";
+    # Full-color icon auto-extracted from the exe's PE resources (icon.auto default). Symbolic vendored (CC BY-SA 4.0).
+    icon.symbolic = ./no-mans-sky-symbolic.svg;
 
-  # Broken on aarch64 (runtime-diagnosed): NMS reaches graphics init — DXVK 2.7.1 inits, picks the Apple M2
-  # (Honeykrisp) Vulkan device, loads its Streamline/XeSS upscaling middleware — then the engine's OWN crash
-  # reporter fires a Win32 dialog and self-aborts with a "GX" crash code. `+seh` proves it is NOT a CPU fault
-  # (no c0000005 / handle_syscall_fault) and NOT the winevulkan swapchain NULL-deref (Skyrim) nor a FEX
-  # CPU-fault (KSP wild-write / Stellaris stack-overflow): a Vulkan/upscaler-capability mismatch against the
-  # Honeykrisp driver in NMS's own engine init. Tested on BOTH winewayland (oversized-window white hang) and
-  # x11 (correctly-sized window → GX self-abort) — neither renders. Needs deeper AAA-engine-specific graphics
-  # work. Native x86_64 (standard Vulkan driver) is unaffected.
-  broken.systems = [ "aarch64-linux" ];
-  broken.reason = "NMS's own engine crash reporter self-aborts during graphics init on aarch64 (a \"GX\" Vulkan/upscaler-capability crash against the Asahi Honeykrisp driver — not a FEX CPU fault, not the winevulkan swapchain NULL-deref); neither winewayland nor x11 renders. Needs AAA-engine-specific graphics work. Runs on native x86_64.";
+    # PLAYS on aarch64 (title screen, load-in, walking around), with ONE outstanding rendering defect that
+    # belongs to the GPU driver, not to this package or the emulation stack.
+    #
+    # THE DEFECT — occlusion query pools exceed what Honeykrisp can back. NMS asks for FOUR 65536-entry
+    # VK_QUERY_TYPE_OCCLUSION pools (262144 queries). hk_CreateQueryPool eagerly reserves one HARDWARE occlusion
+    # slot per query in the pool, from a device-wide table of AGX_MAX_OCCLUSION_QUERIES = 32768 (mesa
+    # src/asahi/lib/agx_helpers.h; 32768 because the AGX per-draw "Fragment occlusion query" packet field is 15
+    # bits — src/asahi/genxml/cmdbuf.xml), so every pool fails with VK_ERROR_OUT_OF_DEVICE_MEMORY
+    # (hk_query_pool.c:309). NMS does not check the result and goes on using the unwritten handle, so the driver
+    # NULL-derefs on each use; wine catches the unix-side SIGSEGV and turns it into STATUS_ACCESS_VIOLATION
+    # returned from the syscall (`trace:seh:handle_syscall_fault`) rather than a crash. The game therefore runs
+    # but its occlusion culling is dead, which shows up as MAJOR FLICKERING. Measured over one boot-to-gameplay
+    # run: 12762 such faults on the stock driver vs 0 with the table raised.
+    #
+    # To make NMS use a patched mesa to work on Honeykrisp, you can try (on NixOS)
+    #
+    # no-mans-sky.apply {
+    #   env.VK_DRIVER_FILES = "${pkgs.mesa.overrideAttrs (old: {
+    #     postPatch =
+    #       (old.postPatch or "")
+    #       + ''
+    #         substituteInPlace src/asahi/lib/agx_helpers.h \
+    #         --replace-fail "#define AGX_MAX_OCCLUSION_QUERIES (32768)" \
+    #                        "#define AGX_MAX_OCCLUSION_QUERIES (1048576)"
+    #       '';
+    #   })}/share/vulkan/icd.d/asahi_icd.aarch64.json";
+    # }
+    #
+    # NOTHING about this is page-size, FEX, wine, ARM64EC, DXVK, Streamline or XeSS related. The cap is a
+    # compile-time constant, identical in every mesa 24.3 → 26.1 and in Asahi's own fork, so a 4K-page muvm
+    # guest — same Honeykrisp, same GPU — hits the same wall; muvm is not a workaround. No other mesa Vulkan
+    # driver has any occlusion-query cap at all: AMD/Intel/NVIDIA/Adreno program a full 64-bit result address
+    # per query instead of an index into one device-global table, so their only limit is memory. The upstream
+    # fix is to allocate hardware slots lazily per submission (the 15-bit index is relative to a per-submit
+    # `isp_oclqry_base`, so a pool bigger than the window is representable); simply raising the constant cannot
+    # be right in general, since NMS alone wants 4× the addressable range.
+    #
+    # Until that lands, correct rendering needs a Honeykrisp whose table covers the request, selected per-app:
+    #   VK_DRIVER_FILES=<patched-mesa>/share/vulkan/icd.d/asahi_icd.aarch64.json nix run .#no-mans-sky
+    # (a mesa built with AGX_MAX_OCCLUSION_QUERIES raised; the slots above 32768 alias in hardware because the
+    # packet field truncates, which is memory-safe — the write stays inside the table.)
 
-  # Save: NMS writes its local save + settings under AppData/Roaming/HelloGames/NMS (the GOG local-save
-  # location; confirmed from the payload's goggame-*.script savePath). Bound to the app's host save dir
-  # ($PROPNIX_SAVE_DIR/$PROPNIX_APPID, default $XDG_DATA_HOME/propnix-saves/no-mans-sky).
-  saveBinds = [
-    {
-      src = "$PROPNIX_SAVE_DIR/$PROPNIX_APPID";
-      dst = "AppData/Roaming/HelloGames/NMS";
-    }
-  ];
+    # Save: NMS writes its local save + settings under AppData/Roaming/HelloGames/NMS (the GOG local-save
+    # location; confirmed from the payload's goggame-*.script savePath). Bound to the app's host save dir
+    # ($PROPNIX_SAVE_DIR/$PROPNIX_APPID, default $XDG_DATA_HOME/propnix-saves/no-mans-sky).
+    saveBinds = [
+      {
+        src = "$PROPNIX_SAVE_DIR/$PROPNIX_APPID";
+        dst = "AppData/Roaming/HelloGames/NMS";
+      }
+    ];
 
-  wine = {
-    # NMS.exe STATICALLY imports Galaxy64.dll (the GOG Galaxy SDK, bundled beside it in Binaries/ —
-    # confirmed in the PE import table), so bind the no-op stub over it (aarch64 only; x86_64 runs it under
-    # native wine). The DRM-free GOG build plays fully offline without the SDK, which is exactly the
-    # guarantee propnix wants — see emulators/galaxy-stub for the policy.
-    galaxyStubDlls = [ "Binaries/Galaxy64.dll" ];
-    # NB: NMS also imports MSVCP140/VCRUNTIME140(_1) (VC++ 2015-2022) — NOT staged via extraSystem32. Wine's
-    # ARM64EC builtins for the modern VC140/UCRT runtime load cleanly under FEX (used by HK/Papers Please/
-    # Silksong on this same stack); only the OLD VC++ 2010 msvcp100 builtin access-violates (the Outlast case).
-  };
-}
+    wine = {
+      # NMS.exe STATICALLY imports Galaxy64.dll (the GOG Galaxy SDK, bundled beside it in Binaries/ —
+      # confirmed in the PE import table), so bind the no-op stub over it (aarch64 only; x86_64 runs it under
+      # native wine). The DRM-free GOG build plays fully offline without the SDK, which is exactly the
+      # guarantee propnix wants — see emulators/galaxy-stub for the policy.
+      galaxyStubDlls = [ "Binaries/Galaxy64.dll" ];
+      # NB: NMS also imports MSVCP140/VCRUNTIME140(_1) (VC++ 2015-2022) — NOT staged via extraSystem32. Wine's
+      # ARM64EC builtins for the modern VC140/UCRT runtime load cleanly under FEX (used by HK/Papers Please/
+
+      # Silksong on this same stack); only the OLD VC++ 2010 msvcp100 builtin access-violates (the Outlast case).
+
+      # NMS WRITES INSIDE ITS OWN INSTALL DIR: at the end of graphics init cGcGraphicsManager::Prepare calls
+      # std::filesystem::create_directories on GAMEDATA/SHADERCACHE (traced: `CreateDirectoryW
+      # L"C:/GAME/GAMEDATA/SHADERCACHE"` is the last file op before the crash). The default `drive_c/game` row
+      # is a READ-ONLY bind of the payload, so that mkdir cannot succeed and the failure path takes the engine
+      # down. Override it with a PERSISTENT COW OVERLAY, exactly as KSP does: reads come straight from the store
+      # payload (no copy — the 28 GB of .pak files stay shared), and the shader cache persists to app state.
+      # Cheap here: the whole payload is only 155 files, so the data-only skeleton is tiny.
+      mounts."drive_c/game" = {
+        type = "overlay";
+        lower = "${lib.head config.payloads}";
+        upper = "$PROPNIX_STATE/gamedir";
+        createIfNotExist = true;
+      };
+    };
+  }
+)

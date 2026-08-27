@@ -25,6 +25,7 @@ let
   # 1. The expected triple per game under the DEFAULT config (all fetchers enabled, registry order).
   expected = {
     baby-steps = "gog/x86_64-windows/${wineB}";
+    baldurs-gate-3 = "gog/x86_64-windows/${wineB}";
     dont-starve = "gog/i386-windows/${wineB}";
     # The only HOST-DEPENDENT platform in the matrix: factorio ranks Wube's native ARM64 Linux build first,
     # and `strategy.runnable` drops it on x86_64 (no ARM-on-x86 emulator here), so the resolver walks on
@@ -110,9 +111,20 @@ let
     lib.mapAttrsToList (n: ok: lib.optional (!ok) "guard failed: ${n}") guards
   );
 
+  # COVERAGE. `expected` is hand-maintained, so without this a NEW game silently escapes the whole check —
+  # its resolution unpinned, and its `fetcher` exempt from the quality-exception ratchet below (which
+  # iterates `attrNames expected`). That is not hypothetical: baldurs-gate-3 was absent and unchecked.
+  # The README's supported-games tables are derived from the same resolution, so this guards them too.
+  uncovered = lib.subtractLists (lib.attrNames expected) (lib.attrNames dflt.games);
+  stale = lib.subtractLists (lib.attrNames dflt.games) (lib.attrNames expected);
+
   errors =
     matrixErrors
     ++ guardErrors
+    ++ lib.optional (uncovered != [ ])
+      "games missing from the resolution roster (add their expected triple): ${toString uncovered}"
+    ++ lib.optional (stale != [ ])
+      "resolution roster names games that no longer exist: ${toString stale}"
     ++
       lib.optional (definesFetcher != fetcherExceptions)
         "games defining `fetcher` (quality exceptions) changed: got [${toString definesFetcher}], sanctioned [${toString fetcherExceptions}]";

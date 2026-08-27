@@ -21,6 +21,93 @@ Tell propnix which stores you have (a ranked preference; resolved purely at eval
 probed): `propnix.lib.mkScope { inherit pkgs; config.preferredFetchers = [ "steam" "gog" ]; }` — see
 **Configuration** in [DOCS.md](DOCS.md).
 
+## Supported games
+
+Two views of the same fetch matrix. The first answers **"what will run on my machine?"**; the second
+answers **"which store do I need an account with, and what does it give me?"**
+
+**How to read these tables.** Every game is packaged along two orthogonal axes — `fetcher` (which store the
+payload comes from) and `emulatedPlatform` (the OS+ABI of the build being run) — and a cell lists the
+`emulatedPlatform` values valid for that row and column. **Bold** marks what you get by default, with no
+flags: propnix picks it from the game's own quality ranking, filtered by what your host can run. Anything
+else in the cell is selectable explicitly:
+
+```sh
+nix run .#hollow-knight                                                        # the bold default
+nix run '.#hollow-knight.apply { emulatedPlatform = "x86_64-windows"; }'       # any other entry
+nix run '.#hollow-knight.apply { fetcher = "steam"; emulatedPlatform = "x86_64-linux"; }'
+```
+
+An em dash (—) means that combination is not available: in table 1 the title has no build this host can
+run, in table 2 that store does not sell a build propnix has pinned. The two tables differ because
+availability and runnability are separate questions — a platform can be pinned from a store (table 2) and
+still not run on a given host (table 1), which is exactly the aarch64 story below.
+
+### Table 1 — by host: what each machine can run
+
+Rows are games, columns are the machine you are running ON, cells are the `emulatedPlatform` values that
+*work* there. A platform is listed only if it is pinned **and** not `meta.broken` on that host, so this
+table is the honest answer to "will this game run for me".
+
+| game | on an `aarch64-linux` host | on an `x86_64-linux` host |
+|---|---|---|
+| `baby-steps` | **x86_64-windows** | **x86_64-windows** |
+| `baldurs-gate-3` | **x86_64-windows** | **x86_64-windows** |
+| `dont-starve` | **i386-windows** | **i386-windows** |
+| `factorio` | **aarch64-linux**, x86_64-linux, x86_64-windows | **x86_64-linux**, x86_64-windows |
+| `fallout-nv` | **i386-windows** | **i386-windows** |
+| `hollow-knight` | **x86_64-linux**, x86_64-windows | **x86_64-linux**, x86_64-windows |
+| `hollow-knight-silksong` | **x86_64-windows** | **x86_64-windows** |
+| `homeworld-rm` | — | **i386-windows** |
+| `iron-lung` | — | **x86_64-windows** |
+| `iron-nest` | **x86_64-windows** | **x86_64-windows** |
+| `kerbal-space-program` | — | **x86_64-windows** |
+| `no-mans-sky` | **x86_64-windows** | **x86_64-windows** |
+| `outlast` | **x86_64-windows** | **x86_64-windows** |
+| `outlast-2` | **x86_64-windows** | **x86_64-windows** |
+| `papers-please` | **x86_64-windows** | **x86_64-windows** |
+| `prison-architect` | **x86_64-windows** | **x86_64-windows** |
+| `skyrim-se` | **x86_64-windows** | **x86_64-windows** |
+| `stellaris` | **x86_64-linux** | **x86_64-linux** |
+
+Three titles are Windows-only builds that propnix cannot yet run on aarch64: `homeworld-rm`, `iron-lung`
+and `kerbal-space-program` all hit FEX code-generation bugs (a Unity/Mono abort, or an SEH fault in a
+32-bit binary). They are marked `meta.broken` there rather than shipped broken, so the build refuses with
+the reason instead of the game crashing — run `nix eval .#<game>.meta.brokenReason` for the detail. They
+run natively on x86_64.
+
+### Table 2 — by store: which fetcher provides which build
+
+Rows are games, columns are stores. A cell lists the `emulatedPlatform` values propnix has **pinned** from
+that store, independent of any host. This is the table to read when deciding which account you need: a
+game with entries under only one column can only be built by someone who owns it there.
+
+| game | `gog` | `steam` |
+|---|---|---|
+| `baby-steps` | x86_64-windows | — |
+| `baldurs-gate-3` | x86_64-windows | — |
+| `dont-starve` | i386-windows | — |
+| `factorio` | x86_64-windows | aarch64-linux, x86_64-linux, x86_64-windows |
+| `fallout-nv` | i386-windows | — |
+| `hollow-knight` | x86_64-windows | x86_64-linux, x86_64-windows |
+| `hollow-knight-silksong` | x86_64-windows | — |
+| `homeworld-rm` | i386-windows | — |
+| `iron-lung` | x86_64-windows | — |
+| `iron-nest` | x86_64-windows | — |
+| `kerbal-space-program` | x86_64-windows | — |
+| `no-mans-sky` | x86_64-windows | — |
+| `outlast` | x86_64-windows | — |
+| `outlast-2` | x86_64-windows | — |
+| `papers-please` | x86_64-windows | — |
+| `prison-architect` | x86_64-windows | — |
+| `skyrim-se` | x86_64-windows | — |
+| `stellaris` | — | x86_64-linux |
+
+Where a game is pinned from both stores, the default fetcher follows your `preferredFetchers` config
+(every registered fetcher, in registry order, unless you narrow it) — so a gog-only setup automatically
+falls back to the GOG build of a game whose Steam build would otherwise win, provided the game's own
+ranking sanctions that platform. Nothing outside that ranking is ever selected silently.
+
 ## Requirements
 
 propnix assembles a throwaway `WINEPREFIX` per launch out of kernel bind/overlay mounts in a private

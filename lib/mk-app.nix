@@ -17,7 +17,7 @@
   lib,
   stdenv,
   knobTypes,
-  resolveStrategy,
+  strategy, # lib/strategy.nix: the platform table + pure backend selection (D4)
   fetchers,
   backends,
   mkSteamOfflineEntitlement,
@@ -31,7 +31,7 @@ let
       lib
       stdenv
       knobTypes
-      resolveStrategy
+      strategy
       fetchers
       backends
       ;

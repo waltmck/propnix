@@ -15,6 +15,44 @@
           "generation": 2
         }
       ]
+    },
+    "steam": {
+      "x86_64-windows": [
+        {
+          "pname": "factorio-win-steam",
+          "appId": 427520,
+          "depotId": 427521,
+          "manifestId": "2295899940878716639",
+          "branch": "experimental",
+          "version": "2.1.16",
+          "outputHash": "sha256-kt9K0YMXU2p0coTgv7/kXsmIl2AxVJTIr5D6fvGMKDY=",
+          "title": "Factorio (windows, Steam)"
+        }
+      ],
+      "aarch64-linux": [
+        {
+          "pname": "factorio-linux-steam",
+          "appId": 427520,
+          "depotId": 427523,
+          "manifestId": "8140616319979963103",
+          "branch": "experimental",
+          "version": "2.1.16",
+          "outputHash": "sha256-09Ay8Wc9bw9ymqXyKm239jamd12JKil0rLER7XJiSeQ=",
+          "title": "Factorio (linux, Steam)"
+        }
+      ],
+      "x86_64-linux": [
+        {
+          "pname": "factorio-linux-steam",
+          "appId": 427520,
+          "depotId": 427523,
+          "manifestId": "8140616319979963103",
+          "branch": "experimental",
+          "version": "2.1.16",
+          "outputHash": "sha256-09Ay8Wc9bw9ymqXyKm239jamd12JKil0rLER7XJiSeQ=",
+          "title": "Factorio (linux, Steam)"
+        }
+      ]
     }
   },
   "dlc": {
@@ -30,6 +68,28 @@
       "lang": "en",
       "kind": "dlc",
       "generation": 2
+    },
+    "space-age-steam-windows": {
+      "pname": "factorio-space-age-win-steam",
+      "appId": 427520,
+      "depotId": 645393,
+      "dlcAppId": 645390,
+      "manifestId": "3608665788669059222",
+      "branch": "experimental",
+      "version": "2.1.16",
+      "outputHash": "sha256-tKC50opgiP+7Gs78oT45qyHVDLozuqpKPElzvwprc98=",
+      "title": "Factorio: Space Age (windows, Steam)"
+    },
+    "space-age-steam-linux": {
+      "pname": "factorio-space-age-linux-steam",
+      "appId": 427520,
+      "depotId": 645391,
+      "dlcAppId": 645390,
+      "manifestId": "4121902875324834557",
+      "branch": "experimental",
+      "version": "2.1.16",
+      "outputHash": "sha256-J3WFGDNHs6SRpyhu/77O3oXOUEHnCChe0nsxDhxtiKE=",
+      "title": "Factorio: Space Age (linux, Steam)"
     }
   }
 }

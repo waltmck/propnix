@@ -1,5 +1,5 @@
 # builders/steam-offline-entitlement.nix — a SELF-LOCATING entitlement tree for a bundled Steam-API
-# reimplementation: the LGPL gbe_fork shim (emulators/gbe-fork.nix) COPIED beside a generated settings tree
+# reimplementation: the LGPL gbe_fork shim (emulators/gbe-fork) COPIED beside a generated settings tree
 # that tells it which DLC this account owns. One derivation is both the preload target and the config it
 # reads.
 #
@@ -50,12 +50,17 @@
   # Owned + mounted DLC: name → { appId; title; }. `appId` here is the DLC's own store appid, which for a
   # DLC shipped as its own depot of the base app IS the depotId — see pkgs/games/stellaris/versions.json.
   dlc,
-  # The GUEST-arch `libsteam_api.so` (gbe_fork's x64 build), copied at $out — the THIN preload target.
+  # The PAYLOAD-ABI `libsteam_api.so` (the caller picks gbe_fork's matching per-ABI build), copied at $out
+  # — the THIN preload target.
   # COPIED, not symlinked: the beside-the-library probe resolves the mapping's BACKING file, and a
   # symlink's backing file is the shim package's own store path — where no settings live. The copy costs
   # ~9 MiB per DLC selection (identical copies hardlink under auto-optimise) and is what lets the probe
   # land here.
-  shim,
+  #
+  # `null` for a backend with no preload at all (wine, served entirely by `mirror`): the root `.so` is
+  # stray there, and emitting it anyway would pull a whole foreign-ABI shim — cross toolchain, static
+  # protobuf and all — into a pure-wine game's closure to place a file nothing ever opens.
+  shim ? null,
   # MIRRORS, for backends where the placement mechanism is UNION-REPLACEMENT rather than preload+binds
   # (wine: extraLowers outrank the payload, and the PE loader file-maps DLLs so the beside-the-library
   # probe just works): `{ "<game-dir-relative shipped lib path>" = <replacement lib>; }`. Each entry
@@ -115,7 +120,7 @@ runCommandLocal "${pname}-${toString appId}"
     set -euo pipefail
     install -d "$out/steam_settings"
     cd "$out"
-    cp ${shim} libsteam_api.so
+    ${lib.optionalString (shim != null) "cp ${shim} libsteam_api.so"}
     # Both spots: inside steam_settings/ (gbe_fork's documented location) AND beside the lib (the
     # ancestor's spot; harmless, and the libPaths bind rows reference the root copy).
     printf '%s\n' ${lib.escapeShellArg (lib.concatStringsSep "\n" interfaces)} > steam_interfaces.txt

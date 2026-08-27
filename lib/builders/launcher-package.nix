@@ -29,6 +29,11 @@
   },
   description,
   extraPassthru ? { },
+  # Build-time ASSERTIONS the package must not be installable without: derivations that produce an empty
+  # `$out` dir and fail loudly when their invariant does not hold (thin.nix checks that every declared
+  # executable actually exists in one of the game trees). Joined in so `nix build` runs them; they
+  # contribute no files.
+  extraChecks ? [ ],
 }:
 let
   wrapper = runCommand "${pname}-launcher-wrapper" { nativeBuildInputs = [ makeWrapper ]; } ''
@@ -52,7 +57,8 @@ symlinkJoin {
     wrapper
     desktopItem
   ]
-  ++ lib.optional (iconTree != null) iconTree; # the freedesktop hicolor raster theme
+  ++ lib.optional (iconTree != null) iconTree # the freedesktop hicolor raster theme
+  ++ extraChecks; # empty dirs; here only so their assertions are forced by a build
   passthru = {
     inherit configFile;
     launcher = propnix-launcher;

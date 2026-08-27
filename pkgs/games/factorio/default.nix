@@ -1,71 +1,158 @@
-# Factorio (GOG, Windows x86_64 build) via wine — on aarch64 through FEX + native ARM64EC DXVK, on x86_64
-# natively. Wube Software's factory-automation sim on its own engine (D3D/OpenGL). ARCH-AGNOSTIC: the same
-# spec runs on both hosts; mkApp + the scope pick the arch-appropriate emulator set, and the SAME Windows
-# payload (a content-addressed FOD) is shared across arches. GOG's Galaxy content-system has NO Linux build
-# for Factorio (Windows + Mac only), so like the other titles we package the Windows build via wine.
-# Payload = the pinned GOG Galaxy build fetched by fetchGogGalaxyBuild (D15), delivered as the game tree directly.
+# Factorio (Wube Software) — a factory-automation sim on its own engine, packaged from BOTH stores across
+# THREE content platforms. The two axes (D16) are fully independent here, and this is the repo's first game
+# whose platform ranking reaches a NATIVE-aarch64 build:
 #
-#   nix run .#factorio --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64-linux or x86_64-linux
+#   * steam / aarch64-linux   — Wube's own ARM64 Linux build, run NATIVELY on aarch64 (no emulator at all).
+#                               The best path on this host by a wide margin, and the reason the platform axis
+#                               grew an `aarch64-linux` value. Skipped automatically on an x86_64 host —
+#                               propnix ships no ARM-on-x86 emulator, so lib/strategy.nix `runnable` filters
+#                               it out of the resolver's walk and the ranking falls through to the next entry.
+#   * steam / x86_64-linux    — the same depot's x86_64 ELF, under box64 on aarch64 / natively on x86_64.
+#   * steam / x86_64-windows  — the Steam Windows build under wine (aarch64 → FEX + ARM64EC DXVK).
+#   * gog   / x86_64-windows  — the GOG Galaxy Windows build under wine. The sanctioned fallback: a
+#                               gog-only `preferredFetchers` gets this automatically (GOG's content system
+#                               has no Linux Factorio build at all — Windows + Mac only).
+#
+# ONE DEPOT, TWO PLATFORMS: Steam ships both Linux ABIs in depot 427523, so `fetchInfo.steam.aarch64-linux`
+# and `.x86_64-linux` are the SAME row (same pname/manifest ⇒ one derivation, fetched once). What differs is
+# only which ELF `exe` names. NB the depot lays a `bin/x64/factorio` BASH DISPATCHER over the two real
+# binaries (it `exec`s ../x64_/factorio or ../arm64/factorio after reading `arch`) — selecting that path
+# would hand box64 a shell script, so both arms name the real ELF directly.
+#
+# THE STEAM PINS ARE ON THE `experimental` BRANCH (2.1.x), deliberately: `bin/arm64/` exists only there.
+# Steam's `public` branch is still 2.0.77, whose Linux depot ships a single `bin/x64/factorio` and no ARM64
+# build — pinning it would delete the aarch64-linux platform. Every Steam row therefore names the same
+# branch and version, so the three platforms cannot drift into save-incompatible engine versions.
+#
+#   nix run .#factorio                                                          # steam/aarch64-linux (native) on aarch64
+#   nix run '.#factorio.apply { emulatedPlatform = "x86_64-linux"; }'           # steam/linux under box64
+#   nix run '.#factorio.apply { fetcher = "gog"; }'                             # gog/windows under wine
+#   nix run '.#factorio.withDlc [ "space-age" ]'                                # + the Space Age expansion
 {
   lib,
   mkApp,
   mkSetupScript,
   fetchGogGalaxyBuild,
+  fetchSteamDepot,
 }:
 let
   versions = lib.importJSON ./versions.json;
 in
 mkApp (
   { config, lib, ... }:
+  let
+    onLinux = lib.hasSuffix "-linux" config.emulatedPlatform;
+    onGog = config.fetcher == "gog";
+  in
   {
     pname = "factorio";
     appid = "factorio";
     name = "Factorio";
-    # GOG-Windows only (GOG's Galaxy content-system has no Linux Factorio build).
+
     fetchInfo = versions.fetchInfo;
 
-    # The 64-bit game binary (goggame-*.info isPrimary FileTask, PE32+ x86-64). Factorio resolves read-data +
-    # its %APPDATA%\Factorio write dir from the EXECUTABLE location (via GetModuleFileName → bin/x64/../..),
-    # NOT the cwd, so no `workingDir` is needed. No Galaxy SDK in the tree (no galaxyStubDlls), and the modern
-    # VC++/UCRT runtime loads on wine's ARM64EC builtins under FEX (no extraSystem32).
-    exe = "bin/x64/factorio.exe";
+    # The game's quality ranking, best first, and HOST-INDEPENDENT — this states what is the better build,
+    # not what this machine happens to be able to execute. Native ARM64 beats the same game under box64,
+    # which beats the Windows build under wine+FEX; the Windows rank is what a gog-only user falls through
+    # to. The resolver filters this through `lib/strategy.nix`'s `runnable`, so an x86_64 host skips the
+    # ARM64 entry and walks on down this same list — no per-host branching belongs in a game spec.
+    platformPreference = [
+      "aarch64-linux"
+      "x86_64-linux"
+      "x86_64-windows"
+    ];
+
+    # Factorio resolves its read-data dir and its user-data dir from the EXECUTABLE's location (via
+    # /proc/self/exe → bin/<arch>/../..), not from the cwd, so no `workingDir` is needed on any platform.
+    exe =
+      if config.emulatedPlatform == "aarch64-linux" then
+        "bin/arm64/factorio"
+      else if config.emulatedPlatform == "x86_64-linux" then
+        "bin/x64_/factorio" # NB the underscore: bin/x64/factorio is the arch dispatcher script
+      else
+        "bin/x64/factorio.exe";
 
     # Full-color icon: factorio.exe's PE resources top out at 48px (pixelated upscaled) AND the high-res game
     # asset is off-centre in its canvas, so use the 1024px icon Wube ships in the game data via `icon.png` —
     # autocropped + recentred into a crisp, centred hicolor theme + splash png (lib/icons/from-png.nix). The
-    # symbolic variant is a vendored gear (Font Awesome 6 Solid, CC BY 4.0 — attribution in the .svg header).
+    # same relative path exists in every payload this game has — verified against all five pinned trees (GOG
+    # Windows + its Space Age, and the Steam Windows/Linux depots + both Space Age depots), each carrying an
+    # identical 1185524-byte file — so it needs no per-axis branch. The symbolic variant is a vendored gear (Font
+    # Awesome 6 Solid, CC BY 4.0 — attribution in the .svg header).
     icon.png = "${lib.head config.payloads}/data/core/graphics/factorio.icon/Assets/factorio.png";
     icon.symbolic = ./factorio-symbolic.svg;
 
-    # Save: Factorio's user-data dir (saves + mods + config + player-data + log) is %APPDATA%\Factorio on
-    # Windows — CONFIRMED by config-path.cfg (`use-system-read-write-data-directories=true`) + the goggame
-    # savePath `{userappdata}/Factorio`, and verified: the running game wrote config/config.ini +
-    # factorio-current.log + temp/ here. Bound out of the rebuildable prefix to the app's host save dir
-    # ($PROPNIX_SAVE_DIR/$PROPNIX_APPID, default $XDG_DATA_HOME/propnix-saves/factorio).
+    # De-store-integration. Factorio LINKS its store SDK rather than dlopening it — `readelf -d` on both
+    # Linux ELFs shows `NEEDED libsteam_api.so` with `RUNPATH $ORIGIN` — so `maskFiles` is not merely
+    # constrained here, it is impossible: erasing the library makes the loader refuse to start the process
+    # ("error while loading shared libraries"), which is nothing like the clean "no online subsystems"
+    # degradation a dlopen-ing engine gives. The file must EXIST, so the Steam story is the offline
+    # entitlement shim: steam.emu binds the gbe_fork library over each path below (thin) / union-replaces the
+    # dll (wine), and answers DLC ownership offline. Declared for every payload unconditionally — each
+    # backend consumes only the flavour its loader can mean.
+    steam.emu.libPaths = [
+      "bin/arm64/libsteam_api.so"
+      "bin/x64_/libsteam_api.so"
+      "bin/x64/steam_api64.dll"
+    ];
+
+    # Save: Factorio's user-data dir (saves + mods + blueprints + config + player-data + log). Both OS
+    # layouts bind to the SAME host dir, which is right — the formats are cross-platform, so a save made by
+    # the aarch64 build opens in the Windows build and vice versa.
+    #   Windows: %APPDATA%\Factorio          (goggame savePath `{userappdata}/Factorio`; verified at runtime)
+    #   Linux:   ~/.factorio                 (config-path.cfg `use-system-read-write-data-directories=true`)
     saveBinds = [
       {
         src = "$PROPNIX_SAVE_DIR/$PROPNIX_APPID";
-        dst = "AppData/Roaming/Factorio";
+        dst = if onLinux then ".factorio" else "AppData/Roaming/Factorio";
       }
     ];
 
-    # DLC — each versions.json `dlc` entry is a DLC-only FOD: the SAME base build fetched with a `dlcId`,
-    # yielding just that DLC's game-relative overlay tree (e.g. `data/space-age/…`), no base exe. It is NOT
-    # part of the base package: `factorio` ships vanilla; `factorio.withDlc [ "space-age" ]` (or
-    # `factorio.withAllDlc` / `.apply { dlc.enabled = [ … ]; }`) flips the game mount to a read-only overlay
-    # unioning base + selected DLC at runtime — so an enabled DLC costs no second copy of the base payload in
-    # the store. Space Age (GOG DLC 1831417704) is Wube's 2.0 expansion (space platforms, new planets,
-    # quality/elevated-rails); requires the base game.
-    dlc.available = lib.mapAttrs (_: fetchGogGalaxyBuild) versions.dlc;
+    # DLC — Space Age (Wube's 2.0 expansion: space platforms, new planets, quality/elevated-rails; requires
+    # the base game). Note what the tree actually IS on both stores: NOT an additive overlay but a COMPLETE
+    # 20835-file build of the game, its own engine binary and a full `data/base` included, with the
+    # expansion's `data/{space-age,quality,elevated-rails,recycler}` alongside. Enabling it therefore
+    # shadows the base payload almost entirely through the DLC-first union — which is why the thin path
+    # gives every game tree its own exec-bit fix layer in its own position (builders/thin.nix): a single
+    # fix layer built from the base payload would put the BASE engine back on top of the expansion's.
+    dlc.available.space-age =
+      if onGog then
+        fetchGogGalaxyBuild versions.dlc.space-age
+      else if onLinux then
+        fetchSteamDepot versions.dlc.space-age-steam-linux
+      else
+        fetchSteamDepot versions.dlc.space-age-steam-windows;
 
-    # Run setup.sh before wine: assert `[other] check-updates=false` in config.ini so Factorio's in-game
-    # auto-update check is off by default (moot for a read-only store payload — see setup.sh). Factorio keeps
-    # this in config.ini, NOT the registry, so a `userReg` entry cannot express it. setup.sh uses the shared
-    # `ini_set` (withIniLib) tuned to Factorio's CRLF `key=value` format.
-    wine.setupScript = mkSetupScript {
-      name = "factorio-setup";
-      script = ./setup.sh;
-      withIniLib = true;
+    # ── box64 / native Linux tuning ── Factorio static-links almost everything (its own ELF NEEDs only
+    # libresolv/libsteam_api/libm/libc) and dlopens the rest by soname at runtime — the bundled-SDL2 pattern.
+    # This is the union those dlopens must find. Only ever forced by a thin backend.
+    box64 = import ./box64-tuning.nix;
+
+    # box64-SPECIFIC, and measured here: the x86_64 build under box64 dies during init with
+    # `SDLWindow.cpp:190: SDL couldn't be initialized. SDL_Error: wayland not available`, then aborts. The
+    # same wall hollow-knight hits — SDL's Wayland backend does not survive box64 — and the same fix: pin
+    # SDL to x11 and let XWayland carry it. The NATIVE faces need none of this (the aarch64 build runs
+    # straight on Wayland), so this is gated on the backend rather than on the platform.
+    env.SDL_VIDEODRIVER = lib.mkIf (config.backend == "box64") "x11";
+
+    # ── wine tuning ──
+    wine = {
+      # The GOG build bundles the Galaxy SDK as a STATIC import, which cannot be WINEDLLOVERRIDE'd away —
+      # it needs a real no-op stub so nothing ever reaches GOG's services (offline policy, not a crash fix).
+      galaxyStubDlls = lib.mkIf onGog [ "bin/x64/Galaxy64.dll" ];
+
+      # Assert `[other] check-updates=false` before launch, so Factorio's own updater never runs against an
+      # immutable store payload (with it on, launching pops an "automatic updates / log in to download"
+      # dialog and makes a network request against an install it can never modify). GOG-ONLY, and that is a
+      # measured fact rather than caution: the string `check-updates` appears in the GOG binary and in
+      # NEITHER Steam build (Windows or Linux) — Wube compiles the in-game updater out of the Steam
+      # distribution, because Steam does the updating. So the Steam platforms need no seeding at all, which
+      # is just as well: `setupScript` is a wine-backend knob and the thin backends have no equivalent hook.
+      setupScript = lib.mkIf onGog (mkSetupScript {
+        name = "factorio-setup";
+        script = ./setup.sh;
+        withIniLib = true;
+      });
     };
   }
 )

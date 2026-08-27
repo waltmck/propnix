@@ -4,7 +4,7 @@
 # REUSES the game's `box64.*` library declarations as a pure guest union — no options module of its own.
 # Two extra needs vs box64: (1) the main executable's ELF interpreter must point at an x86_64 ld.so that
 # exists under FEX_ROOTFS — GOG/Steam ELFs hard-code /lib64/ld-linux-x86-64.so.2, absent on the aarch64
-# host — so JUST the main exe is patched (in a tiny overlay unioned above the read-only payload);
+# host — so the declared executables are patched (in a tiny overlay unioned above the game trees);
 # (2) FEX_ROOTFS must be set (unset hangs — RESEARCH §2), pinned to the host root, under which the absolute
 # x86_64 store-path libraries resolve as guest files.
 #
@@ -17,8 +17,7 @@
   lib,
   pkgsX86,
   mangohud,
-  runCommand,
-  patchelf,
+  mkPatchedExes,
   mkThinBuild,
   # nixpkgs FEX-Emu (bin/FEXInterpreter); aarch64-only scope attr, null on x86_64 (FEX-thin is aarch64-only).
   fexInterpreter ? null,
@@ -33,41 +32,41 @@
       executables,
     }:
     let
-      inherit (cfg) exe;
       inherit (cfg.box64) bridgingLibs guestLibs;
-      primaryTree = builtins.head cfg.payloads;
-      # + steam-emu's shim NEEDED set when enabled (glibc, libstdc++/libgcc_s) — mirrors the box64 entry.
-      guestSet =
-        p:
-        (bridgingLibs p)
-        ++ (guestLibs p)
-        ++ lib.optionals cfg.steam.emu.enable [
-          p.glibc
-          p.stdenv.cc.cc.lib
-        ];
-      # Patch ONLY the main exe's ELF interpreter → the x86_64 glibc loader's store path, in a tiny overlay
-      # unioned ABOVE the read-only payload (the store tree can't be patched in place). The bundled .so's
-      # need no patch (FEX loads them via LD_LIBRARY_PATH); only the executable carries a PT_INTERP. The
-      # copy is made +x here, so the generic exec-bit mode-fix is DISABLED (`executables = [ ]` below) —
-      # this patched, executable copy is the highest-priority overlay entry and wins at the exe path.
-      patchedExe = runCommand "propnix-fex-exe" { nativeBuildInputs = [ patchelf ]; } ''
-        dst="$out/${exe}"
-        mkdir -p "$(dirname "$dst")"
-        cp --no-preserve=mode "${primaryTree}/${exe}" "$dst"
-        chmod u+wx "$dst"
-        patchelf --set-interpreter "${pkgsX86.glibc}/lib/ld-linux-x86-64.so.2" "$dst"
-      '';
+      # Game trees in MOUNT PRIORITY order — DLC first, matching mk-thin-build's list. Used for BOTH the
+      # patched exe and the guest library path: taking either from `head cfg.payloads` would silently
+      # invert the DLC-first union for a store that ships its expansion as a complete build carrying its
+      # own engine binary (Factorio's Space Age).
+      gameTrees = enabledDlc ++ cfg.payloads;
+      # steam-emu's shim needs no entry here — it is built from source (emulators/gbe-fork) and carries a
+      # RUNPATH to every dependency, glibc and libstdc++ included. Mirrors the box64 entry.
+      guestSet = p: (bridgingLibs p) ++ (guestLibs p);
+      # Patch the declared executables' ELF interpreter → the x86_64 glibc loader's store path, in a tiny
+      # overlay unioned ABOVE the read-only game trees (the store tree can't be patched in place). The
+      # bundled .so's need no patch (FEX loads them via LD_LIBRARY_PATH); only an executable carries a
+      # PT_INTERP. The copies are made +x, so the generic exec-bit mode-fix is DISABLED (`executables = [ ]`
+      # below) — this patched, executable overlay is the highest-priority entry and wins at those paths.
+      # Shared with the native face (builders/patched-exes.nix), which needs exactly the same thing with a
+      # different loader; `cfg.exe` is included explicitly, and every other declared executable now gets
+      # patched too rather than being silently left 0444 by the dropped mode-fix.
+      patchedExes = mkPatchedExes {
+        name = "fex-${cfg.appid}";
+        trees = gameTrees;
+        executables = [ cfg.exe ] ++ executables;
+        interpreter = "${pkgsX86.glibc}/lib/ld-linux-x86-64.so.2";
+      };
     in
     mkThinBuild {
       inherit cfg enabledDlc executables;
       block = {
         backend = "fex";
         emulator = if fexInterpreter != null then "${fexInterpreter}/bin/FEXInterpreter" else null;
-        # Guest x86_64 libraries: the exe-bearing tree first (its bundled .so's — UnityPlayer.so, the Mono
-        # runtime — win over the system copies), then the declared guest set from pkgsX86. FEX_ROOTFS=/
+        # Guest x86_64 libraries: the game trees first in mount-priority order (their bundled .so's —
+        # UnityPlayer.so, the Mono runtime — win over the system copies, and a DLC's copy wins over the
+        # base's just as it does in the union), then the declared guest set from pkgsX86. FEX_ROOTFS=/
         # makes these absolute store paths resolve as guest files on the host.
         ldLibraryPath = lib.concatStringsSep ":" (
-          [ "${primaryTree}" ] ++ [ (lib.makeLibraryPath (guestSet pkgsX86)) ]
+          (map (t: "${t}") gameTrees) ++ [ (lib.makeLibraryPath (guestSet pkgsX86)) ]
         );
         # FEX_ROOTFS must be set (unset hangs). The game's unified `env` merges OVER it.
         env = {
@@ -82,8 +81,8 @@
         }
         // cfg.env;
         mangohud = "${mangohud}";
-        # The patched-exe overlay is stacked ABOVE the payload (before DLC); no metacopy mode-fix.
-        extraLowers = [ "${patchedExe}" ];
+        # The patched-exe overlay is stacked ABOVE every game tree; no metacopy mode-fix.
+        extraLowers = [ "${patchedExes}" ];
         executables = [ ];
         # The 16K-page walls (see the STATUS header); carried but not shippable here.
         brokenSystems = [

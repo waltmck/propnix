@@ -19,36 +19,21 @@
   lib,
   stdenv,
   knobTypes,
-  resolveStrategy,
+  strategy, # lib/strategy.nix: `platforms` (the axis vocabulary) + `platformToNeed` / `resolveStrategy` / `runnable`
   fetchers, # fetcher registry: name → (emulatedPlatform → fetch function); see lib/default.nix
   backends, # backend registry: name → { modules; build; }; see lib/backends/*/default.nix
   preferredFetchers, # the validated ranked allowlist from propnixConfig (lib/default.nix)
 }:
 let
-  # The supported content platforms. `platformToNeed` maps one to the { os; arch; } pair resolveStrategy
-  # selects the backend from. Extending the platform axis = a value here + a strategy.nix case.
-  platforms = [
-    "x86_64-windows"
-    "i386-windows"
-    "x86_64-linux"
-  ];
-  platformToNeed =
-    p:
-    {
-      "x86_64-windows" = {
-        os = "windows";
-        arch = "x86_64";
-      };
-      "i386-windows" = {
-        os = "windows";
-        arch = "i386";
-      };
-      "x86_64-linux" = {
-        os = "linux";
-        arch = "x86_64";
-      };
-    }
-    .${p};
+  # The supported content platforms + their ABI mapping live in lib/strategy.nix, next to the backend
+  # selection that reads them: extending the axis is one edit there, and the fetch matrix below (a
+  # genAttrs over this list) then generates the new (fetcher, platform) options automatically.
+  inherit (strategy) platforms platformToNeed resolveStrategy;
+
+  # Whether THIS host can run a platform's content at all. A platform is host-specific when it names an
+  # arch no emulator here covers (aarch64-linux: native on aarch64, nothing on x86_64), so the resolver
+  # filters the game's ranking through this before choosing — see `emulatedPlatform`.
+  hostRunnable = p: strategy.runnable p stdenv.hostPlatform.system;
 
   # The pinned (fetcher, platform) pairs of a fetch matrix — for the resolver error messages.
   pinnedPairsOf =
@@ -151,7 +136,29 @@ in
               config.fetchInfo.${config.fetcher}.${p} != null
             else
               lib.any (f: config.fetchInfo.${f}.${p} != null) preferredFetchers;
-          candidates = lib.filter reachable config.platformPreference;
+          # Skipped BEFORE reachability: a platform this host cannot execute at all (aarch64-linux on
+          # x86_64) is not a fallback the user can enable by adding a fetcher, so it must not shape the
+          # error either. This is the ONE host-dependent step of the resolution — it lets a game rank its
+          # host-specific native build first (factorio: aarch64-linux) without stranding the other host,
+          # which then walks on down the SAME game-authored ranking to a portable build. That is why
+          # `platformPreference` stays host-INDEPENDENT: it states which build is better, and this filter
+          # states what this machine can do with that.
+          #
+          # NOTE for the day propnix gains an ARM-on-x86 emulator: `runnable` would then be true for
+          # aarch64-linux on BOTH hosts, and a plain filter no longer expresses "prefer your own
+          # architecture" — an x86_64 host would pick the emulated ARM64 build over its own native one just
+          # because the game ranks ARM64 higher. The fix belongs HERE, as a host-native TIEBREAK over the
+          # game's ranking (stable-sort the candidates so a platform whose arch matches the host wins ties),
+          # not as per-host branching pushed back into every game's `platformPreference`.
+          candidates = lib.filter (p: hostRunnable p && reachable p) config.platformPreference;
+          # For the error message: platforms this game PINS that the host cannot run. Read off the fetch
+          # matrix, not off `platformPreference`, because a game may already have host-conditioned its own
+          # ranking (factorio drops aarch64-linux on x86_64) — in which case the unrunnable platform never
+          # appears in the ranking and a diagnostic derived from it would always be empty. What the reader
+          # needs to know is "this game HAS a build for something, and it isn't one this machine can run".
+          hostRejected = lib.filter (
+            p: !hostRunnable p && lib.any (f: config.fetchInfo.${f}.${p} != null) (lib.attrNames fetchers)
+          ) platforms;
         in
         if candidates != [ ] then
           lib.head candidates
@@ -163,14 +170,21 @@ in
                 "the selected fetcher '${config.fetcher}'"
               else
                 "your preferredFetchers [ ${toString preferredFetchers} ]"
-            } (pinned pairs: ${lib.concatStringsSep ", " (pinnedPairsOf config.fetchInfo)}).
+            } (pinned pairs: ${lib.concatStringsSep ", " (pinnedPairsOf config.fetchInfo)}).${
+              lib.optionalString (hostRejected != [ ]) ''
+
+                (This game also pins ${toString hostRejected}, which ${stdenv.hostPlatform.system} cannot
+                run — propnix has no backend for that content here.)''
+            }
             Either extend config.preferredFetchers, or select a pinned pair explicitly:
             `.apply { fetcher = …; emulatedPlatform = …; }`.'';
-      defaultText = lib.literalExpression "the first game-ranked platform reachable with preferredFetchers";
+      defaultText = lib.literalExpression "the first game-ranked platform that this host can run and preferredFetchers can reach";
       description = ''
         The content's OS+ABI. Drives `backend` (via resolveStrategy) and most per-game tweaks. Resolves to
-        the first `platformPreference` entry reachable with the enabled fetchers;
-        `.apply { emulatedPlatform = …; }` overrides (the fetcher then re-resolves within it).
+        the first `platformPreference` entry that (a) this HOST can run — `lib/strategy.nix` `runnable`,
+        which is how a game may rank a host-specific native build (aarch64-linux) first — and (b) is
+        reachable with the enabled fetchers; `.apply { emulatedPlatform = …; }` overrides (the fetcher then
+        re-resolves within it, and an unrunnable explicit choice is a legible `backend` error).
       '';
     };
     backend = lib.mkOption {
@@ -179,8 +193,13 @@ in
       defaultText = lib.literalExpression "resolveStrategy (platformToNeed config.emulatedPlatform) stdenv.hostPlatform.system";
       description = ''
         The execution backend (a lib/backends/* registry entry): windows → wine (FEX/ARM64EC underneath on
-        aarch64); linux → box64 on aarch64, native on x86_64. Override per launch style:
-        `.apply { backend = "fex"; }`.
+        aarch64); x86 linux → box64 on aarch64, native on x86_64; aarch64 linux → native. Override per
+        launch style: `.apply { backend = "fex"; }`.
+
+        NB `resolveStrategy` is total over the registry — it answers which backend WOULD run the content,
+        not whether this host can. A platform the host cannot run (aarch64 content on x86_64, reachable
+        only by an explicit `.apply`) still evaluates and is refused at BUILD time via `meta.broken`,
+        contributed by the backend entry. See lib/strategy.nix `runnable`.
       '';
     };
 
@@ -286,7 +305,8 @@ in
         build with enabled DLC or `extraLowers` — including everything steam.emu wires in) is refused by
         the kernel as a lowerdir: the launch dies with EINVAL. Masks compose with a plain single-payload
         bind (hollow-knight); a game that needs both DLC/extraLowers AND a mask needs the whiteout moved
-        into the exec-bit skeleton layer first (mkStoreSkeleton already knows how to carry one).
+        into a layer of the stack first — no current builder does that, so treat the combination as
+        unsupported rather than as something to work around.
       '';
     };
     workingDir = lib.mkOption {
@@ -407,9 +427,9 @@ in
         the game rather than in the store (pkgs/games/stellaris: the offline Steam entitlement settings).
         Merged read-only at mount time, so no copy of the base is made.
 
-        THIN backends carry one caveat: these rank below the exec-bit metacopy skeleton, which mirrors the
-        whole `payloads` head — so an entry may ADD paths freely but cannot override one that already
-        exists in that first payload (builders/thin.nix documents the ordering).
+        On THIN backends these rank ABOVE every game tree, including each tree's exec-bit fix layer — so
+        an entry both adds paths and overrides one a payload already provides. (It ranks below the
+        backend's own overlay, the patched-exe layer, which must win at the executable's path.)
       '';
     };
 

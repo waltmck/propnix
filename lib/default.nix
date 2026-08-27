@@ -59,7 +59,7 @@ pkgs.lib.makeScope pkgs.newScope (
   {
     # ── wine + graphics (arch-aware INTERNALLY: same source, arch-appropriate archs/DLL flavor) ──
     wine = callPackage ../emulators/wine-hangover { }; # Hangover fork; arm64ec archs on aarch64, plain on x86_64
-    gbeFork = callPackage ../emulators/gbe-fork.nix { }; # prebuilt guest-x86_64 Steam-API reimplementation (the steam-emu shim)
+    gbeFork = callPackage ../emulators/gbe-fork { inherit pkgs; }; # per-ABI Steam-API reimplementation (the steam-emu shim): Linux from source, Windows PE prebuilt
     prefixLower = callPackage ../emulators/wine-prefix-lower.nix { }; # RO system tree; FEX DLLs only on aarch64 (fexdlls ? null)
     dxvk =
       if isAarch64 then
@@ -81,7 +81,10 @@ pkgs.lib.makeScope pkgs.newScope (
     # ── the module system (D16) ──
     sealing = import ./sealing.nix { inherit (pkgs) lib; }; # §7 env-seal data model + tuning flatten (pure lib)
     knobTypes = import ./modules/types.nix { inherit lib; }; # custom leaf option types (knob / lastWins / dedupList)
-    inherit (import ./strategy.nix { inherit lib; }) resolveStrategy; # pure backend selection (D4)
+    # The platform axis + pure backend selection (D4): `platforms`, `platformToNeed`, `resolveStrategy`,
+    # `runnable`. Exposed as ONE attr rather than spread into the scope — `platforms`/`runnable` are names
+    # a callPackage'd package could plausibly want for something else.
+    strategy = import ./strategy.nix { inherit lib; };
     presets = import ./presets { inherit lib; }; # reusable tuning fragments (unity.*) + mergeTuning
 
     # The FETCHER REGISTRY: fetcher name → (emulatedPlatform → fetch function). Feeds mkApp's `fetcher`
@@ -128,9 +131,10 @@ pkgs.lib.makeScope pkgs.newScope (
     };
 
     # The BACKEND REGISTRY: backend name → { modules; build; } (lib/backends/<name>/ — each entry carries
-    # its own option namespace + dispatch arm). `native` is the x86_64 face of the box64 entry (the entry
-    # itself decides emulator-vs-direct-exec by host arch); it re-uses the build with NO modules so the
-    # shared `box64.*` options aren't declared twice.
+    # its own option namespace + dispatch arm). `native` is the direct-exec face of the box64 entry (the
+    # entry decides emulator-vs-direct-exec from `cfg.backend` — i.e. from the PAYLOAD's arch against the
+    # host's, not from the host alone); it re-uses the build with NO modules so the shared `box64.*`
+    # options aren't declared twice.
     backends =
       let
         box64Entry = callPackage ./backends/box64 { inherit pkgs pkgsX86; };
@@ -154,10 +158,11 @@ pkgs.lib.makeScope pkgs.newScope (
     mkLauncherPackage = callPackage ./builders/launcher-package.nix { }; # the shared packaging tail (wrapper + .desktop + meta)
     mkDesktopItem = callPackage ./builders/desktop-item.nix { }; # §5 .desktop + symbolic icon
     mkStoreSkeleton = callPackage ./builders/store-skeleton.nix { }; # data-only overlay skeleton (sparse stubs+xattrs → tar)
+    mkPatchedExes = callPackage ./builders/patched-exes.nix { }; # +x (and PT_INTERP-stamped) exe overlay for the execve'ing thin backends
     mkWineReg = callPackage ./builders/wine-reg.nix { }; # declarative per-game reg hive (wine-gen base + overrides)
     mkSetupScript = callPackage ./builders/setup-script.nix { }; # setup.sh wrapper (pinned PATH + pipefail + ini-lib)
     # Offline entitlement answers for a Steam engine that asks the (absent) Steam client whether the
-    # owner's already-decrypted DLC is owned: the guest-arch gbe_fork shim (a COPY, so its
+    # owner's already-decrypted DLC is owned: the payload-ABI gbe_fork shim (a COPY, so its
     # beside-the-library settings probe resolves here) + the generated settings tree it reads.
     mkSteamOfflineEntitlement = callPackage ./builders/steam-offline-entitlement.nix { };
     wineDefaults = callPackage ./backends/wine/defaults.nix { }; # the base wine tuning layer; override to re-base all games

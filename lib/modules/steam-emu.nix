@@ -1,5 +1,5 @@
 # modules/steam-emu.nix — the framework's OFFLINE STEAM ENTITLEMENT module (the `steam.*` namespace):
-# wires lib/builders/steam-offline-entitlement.nix (the LGPL gbe_fork shim, emulators/gbe-fork.nix, copied
+# wires lib/builders/steam-offline-entitlement.nix (the LGPL gbe_fork shim, emulators/gbe-fork, copied
 # beside a generated settings tree) into every Steam-fetched THIN game, so an engine that asks the
 # (absent) Steam client whether the owner's already-decrypted DLC is owned gets the answer automatically.
 # Imported by mk-app.nix alongside app-options; a game normally sets NOTHING here — `steam.appId` derives
@@ -10,8 +10,8 @@
 #     to its loader's spelling (BOX64_LD_PRELOAD / LD_PRELOAD). The shim's symbols interpose the shipped
 #     steam lib on the game's PLT lookups (engines that LINK libsteam_api — Stellaris), and on native/FEX
 #     the beside-the-library settings probe resolves right into the settings tree.
-#   * `extraLowers` — the same tree unioned into the game dir (box64's CWD-fallback discovery; box64
-#     never file-maps guest libraries, so the beside-the-library probe cannot work there).
+#   * `extraLowers` — the same tree unioned into the game dir, ABOVE every game tree (box64's CWD-fallback
+#     discovery; box64 never file-maps guest libraries, so the beside-the-library probe cannot work there).
 #   * per `.so` entry of `steam.emu.libPaths`, three `extraBinds` rows — the SAME settings-tree shim bound
 #     OVER the game's shipped copy, plus `steam_settings/` + `steam_interfaces.txt` bound beside it. This
 #     serves engines that dlopen the lib by EXPLICIT PATH, which no preload can interpose (Unity native
@@ -42,7 +42,7 @@
 #     diff). A FUTURE game built against a newer SDK than the pin fails the same way the predecessor
 #     goldberg-emu 0.2.5 failed hollow-knight: the lib loads, init throws EntryPointNotFoundException, black
 #     screen — WORSE than absence. Triage: `nm -D <game's libsteam_api.so>` and check its newest entry
-#     points/interface strings exist in gbe_fork's .so; if not, bump emulators/gbe-fork.nix first.
+#     points/interface strings exist in gbe_fork's .so; if not, bump emulators/gbe-fork first.
 #
 # steam.emu SUPERSEDES `maskFiles` for the steam lib: the mask's whiteout re-overlays the file's parent,
 # which EINVALs once this module's `extraLowers` makes the game dir multi-lower — and with the shim bound
@@ -52,10 +52,10 @@
   lib,
   knobTypes,
   mkSteamOfflineEntitlement,
-  # The shim package (emulators/gbe-fork.nix): a prebuilt GUEST-x86_64 artifact, loaded INTO the emulated
-  # process — inherently the guest arch on every host, so no pkgsGuest split arises. Its NEEDED set
-  # (glibc/libstdc++/libgcc_s) is appended to the guest lib union by the thin backends whenever the emu is
-  # enabled.
+  # The shim package (emulators/gbe-fork): one derivation carrying a build PER ABI — the Linux shims
+  # compiled from source (the host's own arch natively, the other by cross-compilation), the Windows PE
+  # shims from upstream's release of the same tag. Each is self-contained: nix's cc-wrapper records a
+  # RUNPATH covering every dependency, so the thin backends inject nothing on its behalf.
   gbeFork,
 }:
 { config, ... }:
@@ -67,16 +67,47 @@ let
   # is a legible error (the mirror must pick a replacement flavor).
   soPaths = lib.filter (lib.hasSuffix ".so") cfg.steam.emu.libPaths;
   dllPaths = lib.filter (lib.hasSuffix ".dll") cfg.steam.emu.libPaths;
+  # The Linux shim is loaded INTO the game's own process, so it must be the PAYLOAD's ABI: the x86_64 build
+  # for anything running x86_64 code (native or under box64), the aarch64 build for a native aarch64
+  # payload. emulators/gbe-fork builds one per ABI from a single source description.
+  #
+  # Indexed through `gbeFork.linuxShims` — the PER-ABI derivations — never through the assembled
+  # `${gbeFork}` tree. The tree is a symlinkJoin over every ABI, so referencing it would make ANY
+  # steam.emu game (which is every Steam fetch by default) force all of them: on this host that means a
+  # full pkgsCross bootstrap — a two-stage cross-GCC plus static protobuf/abseil/curl/mbedtls/opus/
+  # portaudio, ~1300 derivations, none of them substitutable — to build an x86_64 library that an aarch64
+  # payload will never load. `null` for the wine platforms, which have no preload and are served entirely
+  # by the `.dll` mirrors below: the root `.so` is stray there (see the header), so emitting it would drag
+  # a foreign-ABI shim into a pure-wine game's closure for a file nothing opens.
+  linuxShim =
+    {
+      "aarch64-linux" = "${gbeFork.linuxShims.aarch64}/lib/libsteam_api.so";
+      "x86_64-linux" = "${gbeFork.linuxShims.x64}/lib/libsteam_api.so";
+      "x86_64-windows" = null;
+      "i386-windows" = null;
+    }
+    .${cfg.emulatedPlatform} or (throw
+      "propnix (${cfg.pname}): steam.emu has no gbe_fork shim for emulatedPlatform '${cfg.emulatedPlatform}' — add that ABI to emulators/gbe-fork, or set `steam.emu.enable = false` for this platform."
+    );
+  # The PE shims are upstream prebuilt bytes in their own derivation — again by passthru, so a wine game
+  # pulls the two DLLs and nothing else.
   winShimFor =
     p:
     {
-      "steam_api64.dll" = "${gbeFork}/share/gbe_fork/win/x64/steam_api64.dll";
-      "steam_api.dll" = "${gbeFork}/share/gbe_fork/win/x86/steam_api.dll";
+      "steam_api64.dll" = "${gbeFork.winPrebuilt}/share/gbe_fork/win/x64/steam_api64.dll";
+      "steam_api.dll" = "${gbeFork.winPrebuilt}/share/gbe_fork/win/x86/steam_api.dll";
     }
     .${baseNameOf p} or (throw
       "propnix (${cfg.pname}): steam.emu.libPaths entry '${p}' has an unrecognized basename — expected steam_api.dll / steam_api64.dll / *.so."
     );
   unknownPaths = lib.subtractLists (soPaths ++ dllPaths) cfg.steam.emu.libPaths;
+  # "Name (Steam)" → "Name"; "Name (linux, Steam)" → "Name"; anything else is returned untouched.
+  stripProvenance =
+    s:
+    let
+      m = builtins.match "(.*) \\([^()]*Steam\\)" s;
+    in
+    if m == null then s else lib.head m;
   # One entitlement row per ENABLED DLC, read off the depot derivation's own identity — never authored by
   # hand. The `or` throws mirror mkApp's own legibility (this projection can be forced before its check).
   entitlement =
@@ -95,8 +126,12 @@ let
           d.depotId or (throw
             "propnix (${cfg.pname}): DLC '${name}' is not a Steam depot fetch (no depotId/dlcAppId on the derivation) — steam.emu cannot project its entitlement."
           );
-      # Row titles carry a human " (Steam)" provenance suffix; the emitted list holds a display name — strip it.
-      title = lib.removeSuffix " (Steam)" (d.title or name);
+      # Row titles carry a human PROVENANCE suffix, and it is not always the bare " (Steam)": a game that
+      # pins the same DLC once per platform distinguishes the rows — "Factorio: Space Age (linux, Steam)".
+      # The emitted list is a DISPLAY NAME the engine shows in its own DLC/Additional-Content UI, so strip
+      # any trailing parenthesised tag that names the store rather than only the exact bare suffix, which
+      # would leak "(linux, Steam)" straight into the game's UI.
+      title = stripProvenance (d.title or name);
     };
   settings = mkSteamOfflineEntitlement {
     appId =
@@ -105,10 +140,14 @@ let
       else
         throw "propnix (${cfg.pname}): steam.emu is enabled but steam.appId is null — it only derives from a Steam fetch matrix; set `steam.appId` explicitly.";
     pname = "${cfg.pname}-entitlement";
-    shim = "${gbeFork}/share/gbe_fork/x64/libsteam_api.so";
+    # PER-PLATFORM (see `linuxShim`): the .so is loaded into the game's OWN process, so it has to be that
+    # process's arch. This makes the settings tree platform-specific, which is correct — a game's aarch64
+    # and x86_64 builds cannot share one shim — and costs nothing, since the tree is a few KB of generated
+    # config beside a copy of the library.
+    shim = linuxShim;
     # Wine's union-replacement mirrors, one per declared .dll path. Built into the ONE shared tree (a
-    # game's every backend uses the same settings drv): stray on thin — the payload's own dll wins
-    # through the exec-bit skeleton, and nothing loads it — exactly as the root .so is stray on wine.
+    # game's every backend uses the same settings drv): stray on thin — nothing there loads a PE — exactly
+    # as the root .so is omitted entirely on wine, which has no preload to point at it.
     mirror = lib.throwIfNot (unknownPaths == [ ]) "propnix (${cfg.pname}): steam.emu.libPaths entries with unrecognized suffix (need .so or .dll): ${toString unknownPaths}" (
       lib.genAttrs dllPaths winShimFor
     );

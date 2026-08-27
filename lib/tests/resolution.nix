@@ -26,7 +26,11 @@ let
   expected = {
     baby-steps = "gog/x86_64-windows/${wineB}";
     dont-starve = "gog/i386-windows/${wineB}";
-    factorio = "gog/x86_64-windows/${wineB}";
+    # The only HOST-DEPENDENT platform in the matrix: factorio ranks Wube's native ARM64 Linux build first,
+    # and `strategy.runnable` drops it on x86_64 (no ARM-on-x86 emulator here), so the resolver walks on
+    # down the SAME game-authored ranking to the x86_64 Linux build. Both are `native` — neither host
+    # emulates the platform it ends up on.
+    factorio = if isAarch64 then "steam/aarch64-linux/native" else "steam/x86_64-linux/native";
     fallout-nv = "gog/i386-windows/${wineB}";
     hollow-knight = "steam/x86_64-linux/${linuxB}"; # linux-first ranking (benchmarks: box64 ahead of wine+FEX)
     hollow-knight-silksong = "gog/x86_64-windows/${wineB}";
@@ -85,6 +89,18 @@ let
       == "gog/x86_64-windows/${wineB}";
     fetcher-apply-reresolves-platform =
       triple (dflt.hollow-knight.apply { fetcher = "steam"; }) == "steam/x86_64-linux/${linuxB}";
+    # ── the host-runnability filter (lib/strategy.nix `runnable`) ──
+    # A platform this host cannot execute is skipped by the RESOLVER but stays selectable EXPLICITLY, and an
+    # explicit selection must still EVALUATE — the CI eval matrix forces every pinned pair on both systems,
+    # so a throw here would turn "this host can't run it" into a red leg. Unrunnability is a BUILD refusal.
+    host-filter-skips-unrunnable-platform =
+      dflt.factorio.config.emulatedPlatform
+      == (if isAarch64 then "aarch64-linux" else "x86_64-linux");
+    unrunnable-platform-still-evaluates =
+      (builtins.tryEval (dflt.factorio.apply { emulatedPlatform = "aarch64-linux"; }).config.backend).success;
+    unrunnable-platform-is-broken-off-host =
+      (dflt.factorio.apply { emulatedPlatform = "aarch64-linux"; }).meta.broken == !isAarch64;
+
     overridescope-reinstantiates =
       triple
         ((mk { }).overrideScope (final: prev: { propnixConfig.preferredFetchers = [ "gog" ]; }))

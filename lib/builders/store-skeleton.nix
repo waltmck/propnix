@@ -29,6 +29,12 @@
   # and native exec both require +x on the ELF they load. Default [] → every stub keeps the writable-by-owner
   # 0644 truncate default (fine for read/dlopen; the outer overlay is read-only regardless). Must be
   # owner-writable so propnix-mount can stamp the metacopy/redirect xattrs at runtime (setxattr needs write).
+  #
+  # An entry NOT present in this payload is SKIPPED, not an error: one skeleton is built per game tree
+  # (builders/thin.nix), and an executable naturally lives in only one of them — the base payload's engine
+  # binary is absent from an additive DLC tree, and a DLC that ships its own complete build of the game
+  # carries a copy the base tree's skeleton must not claim. thin.nix asserts separately that every declared
+  # executable exists in at least ONE tree, so a typo is still a build failure rather than a 0444 exec.
   executables ? [ ],
 }:
 runCommand "${name}-overlay-skeleton.tar"
@@ -62,8 +68,9 @@ runCommand "${name}-overlay-skeleton.tar"
     # data still resolves through the redirect to the store payload (no data copy). Kept owner-writable so the
     # runtime xattr stamp (setxattr) succeeds.
     ${lib.concatMapStrings (rel: ''
-      test -f "$tree"/${lib.escapeShellArg rel} || { echo "propnix: executable '${rel}' not in skeleton payload" >&2; exit 1; }
-      chmod 0755 "$tree"/${lib.escapeShellArg rel}
+      if [ -f "$tree"/${lib.escapeShellArg rel} ]; then
+        chmod 0755 "$tree"/${lib.escapeShellArg rel}
+      fi
     '') executables}
     # Reproducible, sparse tar (extraction uses --no-same-owner, so owner 0 is fine).
     tar --sparse --sort=name --owner=0 --group=0 --numeric-owner --mtime='@1' \

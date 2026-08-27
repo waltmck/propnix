@@ -111,9 +111,9 @@ mkApp (
     # NOT part of the base package: `stellaris` ships vanilla (a default of "all" would make the default
     # derivation depend on the packager's own entitlements). `stellaris.withAllDlc` /
     # `.withDlc [ "utopia" … ]` / `.apply { dlc.enabled = [ … ]; }` union the selected trees ABOVE the
-    # base at mount time, so an enabled DLC costs no second copy of the ~28 GiB base payload. Safe on the
-    # thin path despite builders/thin.nix's exec-bit-skeleton caveat (the skeleton, which outranks these
-    # lowers, mirrors the BINARIES depot — and that depot has no `dlc/` at all).
+    # base at mount time, so an enabled DLC costs no second copy of the ~28 GiB base payload. On the thin
+    # path each game tree keeps its own place in the stack with its own exec-bit fix layer, so a DLC tree
+    # is never shadowed by the base's (builders/thin.nix) — and these DLC carry no executable anyway.
     #
     # This is the set the packaging Steam account owns; Steam refuses the decryption key (eresult 15) for
     # the rest of the catalogue, so an unowned DLC is simply not listed. Nothing here writes

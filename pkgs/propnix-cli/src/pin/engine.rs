@@ -165,6 +165,9 @@ struct Shared<IO: ChunkIo> {
     budget: u64,
     tuning: Tuning,
     epoch_bytes: AtomicU64,
+    /// Requests that DELIVERED in this epoch. The governor needs it as the denominator: what a far end is
+    /// telling us by failing is a RATE, and a public CDN's steady ~1% failure rate is not pushback.
+    epoch_ok: AtomicU64,
     epoch_errors: AtomicU64,
     /// Content bytes handed to the sink, for the caller's progress line.
     delivered_bytes: AtomicU64,
@@ -305,6 +308,7 @@ fn new_shared<IO: ChunkIo>(
         budget: budget.max(1),
         tuning,
         epoch_bytes: AtomicU64::new(0),
+        epoch_ok: AtomicU64::new(0),
         epoch_errors: AtomicU64::new(0),
         delivered_bytes: AtomicU64::new(0),
         stop: AtomicBool::new(false),
@@ -385,7 +389,16 @@ async fn fetch_one<IO: ChunkIo>(shared: &Arc<Shared<IO>>, idx: usize) -> Option<
     let it = item.clone();
     let decoded = tokio::task::spawn_blocking(move || io.decode(&it, body)).await;
     match decoded {
-        Ok(Ok(data)) => Some(data),
+        Ok(Ok(data)) => {
+            // Counted HERE, not at transfer time, so a request is ok XOR error. Decode IS the integrity
+            // check (hash mismatch, decrypt/inflate failure), so a chunk that arrives and then fails to
+            // decode is a FAILURE — counting it as both dilutes the governor's error rate to f/(1+f) and a
+            // link throwing away a third of its transfers would read as 0.23 and keep climbing. It also
+            // kept the two halves of one request in different epochs, since the decode lands after
+            // `spawn_blocking`.
+            shared.epoch_ok.fetch_add(1, Ordering::Relaxed);
+            Some(data)
+        }
         Ok(Err(e)) => {
             // A body that will not decode is this endpoint's fault too.
             shared.io.observe(&item, target.endpoint, Outcome::Failed);
@@ -519,7 +532,12 @@ async fn worker<IO: ChunkIo>(shared: Arc<Shared<IO>>, sink: Option<Arc<dyn Sink>
 
 /// Adjust concurrency from measured throughput, and fail the run if nothing succeeds for STALL_TIMEOUT.
 async fn govern<IO: ChunkIo>(shared: Arc<Shared<IO>>, max: usize) {
-    let mut gov = Governor::new(START_INFLIGHT.min(max), 1, max);
+    // FLOOR of 4, not 1. Backoff is multiplicative, so whatever drives it — a genuine struggling link, a
+    // burst of failures, or a bug in the error signal — the limit heads for the floor, and a floor of 1
+    // means the whole remaining transfer runs over a single socket at the CDN's per-connection cap. Four
+    // is not an abusive number of connections to hold against a CDN even when it is genuinely unhappy,
+    // and it keeps the pipeline able to measure that more concurrency helps.
+    let mut gov = Governor::new(START_INFLIGHT.min(max), 4.min(max), max);
     let mut last = Instant::now();
     loop {
         tokio::time::sleep(shared.tuning.epoch).await;
@@ -529,6 +547,7 @@ async fn govern<IO: ChunkIo>(shared: Arc<Shared<IO>>, max: usize) {
         let elapsed = last.elapsed().as_secs_f64();
         last = Instant::now();
         let bytes = shared.epoch_bytes.swap(0, Ordering::Relaxed);
+        let ok = shared.epoch_ok.swap(0, Ordering::Relaxed);
         let errors = shared.epoch_errors.swap(0, Ordering::Relaxed);
 
         let (limit_now, stalled_for, complete) = {
@@ -559,13 +578,13 @@ async fn govern<IO: ChunkIo>(shared: Arc<Shared<IO>>, max: usize) {
             }
         };
         let throughput = if elapsed > 0.0 { bytes as f64 / elapsed } else { 0.0 };
-        let limit = gov.observe(throughput, pressure, errors);
+        let limit = gov.observe(throughput, pressure, ok, errors);
         if std::env::var_os("PROPNIX_PIN_DEBUG").is_some() {
             eprintln!(
                 "\n  [pin] inflight {limit_now} -> {limit}  {:.1} MB/s  {}{}",
                 throughput / 1e6,
                 if pressure == Pressure::ConsumerBound { "consumer-bound" } else { "network" },
-                if errors > 0 { format!("  errors={errors}") } else { String::new() },
+                if errors > 0 { format!("  errors={errors}/{}", ok + errors) } else { String::new() },
             );
         }
         if limit != limit_now {

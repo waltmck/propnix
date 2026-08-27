@@ -220,20 +220,24 @@ fn resolve_thin_table(cfg: &ThinConfig, view: &Path) -> io::Result<Vec<Entry>> {
         seed: None,
     }];
 
-    // The game dir: the read-only game tree, unioned from `gameLowers` (+ an optional exec-bit-fix layer on
-    // top). The lowers list, highest-priority first:
-    //   * with a `gameModeFix`: an intermediate metacopy overlay `skeleton::lower` (userxattr) is mounted at
-    //     THIN_BINFIX_DIR first — its exe stubs are +x while data redirects to the store (zero copy) — then
-    //     stacked ABOVE `gameLowers` (so the +x executables win over the depots' 0444 originals);
-    //   * `gameLowers` themselves (the data depots), unioned read-only.
+    // The game dir: the read-only game tree, unioned from the lowers below, highest-priority first:
+    //   * `gameLowers` — the layers that need no exec-bit fix (the backend's own overlays, the offline
+    //     Steam-entitlement settings tree, a game's `extraLowers`);
+    //   * one layer per `gameModeFixes` entry, IN ORDER — each an intermediate metacopy overlay
+    //     `skeleton::lower` (userxattr) mounted read-only at its own THIN_BINFIX_DIR<i>, whose exe stubs are
+    //     +x while data redirects to the store (zero copy). One per game tree, so a tree keeps its own place
+    //     in the stack: fixing them as a single layer built from the primary payload would mirror that whole
+    //     tree over everything above it and silently win against a DLC that ships its own build of the game.
+    // Each binfix dir sorts before the game dir (`.` < `g`), so it is laid first and the game overlay below
+    // can reference it as a lower.
     // The final game mount is: 1 lower → a read-only bind; several → a read-only overlay UNION (leftmost wins).
     let game_target = view.join(THIN_GAME_DIR).to_string_lossy().into_owned();
-    let mut game_lowers: Vec<String> = Vec::new();
-    if let Some(mf) = &cfg.game_mode_fix {
-        // Entry: the metacopy exec-bit-fix overlay (`skeleton::lower`, userxattr — propnix-mount's skeleton
-        // path), mounted read-only at THIN_BINFIX_DIR. Sorts before the game dir (`.` < `g`), so it is laid
-        // first and the game overlay below can reference it as a lower.
-        let binfix_target = view.join(THIN_BINFIX_DIR).to_string_lossy().into_owned();
+    let mut game_lowers: Vec<String> = cfg.game_lowers.clone();
+    for (i, mf) in cfg.game_mode_fixes.iter().enumerate() {
+        let binfix_target = view
+            .join(format!("{THIN_BINFIX_DIR}{i}"))
+            .to_string_lossy()
+            .into_owned();
         entries.push(Entry::Overlay {
             target: binfix_target.clone(),
             lower: mf.lower.clone(),
@@ -243,7 +247,6 @@ fn resolve_thin_table(cfg: &ThinConfig, view: &Path) -> io::Result<Vec<Entry>> {
         });
         game_lowers.push(binfix_target);
     }
-    game_lowers.extend(cfg.game_lowers.iter().cloned());
     if game_lowers.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,

@@ -59,10 +59,10 @@ jobs:
         include:
           - system: aarch64-linux
             runner: ubuntu-24.04-arm
-            attrs: propnix-launcher propnix-cli box64
+            attrs: propnix-launcher propnix-cli box64 gbeFork
           - system: x86_64-linux
             runner: ubuntu-latest
-            attrs: propnix-launcher propnix-cli dxvk vkd3d
+            attrs: propnix-launcher propnix-cli dxvk vkd3d gbeFork
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/build-and-push

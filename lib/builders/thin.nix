@@ -9,6 +9,7 @@
 {
   lib,
   writeText,
+  runCommand,
   gnutar,
   sealing,
   mkLauncherPackage,
@@ -20,16 +21,23 @@
   pname,
   appid,
   name ? pname,
-  # The game tree(s): a LIST of derivations mounted READ-ONLY at the view's game dir and run from there.
-  # One entry → a read-only bind; several → a lowerdir-only overlayfs UNION at mount time (leftmost wins),
-  # the free multi-depot merge (no build-time copy).
+  # The GAME TREES: a LIST of derivations mounted READ-ONLY at the view's game dir and run from there,
+  # in MOUNT PRIORITY order (leftmost wins). Enabled DLC leads the list, then the payload depots —
+  # backends/mk-thin-build.nix assembles it — because DLC is game content that unions ahead of the base,
+  # and because each entry gets its own exec-bit fix layer below (a DLC that ships its own build of the
+  # game needs its executable made runnable just as the base depot's does).
+  # One entry → a read-only bind; several → a lowerdir-only overlayfs UNION at mount time, the free
+  # multi-depot merge (no build-time copy).
   payloads,
-  # DLC (or other) trees to union ABOVE the base game tree (highest overlay priority, DLC-first — matching
-  # the wine DLC overlay). Store-path strings. Empty = the lowers are exactly the base game.
+  # NON-GAME layers unioned ABOVE every game tree: the backend's own overlay (the patched-exe layer) and
+  # the app's extra trees (the offline Steam-entitlement settings). Store-path strings. Enabled DLC is NOT
+  # here — it is game content and rides in `payloads`, where it gets its own exec-bit fix layer in its own
+  # position. Empty = the lowers are exactly the game trees.
   extraLowers ? [ ],
-  # Game-dir-relative paths that must carry the EXEC bit (box64/native exec require +x; Steam depots ship
-  # 0444) — reproduced via a sparse metacopy skeleton of the exe-bearing tree (`payloads` head), stacked
-  # above the union (zero data copy). `[]` → no fix (e.g. FEX's already-+x patched exe).
+  # Game-dir-relative paths that must carry the EXEC bit (box64 needs +x on the ELF it loads; Steam depots
+  # ship 0444) — reproduced via one sparse metacopy skeleton PER GAME TREE, each stacked in that tree's own
+  # position (zero data copy). `[]` → no fix, for a backend that supplies its own already-+x copies (FEX
+  # and the native face, which must patch PT_INTERP anyway — see builders/patched-exes.nix).
   executables ? [ exe ],
   # Game-dir-relative files to ERASE from the game dir at runtime — emitted as propnix-mount `whiteout`
   # entries, so the file is genuinely ABSENT with NO store copy of the tree. (E.g. HK's Steam-only
@@ -72,34 +80,62 @@
   mangohud, # MangoHud package root (PROPNIX_BENCH shim preload; see thin.rs)
 }:
 let
-  # The metacopy skeleton over the exe-bearing tree (`payloads` head): a sparse, zero-data-copy layer that
-  # makes `executables` +x. The launcher mounts `skeleton::(head)` (userxattr) as a read-only layer ABOVE
-  # the other trees. Built only when there are executables to fix; `maskFiles` are handled separately as
-  # runtime whiteout entries, NOT here.
+  # The exec-bit fix: ONE metacopy skeleton PER GAME TREE, each a sparse, zero-data-copy mirror of its own
+  # tree whose `executables` stubs are 0755. The launcher mounts each as `skeleton::tree` (userxattr) and
+  # puts the result in THAT TREE'S place in the lower stack, so priority is preserved exactly.
   #
-  # KNOWN CONSTRAINT: the skeleton mirrors the WHOLE primary tree (an executables-only skeleton was tried
-  # and broke box64's UnityPlayer.so load), and the launcher stacks the binfix layer at the very top — so a
-  # thin EXTRA lower (DLC / FEX's patched exe) that MODIFIES a primary-tree file is shadowed by the primary
-  # version when the exec-bit fix is active. No current thin game combines both; a future thin-DLC title
-  # needs the launcher to stack the binfix directly above the primary tree instead.
-  primaryTree = builtins.head payloads;
-  restTrees = builtins.tail payloads;
+  # Per-tree, not one layer built from the primary payload, because a skeleton mirrors its WHOLE tree (an
+  # executables-only skeleton was tried and broke box64's UnityPlayer.so load). A single such layer stacked
+  # at the top therefore shadows every higher-priority tree — a DLC that ships a COMPLETE build of the game
+  # rather than an additive overlay (Factorio's Space Age, on both GOG and Steam) would silently lose to the
+  # base engine — and it leaves an executable that only the higher tree supplies at 0444.
+  #
+  # Built only when there are executables to fix (`executables = [ ]` — FEX and the native face, which
+  # carry their own already-+x exe overlay — skips the mechanism entirely). `maskFiles` are handled
+  # separately as runtime whiteout entries, NOT here.
   usesSkeleton = executables != [ ];
-  modeFixSkel = mkStoreSkeleton {
-    payload = primaryTree;
-    name = "${appid}-exe";
-    inherit executables;
-  };
+  # Keyed on the TREE, not its position in the list. With an index-based name the same depot gets a
+  # different derivation name in every DLC selection that reorders the list — so identical skeletons are
+  # rebuilt and stored once per selection (the base tree as `-exe-1` alongside `-exe-0` from the vanilla
+  # build, two copies of the same multi-thousand-file tar). Keyed on the tree's store hash, one skeleton
+  # per (tree, executables) exists once and is shared by every selection that mounts it.
+  modeFixes = map (tree: {
+    skeleton = "${mkStoreSkeleton {
+      payload = tree;
+      name = "${appid}-exe-${lib.substring 0 8 (baseNameOf "${tree}")}";
+      inherit executables;
+    }}";
+    lower = "${tree}";
+  }) payloads;
+  # A declared executable that is in NO tree would otherwise reach the launcher as a 0444 file and fail at
+  # exec with a bare EACCES. mkStoreSkeleton skips what its own tree lacks (an executable lives in one tree,
+  # not all of them), so the "exists somewhere" check belongs here, once, across the whole set.
+  #
+  # `-f`, matching the skeleton's own chmod test. `-e` would pass a directory-valued entry (a path with the
+  # leaf omitted) that every skeleton then skips — build green, launcher execve's a directory, bare EACCES
+  # at launch. Before the per-tree split this was a hard build error, and it stays one.
+  executablesPresent =
+    runCommand "${appid}-executables-present" { } ''
+      ${lib.concatMapStrings (e: ''
+        found=
+        for tree in ${lib.escapeShellArgs (map (p: "${p}") payloads)}; do
+          if [ -f "$tree"/${lib.escapeShellArg e} ]; then found=1; break; fi
+        done
+        if [ -z "$found" ]; then
+          echo "propnix (${pname}): declared executable '${e}' is not a regular file in any game tree" >&2
+          exit 1
+        fi
+      '') executables}
+      mkdir -p "$out"
+    '';
   gameModeFix = lib.optionalAttrs usesSkeleton {
-    gameModeFix = {
-      skeleton = "${modeFixSkel}";
-      lower = "${primaryTree}";
-    };
+    gameModeFixes = modeFixes;
   };
-  # The game lowers, highest-priority first: any `extraLowers` (DLC, DLC-first) ABOVE the base tree; then
-  # the data trees (when the skeleton carries the primary tree) or all payloads. The skeleton (if any) is
-  # stacked above these by the launcher.
-  gameLowers = extraLowers ++ map (d: "${d}") (if usesSkeleton then restTrees else payloads);
+  # The lowers that need NO exec-bit fix, highest-priority first: `extraLowers` (the backend's own overlays,
+  # the offline Steam-entitlement settings tree, a game's own extra trees). The fixed game trees are stacked
+  # BELOW these by the launcher, in `payloads` order. Without the fix (executables = [ ]) the game trees are
+  # plain lowers here.
+  gameLowers = extraLowers ++ lib.optionals (!usesSkeleton) (map (d: "${d}") payloads);
 
   iconName = "org.propnix.${appid}";
   iconTree =
@@ -161,8 +197,10 @@ mkLauncherPackage {
     ;
   iconSymbolic = icon.symbolic;
   description = "${name} — propnix native/${backend} app";
+  extraChecks = lib.optional usesSkeleton executablesPresent;
   extraPassthru = {
     inherit payloads backend;
-    unwrapped = primaryTree;
+    # The tree the game actually runs from = the highest-priority one (a complete-tree DLC when enabled).
+    unwrapped = builtins.head payloads;
   };
 }

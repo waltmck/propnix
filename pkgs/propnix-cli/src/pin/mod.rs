@@ -461,6 +461,8 @@ pub fn emit(opts: &Opts) -> Result<String, Box<dyn std::error::Error>> {
 
     // Stage every recomputation first; only touch the file once all of them succeeded.
     let mut staged: Vec<(PinLoc, Vec<(String, String)>)> = Vec::new();
+    // One hash per distinct CONTENT, not per row — see `content_key`.
+    let mut hashed_by_content: BTreeMap<String, Hashed> = BTreeMap::new();
     for c in &report.changes {
         let pin = pins
             .iter()
@@ -479,7 +481,18 @@ pub fn emit(opts: &Opts) -> Result<String, Box<dyn std::error::Error>> {
                 fields.push(("version".to_string(), v.clone()));
             }
         }
-        let hashed = hash_pin(pin, &c.to, &hopts, opts)?;
+        let key = content_key(pin, &c.to, opts);
+        let hashed = match hashed_by_content.get(&key) {
+            Some(h) => {
+                eprintln!("      (identical content to an earlier row — reusing its hash)");
+                h.clone()
+            }
+            None => {
+                let h = hash_pin(pin, &c.to, &hopts, opts)?;
+                hashed_by_content.insert(key, h.clone());
+                h
+            }
+        };
         fields.push(("outputHash".to_string(), hashed.sri));
         // Record WHICH dependency-repository build this hash was computed against, for a build that
         // installs one into the game dir. `depsBuildId` is on the rewriter's insert allowlist, so a row
@@ -514,9 +527,37 @@ fn previous_manifest(mode: Mode, pin: &Pin) -> Option<u64> {
 }
 
 /// One recomputed pin: the hash, plus any provenance the plan discovered that the row should record.
+#[derive(Clone)]
 struct Hashed {
     sri: String,
     deps_build_id: Option<String>,
+}
+
+/// Identity of the CONTENT a pin resolves to — everything `hash_pin` would feed the hasher, and nothing
+/// else. Two rows with the same key name the same bytes, so hashing the second is pure duplicated
+/// download: Factorio pins ONE Steam Linux depot under both `aarch64-linux` and `x86_64-linux` (Wube ships
+/// both ABIs in depot 427523), which without this streams ~2.3 GiB twice on every version bump. Keyed on
+/// the NEW id, so a re-pin still hashes what it is moving to.
+fn content_key(pin: &Pin, new_id: &str, opts: &Opts) -> String {
+    match pin.store {
+        Store::Steam => format!(
+            "steam:{}:{}:{}:{}",
+            pin.opt_str("appId").unwrap_or_default(),
+            pin.opt_str("depotId").unwrap_or_default(),
+            new_id,
+            steam_branch(opts, pin),
+        ),
+        Store::GogGalaxy => format!(
+            "gog:{}:{}:{}:{}:{}",
+            pin.str_field("productId").unwrap_or_default(),
+            new_id,
+            pin.opt_str("os").unwrap_or("windows"),
+            pin.opt_str("lang").unwrap_or("en"),
+            pin.dlc_id().unwrap_or_default(),
+        ),
+        // No version pin at all — never shared, and `hash_pin` refuses it anyway.
+        Store::GogInstaller => format!("installer:{}", pin.loc),
+    }
 }
 
 fn hash_pin(
@@ -908,6 +949,50 @@ fn short_os(os: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Factorio pins ONE Steam Linux depot under two platform keys (Wube ships both ABIs in depot 427523),
+    /// so the refresher must recognise them as the same content and stream it once, not twice.
+    #[test]
+    fn rows_naming_the_same_depot_share_one_content_key() {
+        let body = r#"{
+  "fetchInfo": {
+    "steam": {
+      "aarch64-linux": [ { "pname": "f-linux", "appId": 427520, "depotId": 427523,
+        "manifestId": "111", "branch": "experimental", "outputHash": "sha256-a" } ],
+      "x86_64-linux": [ { "pname": "f-linux", "appId": 427520, "depotId": 427523,
+        "manifestId": "111", "branch": "experimental", "outputHash": "sha256-a" } ],
+      "x86_64-windows": [ { "pname": "f-win", "appId": 427520, "depotId": 427521,
+        "manifestId": "222", "branch": "experimental", "outputHash": "sha256-b" } ]
+    }
+  }
+}"#;
+        let d = std::env::temp_dir().join(format!("propnix-ck-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let path = d.join("versions.json");
+        std::fs::write(&path, body).unwrap();
+        let f = VersionsFile::load(&path).unwrap();
+        let pins = f.pins().unwrap();
+        let opts = Opts {
+            repo: d.clone(),
+            game: "factorio".into(),
+            credential_dir: d.clone(),
+            workers: 1,
+            window_bytes: 1,
+            branch: None,
+            mode: Mode::Update,
+            gog_branch: None,
+            gog_account: None,
+            steam_account: None,
+        };
+
+        let keys: Vec<String> = pins
+            .iter()
+            .map(|p| content_key(p, p.opt_str("manifestId").unwrap(), &opts))
+            .collect();
+        assert_eq!(keys[0], keys[1], "the two Linux rows name the same depot: {keys:?}");
+        assert_ne!(keys[0], keys[2], "the Windows depot is different content: {keys:?}");
+        std::fs::remove_dir_all(&d).ok();
+    }
 
     #[test]
     fn a_report_serializes_what_ci_reads() {

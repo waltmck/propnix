@@ -20,9 +20,10 @@ pub const GAME_DIR: &str = "drive_c/game";
 /// per-launch view as the save binds; the game writes nothing here (state goes to the bound save dirs).
 pub const THIN_GAME_DIR: &str = "game";
 
-/// THIN mode's exec-bit-fix mountpoint, relative to the view root: the intermediate `skeleton::lower`
-/// metacopy overlay (see `GameModeFix`) is mounted here and then stacked into the game overlay as its
-/// highest-priority lower. A hidden dir in the view $HOME the game never reads.
+/// THIN mode's exec-bit-fix mountpoint PREFIX, relative to the view root: each `skeleton::lower` metacopy
+/// overlay (see `GameModeFix`) is mounted at `<prefix><i>` and then takes its own tree's place in the game
+/// overlay's lower stack. Hidden dirs in the view $HOME the game never reads. The leading `.` sorts these
+/// before `game`, so they are laid before the overlay that references them.
 pub const THIN_BINFIX_DIR: &str = ".propnix-binfixed";
 
 #[derive(Debug, Deserialize)]
@@ -301,18 +302,24 @@ pub struct ThinConfig {
     /// or more store paths: a single-tree game is one path (bound); a multi-depot Steam game is several
     /// (e.g. Stellaris = binaries depot + data depot), UNIONED by a read-only overlayfs at mount time — merged
     /// for FREE with NO store copy (leftmost wins on overlap), exactly like the wine DLC overlay. overlayfs
-    /// presents real dirs/files (not symlinks), so a PhysFS-style engine traverses the union fine. When a
-    /// `gameModeFix` is present, its metacopy-fixed tree is stacked ABOVE these (highest priority).
+    /// presents real dirs/files (not symlinks), so a PhysFS-style engine traverses the union fine. These are
+    /// the lowers that need NO exec-bit fix — the fixed game trees arrive as `gameModeFixes` and are stacked
+    /// BELOW these, in their own order.
     #[serde(rename = "gameLowers")]
     pub game_lowers: Vec<String>,
-    /// Optional EXEC-BIT fix for the game tree, mounted as a read-only overlayfs layer ABOVE `gameLowers`.
-    /// A Steam depot fetched via DepotDownloader ships mode 0444 (no +x); box64/native exec require +x on the
-    /// ELF. Rather than re-emit the executable's data, `skeleton` is a sparse metacopy skeleton of `lower`
-    /// (the exe-bearing tree) whose exe stubs are 0755, and `lower` is that same tree used as the metacopy
-    /// DATA source: the launcher mounts `skeleton::lower` (userxattr) — the merged files are +x with data
-    /// redirected to the store (ZERO copy) — then unions THAT above `gameLowers`. See thin.rs resolve.
-    #[serde(rename = "gameModeFix", default)]
-    pub game_mode_fix: Option<GameModeFix>,
+    /// The EXEC-BIT-fixed game trees, highest priority first — one entry per game tree (payloads and enabled
+    /// DLC alike). A Steam depot ships mode 0444 (no +x); box64/native exec require +x on the ELF. Rather
+    /// than re-emit the executable's data, each `skeleton` is a sparse metacopy skeleton of its own `lower`
+    /// whose exe stubs are 0755, with `lower` as the metacopy DATA source: the launcher mounts
+    /// `skeleton::lower` (userxattr) — the merged files are +x with data redirected to the store (ZERO copy).
+    ///
+    /// ONE PER TREE, deliberately. A single fix layer built from the primary payload and stacked at the very
+    /// top mirrors that whole tree, so it SHADOWS every higher-priority lower (a DLC that ships its own build
+    /// of the game — Factorio's Space Age is a complete tree on both stores — would silently lose to the base
+    /// engine), and it leaves an executable that only the DLC supplies at 0444. Fixing each tree in place
+    /// keeps every layer's priority intact and every layer's executables runnable. See thin.rs resolve.
+    #[serde(rename = "gameModeFixes", default)]
+    pub game_mode_fixes: Vec<GameModeFix>,
     /// Game-dir-relative files to ERASE from the game dir — each becomes a propnix-mount `whiteout` entry (an
     /// overlay-whiteout over the file's parent), so the file is genuinely absent at runtime with no store copy.
     /// Used to neutralize a bundled library (e.g. a Steam game's libsteam_api.so). Default empty.
@@ -363,10 +370,10 @@ pub struct ThinConfig {
     pub mangohud: Option<String>,
 }
 
-/// THIN-mode exec-bit fix (see `ThinConfig::game_mode_fix`): a metacopy skeleton (`skeleton`, a sparse-stub
-/// tar with 0755 exe stubs) over the exe-bearing store tree (`lower`) as its data source. The launcher mounts
-/// `skeleton::lower` (userxattr) so the merged executables are +x with data redirected to the store, then
-/// stacks that above the other game lowers — all zero-copy.
+/// THIN-mode exec-bit fix for ONE game tree (see `ThinConfig::game_mode_fixes`): a metacopy skeleton
+/// (`skeleton`, a sparse-stub tar whose executable stubs are 0755) over that tree (`lower`) as its data
+/// source. The launcher mounts `skeleton::lower` (userxattr) so the merged executables are +x with data
+/// redirected to the store, and the result takes that tree's own place in the lower stack — all zero-copy.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct GameModeFix {

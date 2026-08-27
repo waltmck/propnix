@@ -155,8 +155,9 @@ Drop a directory under `pkgs/games/<name>/` — it's auto-discovered into the sc
   Steam pin and refreshed from the same appinfo snapshot as the base depots.
 
   Declaring the rows is the whole job: every Steam-fetched game gets `steam.emu.enable` by default
-  (modules/steam-emu.nix), which places the gbe_fork shim (emulators/gbe-fork.nix, prebuilt release
-  artifacts — packaging its deps from source is backlog) and projects the offline entitlement list from
+  (modules/steam-emu.nix), which places the gbe_fork shim (emulators/gbe-fork, built from
+  source once per ABI — natively for the host's arch, by cross-compilation for every foreign one, since
+  the shim runs inside the game's own process; the Windows PE shims are still the pinned prebuilt) and projects the offline entitlement list from
   those SAME rows (`dlcAppId`, else `depotId`) — engines that ask the (absent) Steam client whether a DLC
   is owned get the answer automatically, DLC-less and vanilla builds included (empty list = "own
   nothing"). Thin (Linux-build) games are served by a preload; an engine that dlopens the `.so` by

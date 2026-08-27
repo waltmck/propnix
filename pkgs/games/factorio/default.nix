@@ -21,8 +21,15 @@
 #
 # THE STEAM PINS ARE ON THE `experimental` BRANCH (2.1.x), deliberately: `bin/arm64/` exists only there.
 # Steam's `public` branch is still 2.0.77, whose Linux depot ships a single `bin/x64/factorio` and no ARM64
-# build — pinning it would delete the aarch64-linux platform. Every Steam row therefore names the same
-# branch and version, so the three platforms cannot drift into save-incompatible engine versions.
+# build — pinning it would delete the aarch64-linux platform. Every Steam row names the same branch, so the
+# platforms move together.
+#
+# BUT THE ARM64 BINARY LAGS ITS OWN DEPOT, and that is Wube's doing, not a pinning mistake. MEASURED on the
+# depot whose branch is labelled 2.1.16: `bin/x64_/factorio` reports 2.1.16 and `bin/arm64/factorio` reports
+# 2.1.15 — same manifest, same branch, two engine versions, and the same 2.1.15 in the Space Age depot. They
+# evidently do not rebuild ARM for every release. Since all platforms share ONE save dir (see `saveBinds`),
+# a save written by the x86_64 build can be a minor version ahead of what the ARM64 build will open, and
+# Factorio refuses a save from a newer version. Worth knowing before blaming propnix for a rejected save.
 #
 #   nix run .#factorio                                                          # steam/aarch64-linux (native) on aarch64
 #   nix run '.#factorio.apply { emulatedPlatform = "x86_64-linux"; }'           # steam/linux under box64

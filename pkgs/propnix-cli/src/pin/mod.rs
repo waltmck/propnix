@@ -414,6 +414,17 @@ fn check_inner(opts: &Opts) -> Result<(Report, VersionsFile), Box<dyn std::error
                         to: gid.clone(),
                         // Steam has no version strings, but the branch BUILD ID is a real, monotonic
                         // label — without it the Steam column of every PR table and issue is blank.
+                        //
+                        // AND IT STAYS THE BUILD ID even where a human version looks derivable. Some
+                        // vendors keep a version-NAMED branch pointing at the same manifest as their
+                        // rolling channel (Factorio: `2.1.17` alongside `experimental`, exact gid match on
+                        // every depot), which is tempting to write here instead of an opaque number. It
+                        // was tried and rejected: ONE DEPOT CAN CARRY TWO ENGINE VERSIONS. Measured on
+                        // Factorio's depot 427523 at the branch labelled 2.1.16, `bin/x64_/factorio`
+                        // reports 2.1.16 and `bin/arm64/factorio` reports 2.1.15 — Wube does not rebuild
+                        // ARM for every release — so a single per-row version string would be wrong for
+                        // whichever ABI that row's `exe` names. The build id is opaque but it is true of
+                        // the whole depot, which is what a row actually pins.
                         version: Some(info.build_id.clone()),
                     });
                 }

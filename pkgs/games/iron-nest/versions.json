@@ -5,9 +5,9 @@
         {
           "pname": "iron-nest-win",
           "productId": "1162687982",
-          "buildId": "59928334169953902",
-          "version": "1.0",
-          "outputHash": "sha256-0GC5CQcyZqtMHDR2RVHeIr+to4gVjvq5vUqT6kpQ6v8=",
+          "buildId": "59960798711876837",
+          "version": "1.0 (1622)",
+          "outputHash": "sha256-t44SrjMjGz4AhL1b0gIbHdOsTMgnOIHilKjJwUMZEJQ=",
           "outputHashMode": "recursive",
           "os": "windows",
           "lang": "en",

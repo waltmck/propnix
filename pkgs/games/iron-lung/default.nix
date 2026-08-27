@@ -17,6 +17,11 @@ mkApp (
     pname = "iron-lung";
     appid = "iron-lung";
     name = "Iron Lung";
+
+    # Offline by construction: the launcher unshares a NETWORK NAMESPACE for the game, so propnix's offline
+    # guarantee is enforced by the kernel rather than by trusting the title and its bundled SDKs. Safe here
+    # because this game is a single-player submarine-horror short; the exe links no socket library at all.
+    online = false;
     # GOG-Windows only (no native Linux build in the GOG Galaxy content system).
     # the fetcher takes the NUMERIC productId (not the slug); pins verified reproducible (fetchGogGalaxyBuild hdr).
     fetchInfo = (lib.importJSON ./versions.json).fetchInfo;

@@ -31,6 +31,12 @@ mkApp {
   pname = "fallout-nv";
   appid = "fallout-nv";
   name = "Fallout: New Vegas";
+
+  # Offline by construction: the launcher unshares a NETWORK NAMESPACE for the game, so propnix's offline
+  # guarantee is enforced by the kernel rather than by trusting the title and its bundled SDKs. Safe here
+  # because this game is single-player; the Gamebryo build has no multiplayer mode and the exe carries no
+  # matchmaking symbols. Its ws2_32 import is the era's store/telemetry plumbing, not gameplay.
+  online = false;
   # GOG-Windows, 32-bit (i386) — Gamebryo runs via wine WoW64 on aarch64 (box64's wowbox64.dll, the default
   # i386 emulator; see the header).
   fetchInfo = (lib.importJSON ./versions.json).fetchInfo;

@@ -23,6 +23,12 @@ mkApp {
   pname = "iron-nest";
   appid = "iron-nest";
   name = "IRON NEST";
+
+  # Offline by construction: the launcher unshares a NETWORK NAMESPACE for the game, so propnix's offline
+  # guarantee is enforced by the kernel rather than by trusting the title and its bundled SDKs. Safe here
+  # because this game is a single-player turret sim; as the header notes, the exe imports only KERNEL32 +
+  # UnityPlayer — no socket library, no store SDK.
+  online = false;
   fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
   # goggame-1162687982.info isPrimary FileTask (the real Unity player, not a launcher stub).
   exe = "Iron Nest Heavy Turret Simulator.exe";

@@ -14,6 +14,13 @@ mkApp {
   pname = "dont-starve";
   appid = "dont-starve";
   name = "Don't Starve";
+
+  # Offline by construction: the launcher unshares a NETWORK NAMESPACE for the game, so propnix's offline
+  # guarantee is enforced by the kernel rather than by trusting the title and its bundled SDKs. Safe here
+  # because this game is single-player. (Don't Starve TOGETHER is the separate multiplayer title; this is not
+  # it.) The exe carries no matchmaking symbols — its ws2_32 import is Klei's account/telemetry plumbing,
+  # which propnix neutralizes anyway.
+  online = false;
   # GOG-Windows, 32-bit (i386): this build ships NO 64-bit binary (only bin/, no bin64/), so it runs via wine
   # WoW64 on aarch64 — box64's wowbox64.dll, Hangover's hardcoded default i386 emulator (FEX's libwow64fex.dll
   # is the staged alternative; see wine-prefix-lower.nix). i386-windows also selects the platform-default

@@ -15,6 +15,11 @@ mkApp (
     pname = "kerbal-space-program";
     appid = "kerbal-space-program";
     name = "Kerbal Space Program";
+
+    # Offline by construction: the launcher unshares a NETWORK NAMESPACE for the game, so propnix's offline
+    # guarantee is enforced by the kernel rather than by trusting the title and its bundled SDKs. Safe here
+    # because this game is KSP 1 has no multiplayer; the exe links no socket library at all.
+    online = false;
     # GOG-Windows only.
     fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
     # The GOG build ships a 64-bit-only tree: KSP_x64.exe is the goggame.info isPrimary FileTask (there is no

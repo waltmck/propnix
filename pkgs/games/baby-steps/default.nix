@@ -18,6 +18,12 @@ mkApp {
   pname = "baby-steps";
   appid = "baby-steps";
   name = "Baby Steps";
+
+  # Offline by construction: the launcher unshares a NETWORK NAMESPACE for the game, so propnix's offline
+  # guarantee is enforced by the kernel rather than by trusting the title and its bundled SDKs. Safe here
+  # because this game is a single-player climbing game; its exe links no socket library at all (no
+  # ws2_32/wsock32 import) and carries no matchmaking symbols.
+  online = false;
   fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
   exe = "BabySteps.exe";
 

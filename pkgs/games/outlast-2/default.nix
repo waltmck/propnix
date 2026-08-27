@@ -25,6 +25,12 @@ mkApp {
   pname = "outlast-2";
   appid = "outlast-2";
   name = "Outlast 2";
+
+  # Offline by construction: the launcher unshares a NETWORK NAMESPACE for the game, so propnix's offline
+  # guarantee is enforced by the kernel rather than by trusting the title and its bundled SDKs. Safe here
+  # because this game is single-player, same engine family as Outlast: its only matchmaking symbols are UE3
+  # class boilerplate (`UOnlineMatchmakingStats`), not a multiplayer mode.
+  online = false;
   # the fetcher takes the NUMERIC productId (not the slug); pins verified reproducible (fetchGogGalaxyBuild hdr).
   fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
   # The single x86_64 UE3 game binary (goggame-*.info isPrimary FileTask; no separate 32-bit launcher stub —

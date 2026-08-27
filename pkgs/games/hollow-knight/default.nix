@@ -36,6 +36,12 @@ mkApp (
     pname = "hollow-knight";
     appid = "hollow-knight";
     name = "Hollow Knight";
+
+    # Offline by construction: the launcher unshares a NETWORK NAMESPACE for the game, so propnix's offline
+    # guarantee is enforced by the kernel rather than by trusting the title and its bundled SDKs. Safe here
+    # because this game is single-player; the exe links no socket library at all and carries no matchmaking
+    # symbols.
+    online = false;
     icon.symbolic = ./hollow-knight-symbolic.svg;
 
     fetchInfo = (lib.importJSON ./versions.json).fetchInfo;

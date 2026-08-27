@@ -22,6 +22,12 @@ mkApp {
   pname = "skyrim-se";
   appid = "skyrim-se";
   name = "Skyrim Special Edition";
+
+  # Offline by construction: the launcher unshares a NETWORK NAMESPACE for the game, so propnix's offline
+  # guarantee is enforced by the kernel rather than by trusting the title and its bundled SDKs. Safe here
+  # because this game is single-player; the Creation Engine build has no multiplayer, and the exe's lone
+  # `Matchmaking` string is Steam-SDK boilerplate.
+  online = false;
   fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
   # Launch the actual x86_64 game exe DIRECTLY, NOT the isPrimary SkyrimSELauncher.exe (a 32-bit settings stub
   # that spawns SkyrimSE.exe and exits → trips the propnix launcher's primary-child teardown). SkyrimSE.exe is

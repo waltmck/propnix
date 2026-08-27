@@ -58,6 +58,13 @@ mkApp (
     pname = "outlast";
     appid = "outlast";
     name = "Outlast";
+
+    # Offline by construction: the launcher unshares a NETWORK NAMESPACE for the game, so propnix's offline
+    # guarantee is enforced by the kernel rather than by trusting the title and its bundled SDKs. Safe here
+    # because this game is single-player. The only matchmaking symbols in the exe are UNREAL ENGINE 3 /
+    # Steam-SDK class boilerplate (`UOnlineMatchmakingStats`, `SteamMatchmaking`) — engine surface the game
+    # never uses, not a multiplayer mode.
+    online = false;
     # the fetcher takes the NUMERIC productId (not the slug); pins verified reproducible (fetchGogGalaxyBuild hdr).
     fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
     # UE3 x86_64 game binary launched DIRECTLY (not the 32-bit OutlastLauncher.exe isPrimary stub, which spawns

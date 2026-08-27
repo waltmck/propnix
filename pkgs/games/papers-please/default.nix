@@ -17,6 +17,11 @@ mkApp {
   pname = "papers-please";
   appid = "papers-please";
   name = "Papers, Please";
+
+  # Offline by construction: the launcher unshares a NETWORK NAMESPACE for the game, so propnix's offline
+  # guarantee is enforced by the kernel rather than by trusting the title and its bundled SDKs. Safe here
+  # because this game is single-player; the exe links no socket library at all.
+  online = false;
   fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
   exe = "PapersPlease.exe";
   # Full-color icon auto-extracted from the exe's PE resources (icon.auto default). Symbolic vendored (CC BY-SA 4.0).

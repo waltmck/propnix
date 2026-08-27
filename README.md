@@ -32,6 +32,7 @@ benefits of native kernel mounts. That design leans on several host capabilities
 | requirement | needed for | required? |
 |---|---|---|
 | Unprivileged user namespaces (`CONFIG_USER_NS`, `user.max_user_namespaces > 0`) | assembling the prefix (`propnix-mount`) | yes |
+| Unprivileged network namespaces (`CONFIG_NET_NS`) | the kernel-enforced offline guarantee for a game that declares `online = false` — the launcher adds `CLONE_NEWNET` to the *same* `unshare` as the userns, so the game gets loopback and nothing else | yes *for those games* (most of them) |
 | Unprivileged overlayfs + `userxattr` in a userns (Linux **5.11+**) | copy-on-write prefix/game/save overlays over the store | yes |
 | `user.*` xattrs + overlay-upper support on `$XDG_STATE_HOME` & saves fs (ext4/xfs/btrfs/tmpfs; ZFS **≥ 2.2**) | persisting the overlay *uppers* | yes |
 | A Vulkan ICD (e.g. Mesa on Asahi) | the default DXVK/vkd3d D3D backend | hard *unless* `PROPNIX_WINE_D3D=wined3d` |

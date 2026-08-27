@@ -44,16 +44,18 @@ mkApp {
     }
   ];
 
+  # Run setup.sh before launch: seed SkyrimPrefs.ini display (iSize/fullscreen) + the PROPNIX_QUALITY
+  # preset. setup.sh uses the shared `ini_set` (withIniLib) at its plain-LF `key=value` defaults. Top-level,
+  # not a wine knob: the hook runs in the OUTER phase before any prefix exists (modules/app-options.nix).
+  setupScript = mkSetupScript {
+    name = "skyrim-se-setup";
+    script = ./setup.sh;
+    withIniLib = true;
+  };
+
   wine = presets.mergeTuning [
     (import ./wine-tuning.nix)
     {
-      # Run setup.sh before wine: seed SkyrimPrefs.ini display (iSize/fullscreen) + the PROPNIX_QUALITY
-      # preset. setup.sh uses the shared `ini_set` (withIniLib) at its plain-LF `key=value` defaults.
-      setupScript = mkSetupScript {
-        name = "skyrim-se-setup";
-        script = ./setup.sh;
-        withIniLib = true;
-      };
       # SkyrimSE.exe STATICALLY imports the GOG Galaxy SDK (Galaxy64.dll, at the payload root — verified via
       # the PE import table), so bind the no-op stub over it via a mount row: propnix games run fully offline,
       # with no cloud dependencies (see emulators/galaxy-stub). Same de-Galaxy pattern as HK / Prison

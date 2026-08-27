@@ -43,6 +43,17 @@ mkApp (
   let
     onLinux = lib.hasSuffix "-linux" config.emulatedPlatform;
     onGog = config.fetcher == "gog";
+    # Factorio's user-data (write-data) dir, relative to the home each backend joins onto:
+    #   Windows: %APPDATA%\Factorio   (goggame savePath `{userappdata}/Factorio`; verified at runtime)
+    #   Linux:   ~/.factorio           (config-path.cfg `use-system-read-write-data-directories=true`)
+    userData = if onLinux then ".factorio" else "AppData/Roaming/Factorio";
+    # The three files Factorio writes into that root once the startup caches are on. Same names on every
+    # platform (one engine, one config).
+    cacheFiles = [
+      "atlas-cache.dat"
+      "data-cache.dat"
+      "crop-cache.dat"
+    ];
   in
   {
     pname = "factorio";
@@ -98,15 +109,37 @@ mkApp (
 
     # Save: Factorio's user-data dir (saves + mods + blueprints + config + player-data + log). Both OS
     # layouts bind to the SAME host dir, which is right — the formats are cross-platform, so a save made by
-    # the aarch64 build opens in the Windows build and vice versa.
-    #   Windows: %APPDATA%\Factorio          (goggame savePath `{userappdata}/Factorio`; verified at runtime)
-    #   Linux:   ~/.factorio                 (config-path.cfg `use-system-read-write-data-directories=true`)
+    # the aarch64 build opens in the Windows build and vice versa. (Path per platform: see `userData`.)
     saveBinds = [
       {
         src = "$PROPNIX_SAVE_DIR/$PROPNIX_APPID";
-        dst = if onLinux then ".factorio" else "AppData/Roaming/Factorio";
+        dst = userData;
       }
-    ];
+    ]
+    # ── the startup caches, redirected out of the save dir ────────────────────────────────────────────
+    # With `cache-sprite-atlas` + `cache-prototype-data` on (setup.sh), Factorio writes three cache files:
+    # `atlas-cache.dat` is ~1.4 GB with Space Age, `data-cache.dat` ~8 MB, `crop-cache.dat` ~5 MB. All three
+    # are DERIVED data, rebuilt from the payload whenever missing or stale, so they belong in the per-app
+    # CACHE dir ($PROPNIX_CACHE = $XDG_CACHE_HOME/propnix/factorio — where the DXVK/vkd3d shader caches
+    # already live) rather than in a save dir a user syncs or backs up. Not the STATE dir: state is what is
+    # worth keeping, and $XDG_CACHE_HOME is the one a user can point at a fast, un-snapshotted filesystem.
+    #
+    # Factorio gives no help: `[path]` has only `read-data`/`write-data`, there is no cache-path key and no
+    # CLI flag, and all three land in the write-data ROOT interleaved with `saves/`, `mods/` and
+    # `player-data.json`. That rules out the usual overlay: an overlay has ONE upper, so it cannot route
+    # writes by filename — `upper = state` sends the saves to state too, `upper = save` sends the cache
+    # back. Binding the files individually is what routes by name, and it is safe here because the engine
+    # writes them IN PLACE (MEASURED at 0.2s polling across a full load: no `.tmp` ever appears, so there
+    # is no rename to hit EBUSY on a bind mountpoint).
+    #
+    # `type = "file"` is what makes `create` TOUCH the source on first launch instead of mkdir'ing it — a
+    # directory there would make Factorio's open() fail obscurely. One declaration serves every platform:
+    # wine joins `dst` onto the profile home and thin onto the view $HOME, exactly as for the row above.
+    ++ map (f: {
+      src = "$PROPNIX_CACHE/${f}";
+      dst = "${userData}/${f}";
+      type = "file";
+    }) cacheFiles;
 
     # DLC — Space Age (Wube's 2.0 expansion: space platforms, new planets, quality/elevated-rails; requires
     # the base game). Note what the tree actually IS on both stores: NOT an additive overlay but a COMPLETE
@@ -135,24 +168,23 @@ mkApp (
     # straight on Wayland), so this is gated on the backend rather than on the platform.
     env.SDL_VIDEODRIVER = lib.mkIf (config.backend == "box64") "x11";
 
+    # Maintain config.ini before launch — on EVERY platform, because its main job is now the startup
+    # caches (`cache-prototype-data`, `cache-sprite-atlas`), which cut load time on all four combos. The
+    # script also asserts `check-updates=false`, which only the GOG build actually has; setting it on a
+    # Steam build is verified harmless (see setup.sh). Top-level, not a wine knob: the hook runs in the
+    # OUTER phase before any prefix or view exists, so the thin backends honour it too.
+    setupScript = mkSetupScript {
+      name = "factorio-setup";
+      script = ./setup.sh;
+      withIniLib = true;
+    };
+
     # ── wine tuning ──
     wine = {
+
       # The GOG build bundles the Galaxy SDK as a STATIC import, which cannot be WINEDLLOVERRIDE'd away —
       # it needs a real no-op stub so nothing ever reaches GOG's services (offline policy, not a crash fix).
       galaxyStubDlls = lib.mkIf onGog [ "bin/x64/Galaxy64.dll" ];
-
-      # Assert `[other] check-updates=false` before launch, so Factorio's own updater never runs against an
-      # immutable store payload (with it on, launching pops an "automatic updates / log in to download"
-      # dialog and makes a network request against an install it can never modify). GOG-ONLY, and that is a
-      # measured fact rather than caution: the string `check-updates` appears in the GOG binary and in
-      # NEITHER Steam build (Windows or Linux) — Wube compiles the in-game updater out of the Steam
-      # distribution, because Steam does the updating. So the Steam platforms need no seeding at all, which
-      # is just as well: `setupScript` is a wine-backend knob and the thin backends have no equivalent hook.
-      setupScript = lib.mkIf onGog (mkSetupScript {
-        name = "factorio-setup";
-        script = ./setup.sh;
-        withIniLib = true;
-      });
     };
   }
 )

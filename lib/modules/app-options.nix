@@ -326,10 +326,10 @@ in
       apply = map (
         b:
         let
-          unknown = lib.subtractLists [ "src" "dst" "ro" "create" ] (lib.attrNames b);
+          unknown = lib.subtractLists [ "src" "dst" "ro" "create" "type" ] (lib.attrNames b);
         in
         lib.throwIfNot (unknown == [ ] && b ? src && b ? dst)
-          "propnix: a saveBinds entry needs { src; dst; ro?; create?; } — got unknown/missing field(s): ${toString unknown}"
+          "propnix: a saveBinds entry needs { src; dst; ro?; create?; type?; } — got unknown/missing field(s): ${toString unknown}"
           b
       );
       description = ''
@@ -356,10 +356,10 @@ in
       apply = map (
         b:
         let
-          unknown = lib.subtractLists [ "src" "dst" "ro" "create" ] (lib.attrNames b);
+          unknown = lib.subtractLists [ "src" "dst" "ro" "create" "type" ] (lib.attrNames b);
         in
         lib.throwIfNot (unknown == [ ] && b ? src && b ? dst)
-          "propnix: an extraBinds entry needs { src; dst; ro?; create?; } — got unknown/missing field(s): ${toString unknown}"
+          "propnix: an extraBinds entry needs { src; dst; ro?; create?; type?; } — got unknown/missing field(s): ${toString unknown}"
           b
       );
       description = ''
@@ -369,6 +369,23 @@ in
         the other. `dst` may reach inside the game dir (`game/<path>`): binding over an existing file
         works, and a missing sibling mountpoint is stubbed into the game overlay by propnix-mount's
         child-skeleton machinery. Not consumed by wine (an eval-time error there — use `wine.mounts`).
+      '';
+    };
+
+    setupScript = lib.mkOption {
+      type = knobTypes.lastWins;
+      default = null;
+      description = ''
+        A store-path executable the launcher runs in the OUTER phase, BEFORE the game's view exists — the
+        escape hatch for per-game setup that no option can express, typically seeding a config file the
+        engine reads from its save dir (factorio's cache/update settings, skyrim's SkyrimPrefs iSize).
+        Runs with the runtime env (PROPNIX_SAVE_DIR/APPID/WIDTH/HEIGHT/QUALITY + PROPNIX_PAYLOAD = the
+        game tree); a NON-ZERO exit ABORTS the launch, because a setup failure is a packaging bug or a
+        half-written config, not something to launch into. Build it with `mkSetupScript`.
+
+        TOP-LEVEL, not a backend knob: it runs before any prefix or view is assembled, so nothing about it
+        is wine- or thin-specific. It used to live at `wine.setupScript`, where setting it on a thin game
+        was silently ignored — the game built, launched, and just skipped its own seeding.
       '';
     };
 

@@ -59,6 +59,7 @@ lib.throwIfNot (lib.hasSuffix "-linux" cfg.emulatedPlatform)
       workingDir
       maskFiles
       icon
+      setupScript
       ;
     # The last-wins save/state rows plus the composable framework/game rows (steam-emu's shim placements).
     saveBinds = cfg.saveBinds ++ cfg.extraBinds;

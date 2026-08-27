@@ -89,13 +89,19 @@ pub fn userns_supported() -> bool {
 /// `PROPNIX_SAVE_DIR`. (The fixed store paths — the read-only lower and the payload — are baked as literal
 /// paths in the table by Nix, so they are NOT env vars here.) Called once before the splash + worker
 /// threads spawn, so mutating the process env here is single-threaded and safe.
-///   * `PROPNIX_STATE` / `PROPNIX_APPID` — the app's state dir and id.
+///   * `PROPNIX_STATE` / `PROPNIX_CACHE` / `PROPNIX_APPID` — the app's state dir, cache dir and id.
 ///   * `PROPNIX_SAVE_DIR` — user-facing: an explicit-but-missing value is a hard error (a typo / unmounted
 ///     volume — fail loudly rather than write saves to the wrong place); unset → the default
 ///     `$XDG_DATA_HOME/propnix-saves`, created. Per-app dirs (`<root>/$PROPNIX_APPID`) are made by
 ///     `createIfNotExist` on the entry that uses them.
 pub fn set_mount_env(settings: &Settings, paths: &Paths) -> io::Result<()> {
     std::env::set_var("PROPNIX_STATE", &paths.state);
+    // The app's CACHE dir ($XDG_CACHE_HOME/propnix/<appid>) — the home for large DERIVED data a game
+    // rebuilds when it is missing, so a bind row can put it somewhere the user does not back up. Same dir
+    // the DXVK/vkd3d shader caches already use. Distinct from PROPNIX_STATE, which is for state worth
+    // keeping: on a typical setup $XDG_CACHE_HOME can be pointed at a fast, un-snapshotted filesystem
+    // while the state dir cannot.
+    std::env::set_var("PROPNIX_CACHE", &paths.cache);
     std::env::set_var("PROPNIX_APPID", &settings.appid);
     let save_root = match std::env::var_os("PROPNIX_SAVE_DIR") {
         Some(v) if !v.is_empty() => {
@@ -156,7 +162,7 @@ pub fn resolve_table(cfg: &Config, settings: &Settings, paths: &Paths) -> io::Re
                 let source = match source {
                     Some(s) => {
                         let s = crate::util::expand_env(s);
-                        ensure_writable(target, &s, m.create_if_not_exist)?;
+                        ensure_writable(target, &s, m.create_if_not_exist, false)?;
                         Some(s)
                     }
                     None => None,
@@ -167,6 +173,19 @@ pub fn resolve_table(cfg: &Config, settings: &Settings, paths: &Paths) -> io::Re
                     source,
                     mode: mode.clone(),
                     seed,
+                }
+            }
+            // A single regular FILE bound at the target — `createIfNotExist` touches the source instead of
+            // mkdir'ing it, and propnix-mount lays a file mountpoint (its `child_is_file` already detects a
+            // file source). See MountSpec::File for why this exists.
+            MountSpec::File { source, mode } => {
+                let s = crate::util::expand_env(source);
+                ensure_writable(target, &s, m.create_if_not_exist, true)?;
+                Entry::Mount {
+                    target: abs_target,
+                    source: Some(s),
+                    mode: mode.clone(),
+                    seed: None,
                 }
             }
             MountSpec::Overlay {
@@ -184,7 +203,7 @@ pub fn resolve_table(cfg: &Config, settings: &Settings, paths: &Paths) -> io::Re
                         None => None, // ephemeral — propnix-mount mounts a fresh per-launch tmpfs
                         Some(u) => {
                             let u = crate::util::expand_env(u);
-                            ensure_writable(target, &u, m.create_if_not_exist)?; // an overlay upper is a dir
+                            ensure_writable(target, &u, m.create_if_not_exist, false)?; // an overlay upper is always a dir
                             Some(u)
                         }
                     }
@@ -247,7 +266,7 @@ fn resolve_target(target: &str, view: &Path) -> String {
 /// Ensure a writable mount source / persistent overlay upper exists: create it (as a directory) when
 /// allowed, else FAIL the launch (a missing store source/lower should fail loudly, not be silently created
 /// empty).
-fn ensure_writable(target: &str, path: &str, create: bool) -> io::Result<()> {
+fn ensure_writable(target: &str, path: &str, create: bool, is_file: bool) -> io::Result<()> {
     let p = Path::new(path);
     if p.exists() {
         return Ok(());
@@ -258,7 +277,16 @@ fn ensure_writable(target: &str, path: &str, create: bool) -> io::Result<()> {
             format!("mount source for '{target}' does not exist: {path} (set createIfNotExist = true to create it)"),
         ));
     }
-    fs::create_dir_all(p)
+    if is_file {
+        // A `file = true` row redirects one FILE, so the source must be a file — `mkdir` here would make
+        // the game's expected file a directory and fail obscurely at open().
+        if let Some(parent) = p.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::File::create(p).map(|_| ())
+    } else {
+        fs::create_dir_all(p)
+    }
 }
 
 /// PROPNIX_EXTRA_BINDS → runtime bind rows: a `;`-separated list of `TARGET|SOURCE`, where TARGET is a

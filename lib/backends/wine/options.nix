@@ -13,7 +13,7 @@
 #   attrsOf lastWins          extraSystem32                         — per-DLL, whole-value           (`a // b`)
 #   attrsOf (attrsOf lastWins) mounts                               — per-target/per-field           (mergeNested)
 #   dedupList str             brokenVariables galaxyStubDlls        — union + dedup, base-first
-#   lastWins                  setupScript userRegScript             — whole-value REPLACE            (`a // b`)
+#   lastWins                  userRegScript                         — whole-value REPLACE            (`a // b`)
 #
 # NO option has a `default`: wine-defaults defines every knob, so each is always defined by a layer — which
 # means (a) no default is ever MATERIALIZED into the config (the byte-identity trap the audit flagged), and
@@ -54,8 +54,9 @@ in
     brokenVariables = lib.mkOption { type = k.dedupList t.str; };
     galaxyStubDlls = lib.mkOption { type = k.dedupList t.str; };
 
-    # Whole-value REPLACE (sealing does not special-case these → plain `//`).
-    setupScript = lib.mkOption { type = k.lastWins; };
+    # Whole-value REPLACE (sealing does not special-case these → plain `//`). NB `setupScript` is NOT
+    # here: it runs in the OUTER phase before any prefix exists, so it is a top-level app option
+    # (modules/app-options.nix) that the thin backends honour too.
     userRegScript = lib.mkOption { type = k.lastWins; };
 
     # The mount table: per-target, per-field whole-value last-wins (mergeNested over the mount records). NO

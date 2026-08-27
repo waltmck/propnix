@@ -49,6 +49,9 @@
   # Offline enforcement: false → the launcher unshares a netns for the game (see app-options `online`).
   online ? true,
   workingDir ? null,
+  # OUTER-phase per-game setup hook (the top-level `setupScript` option): a store-path executable run
+  # before the view is assembled. Backend-independent by nature — see app-options.
+  setupScript ? null,
   # Save/state binds: `{ src; dst; ro ? false; create ? true; }` — bind `src` (persistent,
   # `$VAR`-expandable) at `dst` under the game's $HOME view (the game writes its native path; data
   # persists in a propnix dir).
@@ -166,6 +169,7 @@ let
           ;
         workingDir = workingDir;
         exeArgs = exeArgs;
+        payload = "${builtins.head payloads}";
         online = online;
         ldLibraryPath = ldLibraryPath;
         inherit scrubPrefixes;
@@ -173,12 +177,18 @@ let
           inherit (b) src dst;
           ro = b.ro or false;
           create = b.create or true;
+          # `type = "file"` → the source is a regular file, so `create` touches it rather than mkdir'ing
+          # it (redirecting one file out of a directory that is itself bound elsewhere). Same vocabulary as
+          # the wine mount table's `type`.
+          type = b.type or "mount";
         }) saveBinds;
         inherit splash singleInstance windowWatch;
         tar = "${gnutar}/bin/tar";
         mangohud = mangohud;
       }
       // gameModeFix
+      # Omitted when unset so a game without one emits no key (config.rs defaults it to None).
+      // lib.optionalAttrs (setupScript != null) { setupScript = "${setupScript}"; }
       # Game-dir-relative files to erase at runtime (→ propnix-mount whiteout entries). Omitted when empty
       # so a game with no masks is unaffected; config.rs defaults `maskFiles` to [].
       // lib.optionalAttrs (maskFiles != [ ]) { maskFiles = maskFiles; }

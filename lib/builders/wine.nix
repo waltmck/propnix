@@ -54,6 +54,9 @@
   # game/user can still override per-target. Binds only: overlay-style save persistence (KSP) stays a
   # hand-written `wine.mounts` row.
   saveBinds ? [ ],
+  # OUTER-phase per-game setup hook (the top-level `setupScript` option): a store-path executable run
+  # before the prefix is assembled. Not a wine tuning knob — the thin backends honour the same option.
+  setupScript ? null,
   # Extra child environment (the unified mkApp `env`), folded into seal.setEnv — values $VAR-expanded by
   # the launcher. Reserved launcher-owned names are rejected here (eval-time), keeping the option honest.
   env ? { },
@@ -91,7 +94,7 @@ let
   # the config emit + mount table consume:
   #   flat = { d3d; graphics; dllOverrides = { <dll> = <order>; … }; userReg; fpsUserReg; vsyncUserReg;
   #            systemReg; userdefReg; brokenVariables; galaxyStubDlls; extraSystem32;
-  #            setupScript; userRegScript; mounts }
+  #            userRegScript; mounts }
   flat = sealing.flattenTuning resolvedConfig;
   wineUser = prefixLower.wineUser; # single source of truth: the user the store prefix was built for
 
@@ -189,8 +192,10 @@ let
         };
   };
 
-  # Derived save-bind rows: one bind mount per `saveBinds` entry, at the wine profile home. `type` is
-  # stated explicitly (these rows bypass flattenTuning's `{ type = "mount"; }` stamping); `ro` maps to
+  # Derived save-bind rows: one bind mount per `saveBinds` entry, at the wine profile home. `type` comes
+  # from the row (default "mount"; these rows bypass flattenTuning's `{ type = "mount"; }` stamping), so a
+  # game can declare `type = "file"` once and have it work on wine and thin alike — which is how a single
+  # file is redirected out of a directory that is itself bound (factorio's cache files). `ro` maps to
   # `mode = "ro"`, omitted when false. Merged BEFORE flat.mounts so the tuning wins per-target.
   # `dst` is joined onto the profile home BY STRING, so an absolute path would silently produce a nonsense
   # row — refuse legibly (an absolute target belongs in `wine.mounts`; THIN saveBinds do support them).
@@ -202,7 +207,7 @@ let
         (
           lib.nameValuePair "drive_c/users/${wineUser}/${b.dst}" (
             {
-              type = "mount";
+              type = b.type or "mount";
               source = b.src;
               createIfNotExist = b.create or true;
             }
@@ -379,7 +384,7 @@ let
       # Optional per-game setup script (a store-path executable) the launcher runs before wine — the
       # escape hatch for game-specific prefix setup (e.g. Skyrim's display+quality ini seeding). A
       # non-zero exit aborts the launch.
-      setupScript = flat.setupScript;
+      setupScript = setupScript;
       # Optional DYNAMIC HKCU overrides: an executable whose JSON stdout is applied this launch
       # (runtime-derived → overrides static userReg). Non-zero/bad-JSON ABORTS.
       userRegScript = flat.userRegScript;

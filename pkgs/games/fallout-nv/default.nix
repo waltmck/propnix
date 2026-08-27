@@ -26,7 +26,6 @@
   lib,
   mkApp,
   mkSetupScript,
-  presets,
 }:
 mkApp {
   pname = "fallout-nv";
@@ -52,13 +51,12 @@ mkApp {
   ];
   # Per-title tuning (the wined3d PCI-vendor spoof) + the setup script the launcher runs before wine to seed
   # FalloutPrefs.ini (+ Fallout.ini) — see the fix (1) note above and setup.sh.
-  wine = presets.mergeTuning [
-    (import ./wine-tuning.nix)
-    {
-      setupScript = mkSetupScript {
-        name = "fallout-nv-setup";
-        script = ./setup.sh;
-      };
-    }
-  ];
+  # Top-level, not a wine knob: the hook runs in the OUTER phase before any prefix exists
+  # (modules/app-options.nix).
+  setupScript = mkSetupScript {
+    name = "fallout-nv-setup";
+    script = ./setup.sh;
+  };
+
+  wine = import ./wine-tuning.nix;
 }

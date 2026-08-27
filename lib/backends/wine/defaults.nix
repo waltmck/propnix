@@ -233,7 +233,6 @@ in
   # Optional per-game SETUP SCRIPT: a path to an EXECUTABLE the launcher runs (OUTER, before wine) for
   # game-specific prefix setup that doesn't belong in the launcher (e.g. Skyrim seeding SkyrimPrefs.ini). Gets
   # the runtime env + PROPNIX_PAYLOAD; a NON-ZERO exit ABORTS the launch. The game builds it (writeShellScript).
-  setupScript = null;
 
   # Optional escape hatch for DYNAMIC HKCU overrides: a store-path executable whose JSON stdout is a set of
   # HKCU overrides applied this launch (runtime-derived → overrides static userReg). Non-zero/bad-JSON ABORTS.

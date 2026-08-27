@@ -51,6 +51,7 @@
         broken
         payloads
         extraLowers
+        setupScript
         ;
       # `extraBinds` is thin-only (view-relative dst; wine's binds are profile-home-relative) — refuse it
       # legibly instead of silently dropping the rows.

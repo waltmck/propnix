@@ -9,7 +9,7 @@ Supported fetchers are GOG and Steam. You will need to initialize your credentia
 **Credentials**). Quick start:
 
 ```
-nix run .#propnix -- cred add gog   # And follow the instructions to login
+nix run .#propnix -- cred add steam   # And follow the instructions to login
 nix run .#factorio --extra-sandbox-paths /propnix=/var/lib/propnix
 ```
 

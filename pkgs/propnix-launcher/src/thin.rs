@@ -142,6 +142,30 @@ fn run_outer(
         }
     };
 
+    // Per-game SETUP SCRIPT — the same OUTER-phase hook the wine path runs, and for the same reason: it
+    // seeds a config file in the game's own save dir, which is a host directory either way. Placed AFTER
+    // set_mount_env + resolve_thin_table (so PROPNIX_SAVE_DIR/APPID are set and the save dir exists) and
+    // BEFORE the view is assembled. A NON-ZERO exit ABORTS: a setup failure is a packaging bug or a
+    // half-written config, not something to launch into.
+    if let Some(script) = &cfg.setup_script {
+        let mut cmd = std::process::Command::new(script);
+        cmd.env("PROPNIX_PAYLOAD", &cfg.payload);
+        match cmd.status() {
+            Ok(s) if s.success() => {}
+            Ok(s) => {
+                eprintln!(
+                    "propnix-launcher: setup script exited {} — aborting (packaging bug or corrupted config)",
+                    run::code_of(s)
+                );
+                return ExitCode::FAILURE;
+            }
+            Err(e) => {
+                eprintln!("propnix-launcher: cannot run setup script {script}: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
     // Quiet GTK's Vulkan-ICD probe warnings on Asahi (cairo renderer is plenty for the splash).
     if cfg.splash && std::env::var_os("GSK_RENDERER").is_none() {
         std::env::set_var("GSK_RENDERER", "cairo");
@@ -275,7 +299,14 @@ fn resolve_thin_table(cfg: &ThinConfig, view: &Path) -> io::Result<Vec<Entry>> {
         let p = Path::new(&src);
         if !p.exists() {
             if b.create {
-                std::fs::create_dir_all(p)?;
+                if b.kind == crate::config::BindKind::File {
+                    if let Some(parent) = p.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::File::create(p)?;
+                } else {
+                    std::fs::create_dir_all(p)?;
+                }
             } else {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,

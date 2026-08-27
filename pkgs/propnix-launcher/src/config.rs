@@ -173,6 +173,23 @@ pub enum MountSpec {
         #[serde(rename = "readOnly", default)]
         read_only: bool,
     },
+    /// Bind one regular FILE at the target. Identical to `Mount` except in what it IS: the source is a
+    /// file, so `createIfNotExist` TOUCHES it instead of `mkdir -p`, and propnix-mount lays a file
+    /// mountpoint rather than a directory one.
+    ///
+    /// Its reason to exist is redirecting an individual file out of a directory that is itself bound
+    /// somewhere else. Factorio is the case: it writes `atlas-cache.dat` (~1.4 GB with Space Age),
+    /// `data-cache.dat` and `crop-cache.dat` into the SAME write-data root as `saves/` and `mods/`, and
+    /// offers no path option for them — so the caches cannot be split off by an overlay (one `upper`
+    /// cannot route by filename) and have to be bound file by file out of the save dir into the state dir.
+    File {
+        /// The bind source (an env-expandable path). Unlike `Mount`, never null: a file mount has nothing
+        /// ephemeral to fall back to.
+        source: String,
+        /// "ro" | "rw" (default "rw").
+        #[serde(default = "default_mount_mode")]
+        mode: String,
+    },
     /// ERASE the file at the target (the key) from its parent mount — a true absence, no store copy. Realized
     /// by propnix-mount overlaying the parent dir in place with a char-device 0,0 whiteout for the basename.
     /// Used to neutralize a store-integration DLL a wine game bundles (e.g. a Steam build's steam_api64.dll)
@@ -323,6 +340,17 @@ pub struct ThinConfig {
     /// Game-dir-relative files to ERASE from the game dir — each becomes a propnix-mount `whiteout` entry (an
     /// overlay-whiteout over the file's parent), so the file is genuinely absent at runtime with no store copy.
     /// Used to neutralize a bundled library (e.g. a Steam game's libsteam_api.so). Default empty.
+    /// The highest-priority GAME TREE (a store path) — what `PROPNIX_PAYLOAD` points a setup script at so
+    /// it can read shipped assets. Not derivable from `gameLowers`/`gameModeFixes`, whose heads are the
+    /// backend's own overlays (patched exe, entitlement settings) rather than game content.
+    pub payload: String,
+    /// Optional per-game SETUP SCRIPT (a store-path executable) run in the OUTER phase, before the view is
+    /// assembled — the same hook the wine path has (`Config::setup_script`), because it is not wine-specific:
+    /// it seeds a config file in the game's own save dir, which exists on the host either way. Runs with the
+    /// runtime env (PROPNIX_SAVE_DIR/APPID/WIDTH/HEIGHT/QUALITY + PROPNIX_PAYLOAD). A NON-ZERO exit ABORTS
+    /// the launch: a setup failure is a packaging bug or a half-written config, not something to launch into.
+    #[serde(rename = "setupScript", default)]
+    pub setup_script: Option<String>,
     #[serde(rename = "maskFiles", default)]
     pub mask_files: Vec<String>,
     /// The program that runs the game: `${box64}/bin/box64` on aarch64 (the x86_64 ELF is passed as its arg),
@@ -381,12 +409,28 @@ pub struct GameModeFix {
     pub lower: String,
 }
 
+/// What a THIN bind row binds — the thin counterpart of the wine mount table's `type` discriminator.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BindKind {
+    /// A directory (the default): `create` makes it with `mkdir -p`.
+    #[default]
+    Mount,
+    /// A single regular file: `create` touches it, and propnix-mount lays a file mountpoint.
+    File,
+}
+
 /// A THIN-mode save/state bind: `src` (persistent, $VAR-expandable) mounted at `dst` (under the view $HOME).
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Bind {
     pub src: String,
     pub dst: String,
+    /// What this row binds: a directory (the default) or a single regular `file`. The same distinction the
+    /// wine mount table draws with `type = "file"`, and for the same reason — `create` must touch a file
+    /// rather than `mkdir -p` it. See `MountSpec::File`.
+    #[serde(rename = "type", default)]
+    pub kind: BindKind,
     #[serde(default)]
     pub ro: bool,
     #[serde(default = "default_true")]
@@ -456,6 +500,7 @@ fn validate_mount_rows(raw: &serde_json::Value, path: &str) -> Result<(), String
         let (variant, extra): (&[&str], &[&str]) = match ty {
             "mount" => (&["source", "mode", "seed"], COMMON),
             "overlay" => (&["lower", "upper", "skeleton", "readOnly"], COMMON),
+            "file" => (&["source", "mode"], COMMON),
             "whiteout" => (&[], &["type", "enabled"]),
             other => {
                 return Err(format!(

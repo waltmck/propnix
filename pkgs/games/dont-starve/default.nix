@@ -39,7 +39,7 @@ mkApp {
   # fullscreen (its default is windowed). Klei keeps this in settings.ini, NOT the registry, so a `userReg`
   # entry cannot express it (see setup.sh). ini-lib's `ini_set` does the edit (Klei's INI dialect is set at
   # the top of setup.sh: CRLF, `key = value` spacing, `;`-comment skip).
-  wine.setupScript = mkSetupScript {
+  setupScript = mkSetupScript {
     name = "dont-starve-setup";
     script = ./setup.sh;
     withIniLib = true;

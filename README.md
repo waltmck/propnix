@@ -8,7 +8,7 @@ between platforms.
 Supported fetchers are GOG and Steam. You will need to initialize your credentials (see
 **Credentials**). Quick start:
 
-```
+```sh
 nix run .#propnix -- cred add steam   # And follow the instructions to login
 nix run .#factorio --extra-sandbox-paths /propnix=/var/lib/propnix
 ```
@@ -33,21 +33,15 @@ flags: propnix picks it from the game's own quality ranking, filtered by what yo
 else in the cell is selectable explicitly:
 
 ```sh
-nix run .#hollow-knight                                                        # the bold default
+nix run .#hollow-knight                                                        # the default
 nix run '.#hollow-knight.apply { emulatedPlatform = "x86_64-windows"; }'       # any other entry
 nix run '.#hollow-knight.apply { fetcher = "steam"; emulatedPlatform = "x86_64-linux"; }'
 ```
 
-An em dash (—) means that combination is not available: in table 1 the title has no build this host can
-run, in table 2 that store does not sell a build propnix has pinned. The two tables differ because
-availability and runnability are separate questions — a platform can be pinned from a store (table 2) and
-still not run on a given host (table 1), which is exactly the aarch64 story below.
+### Table 1 (by host): which builds run on my machine?
 
-### Table 1 — by host: what each machine can run
-
-Rows are games, columns are the machine you are running ON, cells are the `emulatedPlatform` values that
-*work* there. A platform is listed only if it is pinned **and** not `meta.broken` on that host, so this
-table is the honest answer to "will this game run for me".
+Rows are games, columns are the architecture you are running on, and cells are the `emulatedPlatform` values 
+that work there.
 
 | game | on an `aarch64-linux` host | on an `x86_64-linux` host |
 |---|---|---|
@@ -70,13 +64,7 @@ table is the honest answer to "will this game run for me".
 | `skyrim-se` | **x86_64-windows** | **x86_64-windows** |
 | `stellaris` | **x86_64-linux** | **x86_64-linux** |
 
-Three titles are Windows-only builds that propnix cannot yet run on aarch64: `homeworld-rm`, `iron-lung`
-and `kerbal-space-program` all hit FEX code-generation bugs (a Unity/Mono abort, or an SEH fault in a
-32-bit binary). They are marked `meta.broken` there rather than shipped broken, so the build refuses with
-the reason instead of the game crashing — run `nix eval .#<game>.meta.brokenReason` for the detail. They
-run natively on x86_64.
-
-### Table 2 — by store: which fetcher provides which build
+### Table 2 (by store): which fetcher provides a given game build?
 
 Rows are games, columns are stores. A cell lists the `emulatedPlatform` values propnix has **pinned** from
 that store, independent of any host. This is the table to read when deciding which account you need: a
@@ -103,8 +91,8 @@ game with entries under only one column can only be built by someone who owns it
 | `skyrim-se` | x86_64-windows | — |
 | `stellaris` | — | x86_64-linux |
 
-Where a game is pinned from both stores, the default fetcher follows your `preferredFetchers` config
-(every registered fetcher, in registry order, unless you narrow it) — so a gog-only setup automatically
+When a game is pinned from both stores, the default fetcher follows your `preferredFetchers` config
+(every registered fetcher in registry order, unless you narrow it) — so a gog-only setup automatically
 falls back to the GOG build of a game whose Steam build would otherwise win, provided the game's own
 ranking sanctions that platform. Nothing outside that ranking is ever selected silently.
 

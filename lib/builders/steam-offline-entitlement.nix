@@ -36,11 +36,14 @@
 # list. Getting it wrong is silent and INVERTED — a `steam_settings/` the shim cannot find means "unlock
 # everything", so a caller that wires only one placement can over-claim on the other backend.
 #
-# No local identity (account_name.txt / user_steam_id.txt) is written: nothing here needs one (entitlement
-# does not key on it, saves live in the game's own bound directory, and upstream makes an identity up per
-# launch), and a package shipped to other people must not carry a baked-in account name or SteamID — it
-# would be one identity shared by every install, and a plausible-looking SteamID64 in the source invites
-# the reader to assume it belongs to someone.
+# No local identity (account_name.txt / user_steam_id.txt) is written: entitlement does not key on it,
+# and a package shipped to other people must not carry a baked-in account name or SteamID — it would be
+# one identity shared by every install, and a plausible-looking SteamID64 in the source invites the reader
+# to assume it belongs to someone. Identity is instead a RUNTIME, per-host fact: the launcher (steamid.rs,
+# gated by the baked `steamEmu` flag) reads the SteamID64 out of the host's stored Steam credential and
+# seats it in gbe_fork's GLOBAL settings inside the per-launch view — the local tree here deliberately
+# leaves `[user::general]` unset so that global value is what the shim resolves. No credential → upstream
+# makes an identity up per launch, exactly as before.
 {
   lib,
   runCommandLocal,

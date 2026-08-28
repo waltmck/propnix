@@ -85,7 +85,20 @@ let
             && !(lib.any (lib.hasSuffix ".dll") cfg.steam.emu.libPaths)
           )
           "propnix mkApp (${cfg.pname}): steam.emu on the wine backend needs `steam.emu.libPaths` to name the game's shipped steam_api(64).dll (union-replacement is the only PE mechanism — there is no preload) — declare it, or set `steam.emu.enable = false`."
-          (backends.${cfg.backend}.build { inherit cfg enabledDlc executables; });
+          # The same half-wiring refusal for the native backend: its only mechanism is the bind-over at a
+          # declared `.so` path — there is deliberately no preload (LD_PRELOAD is inherited by every host
+          # process the game spawns, and a store-closure shim crashes foreign-distro children; see
+          # modules/steam-emu.nix) — so an undeclared path would be a silently-inert shim.
+          (
+            lib.throwIf
+              (
+                cfg.steam.emu.enable
+                && cfg.backend == "native"
+                && !(lib.any (lib.hasSuffix ".so") cfg.steam.emu.libPaths)
+              )
+              "propnix mkApp (${cfg.pname}): steam.emu on the native backend needs `steam.emu.libPaths` to name the game's shipped libsteam_api.so (the bind-over is the only native mechanism — no preload, it would leak into spawned host processes) — declare it, or set `steam.emu.enable = false`."
+              (backends.${cfg.backend}.build { inherit cfg enabledDlc executables; })
+          );
 
       # The override surface, promoted to the top level (so `game.apply`, `lib.getExe game` work) AND
       # mirrored into passthru.

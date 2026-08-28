@@ -6,10 +6,16 @@
 # from its Steam fetch rows and `steam.emu.enable` follows the fetcher/platform axes.
 #
 # WHAT IT WIRES (the builder's header carries the placement rationale):
-#   * `box64.guestPreload` — the shim copy inside the settings tree; each thin backend translates it
-#     to its loader's spelling (BOX64_LD_PRELOAD / LD_PRELOAD). The shim's symbols interpose the shipped
-#     steam lib on the game's PLT lookups (engines that LINK libsteam_api — Stellaris), and on native/FEX
-#     the beside-the-library settings probe resolves right into the settings tree.
+#   * `box64.guestPreload` — the shim copy inside the settings tree, contributed ONLY off the native
+#     backend. Under box64/FEX the guest loader's spelling (BOX64_LD_PRELOAD / guest LD_PRELOAD) confines
+#     the preload to emulated code, and it interposes the shipped steam lib for engines that LINK
+#     libsteam_api without a declared path (Stellaris under box64). On NATIVE there is no preload at all:
+#     plain LD_PRELOAD is inherited by every child the game spawns, and games shell out to HOST binaries
+#     (Factorio execs `sh -c lsb_release` to stamp its log) — on a non-NixOS host the shim's nix-store
+#     RUNPATH then drags a second glibc into a foreign-distro process, which dies with SIGBUS (observed:
+#     every Factorio launch on Fedora coredumped its lsb_release child). Native is served entirely by the
+#     bind-over rows below, the same replace-the-file story as wine: the real ld.so resolves both
+#     DT_NEEDED and dlopen through the path, and the file AT the path is the shim.
 #   * `extraLowers` — the same tree unioned into the game dir, ABOVE every game tree (box64's CWD-fallback
 #     discovery; box64 never file-maps guest libraries, so the beside-the-library probe cannot work there).
 #   * per `.so` entry of `steam.emu.libPaths`, three `extraBinds` rows — the SAME settings-tree shim bound
@@ -192,11 +198,15 @@ in
         Game-dir-relative paths of the game's own bundled Steam-API library copies, declared for EVERY
         payload unconditionally (each backend consumes only the flavor its loader can mean):
 
-          * `*.so` (Steam Linux build) — for an engine that dlopens the lib by EXPLICIT PATH (Unity
-            native plugins: "<exe>_Data/Plugins/libsteam_api.so"), which no preload can interpose: the
-            shim is BOUND OVER it with `steam_settings/` + `steam_interfaces.txt` bound beside it, so the
-            file at the path the engine opens IS the shim. An engine that LINKS the lib (Stellaris) is
-            served by the preload alone and declares no .so path.
+          * `*.so` (Steam Linux build) — the shim is BOUND OVER it with `steam_settings/` +
+            `steam_interfaces.txt` bound beside it, so the file at the path the engine opens IS the shim.
+            On the NATIVE backend this is the ONLY mechanism (there is no preload — see the header), and
+            it serves both loading styles: the real ld.so resolves a linked DT_NEEDED and an
+            explicit-path dlopen (Unity native plugins: "<exe>_Data/Plugins/libsteam_api.so") through the
+            same file. Under box64/FEX the guest preload additionally interposes for an engine that LINKS
+            the lib without a declared path (Stellaris) — but declare the path anyway: mk-app.nix
+            requires it wherever the native backend is reachable, and the bind is inode-identical to the
+            preload so the two never fight.
           * `steam_api.dll` / `steam_api64.dll` (Steam Windows build) — the wine placement: the matching
             gbe_fork dll is MIRRORED at that path inside the settings tree with settings beside it, and
             the tree unions ABOVE the payload (wine extraLowers outrank it), replacing the shipped dll.
@@ -209,7 +219,10 @@ in
   };
 
   config = lib.mkIf cfg.steam.emu.enable {
-    box64.guestPreload = [ "${settings}/libsteam_api.so" ];
+    # Guest-loader backends only (see the header): native gets NO preload — plain LD_PRELOAD leaks into
+    # every spawned host process, and the bind-over rows below already replace the file the real ld.so
+    # resolves. mk-app.nix enforces that a native build declares its `.so` path, mirroring the wine rule.
+    box64.guestPreload = lib.optionals (cfg.backend != "native") [ "${settings}/libsteam_api.so" ];
     extraLowers = [ settings ];
     # The thin bind-over rows (`.so` libPaths; the .dll flavor travels INSIDE the tree as wine mirrors).
     # "game/" is the launcher's THIN_GAME_DIR contract (config.rs); a sibling target that does not exist

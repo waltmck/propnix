@@ -1,0 +1,18 @@
+[package]
+name = "propnix-steam-cred"
+version = "0.1.0"
+edition = "2021"
+
+# Decoder for the STORED Steam credential (the tar `propnix cred add steam` writes), shared as a path dep
+# by the two programs that read it: propnix-cli (pin/download — needs the refresh tokens themselves) and
+# propnix-launcher (offline-entitlement identity — needs only the SteamID64 a token names). One copy of the
+# wire-format walking so the two can never drift. See src/lib.rs.
+
+[dependencies]
+# The stored credential is a path-preserving tar of DepotDownloader's account.config.
+tar = "0.4"
+# …which is raw DEFLATE (.NET DeflateStream, windowBits -15) over a protobuf-net message.
+flate2 = "1"
+# JWT payloads are base64url segments of JSON.
+base64 = "0.22"
+serde_json = "1"

@@ -85,6 +85,12 @@
   # reports "no online subsystem" and runs offline. (A STATICALLY imported SDK needs the opposite — a real
   # no-op stub: `galaxyStubDlls`.)
   maskFiles ? [ ],
+  # Whether this build carries the gbe_fork offline Steam-entitlement shim (`steam.emu.enable`). Baked so
+  # the launcher knows to seat the stored Steam account's SteamID64 into the shim's global settings inside
+  # the per-launch view (launcher steamid.rs) — identity stays a RUNTIME, per-host fact, never a store
+  # path's content (see builders/steam-offline-entitlement.nix), and a GOG game's launch never touches the
+  # credential store.
+  steamEmu ? false,
 }:
 let
   payload = builtins.head payloads; # the primary tree: C:\game root, launch cwd, icon/exe source
@@ -388,6 +394,8 @@ let
       # Optional DYNAMIC HKCU overrides: an executable whose JSON stdout is applied this launch
       # (runtime-derived → overrides static userReg). Non-zero/bad-JSON ABORTS.
       userRegScript = flat.userRegScript;
+      # gbe_fork present → the launcher seats the stored Steam account's identity (see the param above).
+      steamEmu = steamEmu;
       # The complete WINEPREFIX mount table (see finalMounts above). The launcher joins each target to the
       # view root, $VAR-expands the sources, filters/sorts, and lays each with propnix-mount.
       mounts = finalMounts;

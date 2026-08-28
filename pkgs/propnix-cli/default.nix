@@ -4,8 +4,9 @@
 #     payload, so a re-pin costs O(1) disk instead of a full copy of the game. Refreshing the obvious way
 #     needs free disk equal to the title — hundreds of GB for a modern AAA game, impossible on a CI runner.
 #
-# A standalone Rust crate (no GTK, no sibling path-deps), built with rustPlatform.buildRustPackage; deps
-# vendored offline from Cargo.lock. Arch-independent (runs on both hosts).
+# A Rust crate built with rustPlatform.buildRustPackage; deps vendored offline from Cargo.lock. One
+# sibling path-dep, propnix-steam-cred (the stored Steam credential's wire formats, shared with
+# propnix-launcher so the two readers of the store can never drift). Arch-independent (runs on both hosts).
 #
 # TLS. Two clients end up in the binary:
 #   * reqwest — Steam's CM control plane AND all bulk chunk traffic (pin/engine.rs) — resolves trust
@@ -27,15 +28,29 @@
   gnutar,
   cacert,
 }:
+let
+  # Build source = this crate dir + the sibling path-dep, mirroring propnix-launcher's layout. Exclude
+  # local build state so the hash tracks the code.
+  crates = [
+    "propnix-cli"
+    "propnix-steam-cred"
+  ];
+in
 rustPlatform.buildRustPackage {
   pname = "propnix-cli";
   version = "0.1.0";
   src = lib.cleanSourceWith {
     name = "propnix-cli-src";
-    src = ./.;
+    src = ../.; # pkgs/
     filter =
-      path: _type: !(builtins.elem (baseNameOf path) [ "target" ".cargo-home" ]);
+      path: _type:
+      let
+        rel = lib.removePrefix (toString ../. + "/") (toString path);
+        top = lib.head (lib.splitString "/" rel);
+      in
+      builtins.elem top crates && !(builtins.elem (baseNameOf path) [ "target" ".cargo-home" ]);
   };
+  sourceRoot = "propnix-cli-src/propnix-cli";
   cargoLock.lockFile = ./Cargo.lock;
 
   # The engine's tests build a reqwest client, which cannot be constructed without trust roots to load —

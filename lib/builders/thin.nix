@@ -72,6 +72,12 @@
     systems = [ ];
     reason = null;
   },
+  # Whether this build carries the gbe_fork offline Steam-entitlement shim (`steam.emu.enable`). Baked so
+  # the launcher knows to seat the stored Steam account's SteamID64 into the shim's global settings inside
+  # the per-launch view (launcher steamid.rs) — identity stays a RUNTIME, per-host fact, never a store
+  # path's content (see builders/steam-offline-entitlement.nix), and a GOG game's launch never touches the
+  # credential store.
+  steamEmu ? false,
   # ── the per-emulator LAUNCH BLOCK (from a backend registry entry, via mk-thin-build) ──
   backend, # informational: "box64" | "fex" | "native" (the launcher does not branch on it)
   emulator ? null, # program that runs the ELF (box64 / FEXInterpreter path), or null → exec the ELF natively
@@ -185,6 +191,8 @@ let
         inherit splash singleInstance windowWatch;
         tar = "${gnutar}/bin/tar";
         mangohud = mangohud;
+        # gbe_fork present → the launcher seats the stored Steam account's identity (see the param above).
+        steamEmu = steamEmu;
       }
       // gameModeFix
       # Omitted when unset so a game without one emits no key (config.rs defaults it to None).

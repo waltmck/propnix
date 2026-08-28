@@ -1514,6 +1514,7 @@ dependencies = [
  "liblzma",
  "lzma-sdk-sys",
  "md-5",
+ "propnix-steam-cred",
  "protobuf",
  "reqwest",
  "serde",
@@ -1527,6 +1528,16 @@ dependencies = [
  "tokio",
  "ureq",
  "zstd",
+]
+
+[[package]]
+name = "propnix-steam-cred"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "flate2",
+ "serde_json",
+ "tar",
 ]
 
 [[package]]

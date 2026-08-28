@@ -383,6 +383,23 @@ fn run_inner(cfg: &ThinConfig, settings: &Settings, paths: &Paths, passthrough: 
         cmd.env_remove(k);
     }
 
+    // Steam-emulated build: seat the stored Steam account's SteamID64 into the gbe_fork shim's global
+    // settings — under the data home the CHILD will resolve (a game that pins its own XDG_DATA_HOME via
+    // cfg.env is followed there; otherwise the scrub above makes it $HOME/.local/share). The view is a
+    // fresh tmpfs, so this exists for exactly this launch. Best-effort by design (see steamid.rs).
+    if cfg.steam_emu {
+        if let Some((_, id)) = crate::steamid::resolve() {
+            let data_home = match cfg.env.get("XDG_DATA_HOME") {
+                Some(v) if !v.is_empty() => std::path::PathBuf::from(util::expand_env(v)),
+                _ => paths.view.join(".local/share"),
+            };
+            let dir = data_home.join("GSE Saves").join("settings");
+            if let Err(e) = crate::steamid::seat(&dir, id) {
+                eprintln!("propnix: could not seat the Steam identity ({e}) — the emu will make one up");
+            }
+        }
+    }
+
     // The baked LD_LIBRARY_PATH (native bridging libs ∪ x86_64 guest libs) box64 folds into both its native
     // bridge resolution and the guest search path.
     if !cfg.ld_library_path.is_empty() {
@@ -438,9 +455,9 @@ fn run_inner(cfg: &ThinConfig, settings: &Settings, paths: &Paths, passthrough: 
                 format!("{mhlib}:{}", cfg.ld_library_path)
             };
             cmd.env("LD_LIBRARY_PATH", ld);
-            // Compose with a baked LD_PRELOAD (box64.guestPreload on native — e.g. Stellaris's offline
-            // Steam entitlement shim) instead of clobbering it: benching must not silently drop what the
-            // preload provides (there, every DLC).
+            // Compose with a baked LD_PRELOAD (a game's own box64.guestPreload on the native face —
+            // rare, since steam-emu serves native by bind-over, not preload) instead of clobbering it:
+            // benching must not silently drop what a preload provides.
             let preload = match cfg.env.get("LD_PRELOAD") {
                 Some(v) if !v.is_empty() => {
                     format!("{mhlib}/libMangoHud_shim.so:{}", util::expand_env(v))

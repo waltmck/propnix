@@ -107,6 +107,11 @@ pub struct Config {
     /// the launch: a setup failure means a packaging bug or a would-be-corrupted prefix, which must surface.
     #[serde(rename = "setupScript", default)]
     pub setup_script: Option<String>,
+    /// Whether this build carries the gbe_fork offline Steam-entitlement shim (steam.emu.enable). When set,
+    /// the launcher seats the stored Steam account's SteamID64 into the shim's global settings inside the
+    /// per-launch view (see steamid.rs) — gated so a GOG game's launch never touches the credential store.
+    #[serde(rename = "steamEmu", default)]
+    pub steam_emu: bool,
 }
 
 /// A mount-table entry (keyed by target). The `spec` is a type-tagged SUM so a bind and an overlay can't be
@@ -396,6 +401,11 @@ pub struct ThinConfig {
     /// XDG_DATA_DIRS (the Vulkan implicit layer). See thin.rs.
     #[serde(default)]
     pub mangohud: Option<String>,
+    /// Whether this build carries the gbe_fork offline Steam-entitlement shim (steam.emu.enable). When set,
+    /// the launcher seats the stored Steam account's SteamID64 into the shim's global settings inside the
+    /// per-launch view (see steamid.rs) — gated so a GOG game's launch never touches the credential store.
+    #[serde(rename = "steamEmu", default)]
+    pub steam_emu: bool,
 }
 
 /// THIN-mode exec-bit fix for ONE game tree (see `ThinConfig::game_mode_fixes`): a metacopy skeleton

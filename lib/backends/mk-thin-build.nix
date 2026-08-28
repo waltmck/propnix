@@ -78,6 +78,8 @@ lib.throwIfNot (lib.hasSuffix "-linux" cfg.emulatedPlatform)
     # settings). Enabled DLC is NOT here — it goes into `payloads` above, where it gets its own exec-bit
     # fix layer and keeps its place in the union.
     extraLowers = (b.extraLowers or [ ]) ++ (map (d: "${d}") cfg.extraLowers);
+    # gbe_fork wired in (modules/steam-emu.nix) → the launcher seats the stored account's SteamID64.
+    steamEmu = cfg.steam.emu.enable;
     inherit (b)
       backend
       emulator

@@ -127,16 +127,13 @@ pub struct Credential {
     pub refresh_token: String,
 }
 
-/// Find `account.config` in the stored tar and pull (account, refresh token) out of it.
+/// Read (account, refresh token) pairs out of every stored credential tar. The wire-format decoding
+/// (tar → account.config → protobuf-net `LoginTokens` → JWT filter) lives in the shared
+/// `propnix-steam-cred` crate: the launcher reads the SAME store for the gbe_fork offline-entitlement
+/// identity, and two hand-kept copies of an undocumented format would drift. What stays here is POLICY —
+/// the sudo-escalated permission repair, the expiry check, the `--steam-account` narrowing, and the
+/// error taxonomy.
 ///
-/// The file is DepotDownloader's `AccountSettingsStore`: **raw DEFLATE** (no zlib header — .NET's
-/// `DeflateStream` uses windowBits -15) wrapping a protobuf-net message. protobuf-net encodes a
-/// `Dictionary` as one length-delimited field per entry at the member's field number, each entry being
-/// `field 1 = key, field 2 = value`. `LoginTokens` is member 4.
-///
-/// Rather than model the whole schema we walk the wire format and collect (string, string) pairs from
-/// field 4, then keep only values shaped like a JWT. `ContentServerPenalty` (member 2) is not
-/// mistakable for it: its entries carry a varint in field 2, not a string.
 /// A LIST, not a single credential, because a propnix host may hold several Steam accounts and only one
 /// of them owns a given depot — the caller tries each in turn, exactly as `fetchSteamDepot` does.
 /// `want` (from `--steam-account` / `PROPNIX_STEAM_ACCOUNT`) narrows it to one; a name the store does
@@ -147,20 +144,7 @@ pub fn credentials_from_store(
     cred_dir: &std::path::Path,
     want_account: Option<&str>,
 ) -> R<Vec<Credential>> {
-    let mut tars: Vec<std::path::PathBuf> = Vec::new();
-    let steam = cred_dir.join("steam");
-    if let Ok(rd) = std::fs::read_dir(&steam) {
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                tars.push(p.join("depotdownloader-store.tar"));
-            } else if p.extension().map(|x| x == "tar").unwrap_or(false) {
-                tars.push(p); // flat CI layout: <cred>/steam/store.tar
-            }
-        }
-    }
-    tars.retain(|p| p.exists());
-    tars.sort();
+    let tars = propnix_steam_cred::store_tars(cred_dir);
     if tars.is_empty() {
         return Err(SteamError::NoCredential(format!(
             "no Steam credential under {} — run `propnix cred add steam`",
@@ -181,44 +165,14 @@ pub fn credentials_from_store(
             }
             Err(e) => return Err(SteamError::Parse(format!("{}: {e}", t.display()))),
         };
-        let mut ar = tar::Archive::new(f);
-        let entries = ar
-            .entries()
-            .map_err(|e| SteamError::Parse(format!("{}: {e}", t.display())))?;
-        for entry in entries {
-            let mut entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let is_cfg = entry
-                .path()
-                .map(|p| p.file_name().map(|n| n == "account.config").unwrap_or(false))
-                .unwrap_or(false);
-            if !is_cfg {
-                continue;
-            }
-            let mut raw = Vec::new();
-            entry
-                .read_to_end(&mut raw)
-                .map_err(|e| SteamError::Parse(format!("reading account.config: {e}")))?;
-            let mut plain = Vec::new();
-            flate2::read::DeflateDecoder::new(&raw[..])
-                .read_to_end(&mut plain)
-                .map_err(|_| {
-                    SteamError::Parse(
-                        "account.config did not inflate — the stored credential is truncated or corrupt \
-                         (if it came from a CI secret, the base64 did not round-trip)"
-                            .into(),
-                    )
-                })?;
-            for (k, v) in string_pairs_in_field(&plain, 4) {
-                all.insert(k, v);
-            }
-        }
+        all.extend(
+            propnix_steam_cred::login_tokens_in_tar(f)
+                .map_err(|e| SteamError::Parse(format!("{}: {e}", t.display())))?,
+        );
     }
 
     // BTreeMap: sorted by account name, so the try-all order is deterministic.
-    let jwts: BTreeMap<&String, &String> = all.iter().filter(|(_, v)| looks_like_jwt(v)).collect();
+    let jwts = all;
     if jwts.is_empty() {
         return Err(SteamError::NoCredential(
             "the stored Steam credential holds no login token — re-run `propnix cred add steam` \
@@ -250,15 +204,15 @@ pub fn credentials_from_store(
         // steam-vent does not check expiry, so we must: a stale token otherwise surfaces as an opaque
         // login failure. An expired token is an ownership-class skip, not a hard stop — a second
         // account may still be good — unless it is the only one, which the empty check below reports.
-        if let Some(exp) = jwt_expiry(token) {
+        if let Some(exp) = propnix_steam_cred::jwt_expiry(&token) {
             if exp != 0 && now >= exp {
-                expired.push(account.clone());
+                expired.push(account);
                 continue;
             }
         }
         out.push(Credential {
-            account: account.clone(),
-            refresh_token: token.clone(),
+            account,
+            refresh_token: token,
         });
     }
     if out.is_empty() {
@@ -272,109 +226,6 @@ pub fn credentials_from_store(
         eprintln!("  Steam account {a:?}: stored refresh token has expired — skipping it");
     }
     Ok(out)
-}
-
-/// Is this string a JWT? We are scanning an UNKNOWN protobuf for the token, so shape alone is not
-/// enough — require the payload segment to actually base64url-decode into a JSON object, or a
-/// coincidentally dotted string could be mistaken for the credential.
-fn looks_like_jwt(s: &str) -> bool {
-    use base64::Engine;
-    let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() != 3 || parts.iter().any(|p| p.is_empty()) {
-        return false;
-    }
-    let Ok(raw) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[1]) else {
-        return false;
-    };
-    matches!(
-        serde_json::from_slice::<serde_json::Value>(&raw),
-        Ok(serde_json::Value::Object(_))
-    )
-}
-
-fn jwt_expiry(jwt: &str) -> Option<u64> {
-    use base64::Engine;
-    let payload = jwt.split('.').nth(1)?;
-    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&raw).ok()?;
-    v.get("exp").and_then(serde_json::Value::as_u64)
-}
-
-/// Walk protobuf wire format and collect (string, string) pairs from length-delimited entries at
-/// `field`. Anything that does not parse as such an entry is skipped.
-fn string_pairs_in_field(buf: &[u8], field: u32) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for (f, bytes) in top_level_fields(buf) {
-        if f != field {
-            continue;
-        }
-        let mut k: Option<String> = None;
-        let mut v: Option<String> = None;
-        for (sub, sb) in top_level_fields(&bytes) {
-            match sub {
-                1 => k = String::from_utf8(sb.to_vec()).ok(),
-                2 => v = String::from_utf8(sb.to_vec()).ok(),
-                _ => {}
-            }
-        }
-        if let (Some(k), Some(v)) = (k, v) {
-            out.push((k, v));
-        }
-    }
-    out
-}
-
-/// Yield (field number, payload) for every LENGTH-DELIMITED field; skip other wire types correctly so
-/// the walk stays in sync.
-fn top_level_fields(buf: &[u8]) -> Vec<(u32, Vec<u8>)> {
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    while i < buf.len() {
-        let (tag, n) = match varint(&buf[i..]) {
-            Some(x) => x,
-            None => break,
-        };
-        i += n;
-        let field = (tag >> 3) as u32;
-        match tag & 7 {
-            0 => match varint(&buf[i..]) {
-                Some((_, n)) => i += n,
-                None => break,
-            },
-            1 => i += 8,
-            5 => i += 4,
-            2 => {
-                let (len, n) = match varint(&buf[i..]) {
-                    Some(x) => x,
-                    None => break,
-                };
-                i += n;
-                let end = match i.checked_add(len as usize) {
-                    Some(e) if e <= buf.len() => e,
-                    _ => break,
-                };
-                out.push((field, buf[i..end].to_vec()));
-                i = end;
-            }
-            _ => break,
-        }
-    }
-    out
-}
-
-fn varint(b: &[u8]) -> Option<(u64, usize)> {
-    let mut v = 0u64;
-    let mut shift = 0;
-    for (i, byte) in b.iter().enumerate().take(10) {
-        v |= ((byte & 0x7f) as u64) << shift;
-        if byte & 0x80 == 0 {
-            return Some((v, i + 1));
-        }
-        shift += 7;
-    }
-    None
 }
 
 // ─────────────────────────────────────────── control plane ────────────────────────────────────────
@@ -1075,52 +926,7 @@ pub fn write_file<W: std::io::Write + ?Sized>(
 mod tests {
     use super::*;
 
-    #[test]
-    fn jwt_expiry_is_read_from_the_payload() {
-        // {"exp":1234567890} as base64url, with a dummy header and signature.
-        let jwt = "eyJhbGciOiJFZERTQSJ9.eyJleHAiOjEyMzQ1Njc4OTB9.sig";
-        assert_eq!(jwt_expiry(jwt), Some(1234567890));
-        assert!(looks_like_jwt(jwt));
-        assert!(!looks_like_jwt("not-a-jwt"));
-        assert!(!looks_like_jwt("ey.only.two")); // right shape, but the payload is not JSON
-    }
-
-    #[test]
-    fn protobuf_walk_finds_map_entries_and_skips_varint_valued_ones() {
-        // field 4 (LoginTokens): {key:"alice", value:"tok"}      -> collected
-        // field 2 (ContentServerPenalty): {key:"cache1", value:7} -> value is a varint, so skipped
-        let mut b = Vec::new();
-        let entry4 = {
-            let mut e = Vec::new();
-            e.push(0x0A);
-            e.push(5);
-            e.extend_from_slice(b"alice");
-            e.push(0x12);
-            e.push(3);
-            e.extend_from_slice(b"tok");
-            e
-        };
-        b.push(0x22); // field 4, wire type 2
-        b.push(entry4.len() as u8);
-        b.extend_from_slice(&entry4);
-        let entry2 = {
-            let mut e = Vec::new();
-            e.push(0x0A);
-            e.push(6);
-            e.extend_from_slice(b"cache1");
-            e.push(0x10); // field 2, VARINT
-            e.push(7);
-            e
-        };
-        b.push(0x12); // field 2, wire type 2
-        b.push(entry2.len() as u8);
-        b.extend_from_slice(&entry2);
-
-        let got = string_pairs_in_field(&b, 4);
-        assert_eq!(got, vec![("alice".to_string(), "tok".to_string())]);
-        // The penalty entry has no string in field 2, so it yields nothing even if asked for.
-        assert!(string_pairs_in_field(&b, 2).is_empty());
-    }
+    // (The JWT and protobuf-walk decoders are tested where they live now: propnix-steam-cred.)
 
     #[test]
     fn the_two_write_paths_agree_on_a_file_past_4_gib() {
@@ -1272,7 +1078,7 @@ mod tests {
         assert_eq!(parse_app_info(numeric, 1, "public").unwrap().build_id, "42");
     }
 
-    /// A JWT-shaped token whose payload really is JSON (`looks_like_jwt` checks that), optionally
+    /// A JWT-shaped token whose payload really is JSON (the shared crate's JWT filter checks that), optionally
     /// already expired.
     fn fake_jwt(exp: u64) -> String {
         use base64::Engine;

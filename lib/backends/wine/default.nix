@@ -62,5 +62,7 @@
       resolvedConfig = cfg.wine; # pre-resolved tuning (defaults layer + game + `.apply`, merged by evalModules)
       dlc = cfg.dlc.available;
       inherit enabledDlc;
+      # gbe_fork wired in (modules/steam-emu.nix) → the launcher seats the stored account's SteamID64.
+      steamEmu = cfg.steam.emu.enable;
     };
 }

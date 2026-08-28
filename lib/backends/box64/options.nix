@@ -26,11 +26,17 @@
       default = [ ];
       description = ''
         GUEST-arch libraries (store paths to x86_64 .so files) force-loaded into the emulated process ahead
-        of every other resolution — the interposition hatch (Stellaris: the offline Steam entitlement shim,
-        which must win over the libsteam_api.so shipped beside the exe). Each thin backend translates it to
-        its loader's spelling: BOX64_LD_PRELOAD under box64 (whose guest loader ignores LD_PRELOAD and
-        prepends the exe's own directory to its search list, so nothing weaker interposes), plain
-        LD_PRELOAD on native x86_64 and under FEX (both run the real x86_64 ld.so).
+        of every other resolution — the interposition hatch (Stellaris under box64: the offline Steam
+        entitlement shim, which must win over the libsteam_api.so shipped beside the exe). Each thin
+        backend translates it to its loader's spelling: BOX64_LD_PRELOAD under box64 (whose guest loader
+        ignores LD_PRELOAD and prepends the exe's own directory to its search list, so nothing weaker
+        interposes), plain LD_PRELOAD on native and under FEX (both run the real ld.so).
+
+        CAUTION on native: plain LD_PRELOAD is inherited by EVERY child the game spawns, including host
+        binaries (games shell out — Factorio execs `sh -c lsb_release`), and on a non-NixOS host a
+        store-closure preload drags a second glibc into a foreign-distro process, which dies with SIGBUS.
+        Prefer an `extraBinds` bind-over of the file the engine resolves (how steam-emu serves native);
+        reserve this hatch for the guest-loader backends, whose spelling host children never read.
       '';
     };
   };

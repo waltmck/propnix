@@ -20,6 +20,7 @@ let
     "propnix-launcher"
     "propnix-mount"
     "propnix-prefetch"
+    "propnix-steam-cred" # stored-Steam-credential decoding (steamid.rs), shared with propnix-cli
   ];
   src = lib.cleanSourceWith {
     name = "propnix-rust";
@@ -51,7 +52,9 @@ rustPlatform.buildRustPackage {
     wayland # wayland-sys links libwayland-client for the ext/wlr foreign-toplevel focus path (focus.rs)
   ];
 
-  doCheck = false; # no tests; the launcher is validated by the end-to-end game runs (§9)
+  # The self-contained unit tests (steamid.rs's ini merge — the launch orchestration itself is still
+  # validated by the end-to-end game runs, §9). Everything they touch is pure fs, so this stays sandbox-safe.
+  doCheck = true;
   meta.description = "propnix per-app launcher: GTK4 splash + single-instance + env-seal + in-process mount-table prefix orchestration (links propnix-mount + propnix-prefetch)";
   meta.mainProgram = "propnix-launcher";
 }

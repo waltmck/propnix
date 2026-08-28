@@ -24,6 +24,9 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # geteuid + access(W_OK): decide whether a store write needs sudo (write /var/lib as root, but run the
 # browser login as the invoking user).
 libc = "0.2"
+# The stored Steam credential's wire formats (tar → account.config → LoginTokens → JWT), shared with
+# propnix-launcher, which reads the same store for the gbe_fork offline-entitlement identity.
+propnix-steam-cred = { path = "../propnix-steam-cred" }
 
 # ── propnix pin ──────────────────────────────────────────────────────────────────────────────────
 # The only hash we need: the NAR digest IS the Nix fixed-output hash. Base64 (SRI rendering) is
@@ -36,8 +39,8 @@ libc = "0.2"
 # "sha2")` guarding a `#[target_feature(enable = "sha2")]` fast path), so this needs no RUSTFLAGS and
 # stays correct on a core without the extension.
 sha2 = { version = "0.10", features = ["asm"] }
-# GOG: content-system metadata and every content chunk is a standalone zlib stream. Also .NET's raw
-# DEFLATE, which is how DepotDownloader's account.config is wrapped.
+# GOG: content-system metadata and every content chunk is a standalone zlib stream. Also the single
+# deflate entry a Steam manifest ZIP holds. (The credential tar's raw DEFLATE moved to propnix-steam-cred.)
 flate2 = "1"
 # GOG pins chunks by md5, both compressed and decompressed — verified on the fly.
 md-5 = "0.10"
@@ -70,7 +73,6 @@ bytes = "1"         # steam-vent-crypto takes and returns BytesMut
 base64 = "0.22"     # encrypted manifest filenames are base64 before decryption; JWT payloads too
 sha1 = "0.10"       # a chunk's id IS sha1(plaintext) — a free end-to-end integrity check
 zstd = "0.13"       # current chunk container (VSZa)
-tar = "0.4"         # read account.config out of the stored credential tar
 # Legacy chunk container (VZ, raw LZMA1) — the hot path, at ~95% of this tool's CPU when a VZ-era depot
 # is pinned. 7-Zip's LZMA SDK decoder, NOT xz/liblzma: 7-Zip's history records "the speed for LZMA and
 # LZMA2 decompression in arm64 versions for macOS and Linux was increased by 20%-60%" (21.02 alpha), and
@@ -117,3 +119,6 @@ codegen-units = 1
 # Only to SYNTHESIZE VZ/LZMA1 fixtures for the decoder tests and benches — the shipped binary decodes with
 # the LZMA SDK and needs no LZMA encoder at all.
 liblzma = "0.4"
+# Only to SYNTHESIZE credential-tar fixtures — the shipped binary READS the stored tar through
+# propnix-steam-cred and never builds one.
+tar = "0.4"

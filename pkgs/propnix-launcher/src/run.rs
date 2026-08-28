@@ -293,6 +293,23 @@ pub fn run_inside_ns(
         return 1;
     }
 
+    // Steam-emulated build: seat the stored Steam account's SteamID64 into the gbe_fork shim's global
+    // settings, at the path CSIDL_APPDATA resolves to for wine's fixed user. Needs the live view (hence
+    // inner), and MERGES: drive_c/users is the PERSISTENT users overlay, where the shim saves keys of
+    // its own. Best-effort by design — a launch never fails over identity (see steamid.rs).
+    if cfg.steam_emu {
+        if let Some((_, id)) = crate::steamid::resolve() {
+            let dir = paths
+                .view
+                .join(crate::steamid::WINE_APPDATA)
+                .join("GSE Saves")
+                .join("settings");
+            if let Err(e) = crate::steamid::seat(&dir, id) {
+                eprintln!("propnix: could not seat the Steam identity ({e}) — the emu will make one up");
+            }
+        }
+    }
+
     // Warm the assembled prefix's PE-module closure (detached; see `spawn_prefetch`). The view is live from the
     // moment we start — propnix-mount laid it before re-exec'ing us — but this must come AFTER
     // `graphics::apply`, which mutates the PROCESS env (`set_var`): `warm` reads its own env knobs, and a

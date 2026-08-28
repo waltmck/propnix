@@ -52,12 +52,25 @@ use std::time::{Duration, Instant};
 
 use crate::pin::concurrency::{Governor, Pressure};
 
-/// Per-request deadline covering DNS, connect, TLS and the whole body.
+/// Baseline per-request deadline, and the silence (read) timeout.
 ///
-/// The point is that it covers ALL of them. A per-read timeout only bounds the wait for the next byte, so
-/// a connection that trickles — or one left half-open when the machine changes network or resumes from
-/// suspend — can hold a slot forever and never trip it. That stranded a 95%-complete depot twice.
+/// A request's TOTAL deadline is this plus the block's size at `TRICKLE_FLOOR`, because a whole-body
+/// deadline has to scale with how much is being transferred or it turns a slow link into a failing one:
+/// at 2 Mbit/s shared six ways a 1 MiB chunk needs ~25s and a GOG ~17 MiB chunk minutes, and a flat
+/// cutoff kills every such transfer mid-body, requeues it, and kills the retry the same way — the whole
+/// link spent on partial transfers that never complete (observed in the field on a weak 4G link).
+///
+/// The same value separately bounds the wait for the NEXT BYTE (the client's read timeout), which is what
+/// actually catches dead connections: one left half-open when the machine changes network or resumes from
+/// suspend goes silent, and silence trips this long before the scaled total deadline. That stranded a
+/// 95%-complete depot twice back when a flat whole-body timeout was the only guard.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// The slowest per-connection delivery rate still treated as progress: a connection that keeps sending
+/// bytes is abandoned only once its LIFETIME AVERAGE falls below this (that is what folding it into the
+/// total deadline means — early fast bytes buy patience for a slow tail, and silence is already the read
+/// timeout's job). 4 KiB/s is dial-up territory; a share this small means the block is better retried
+/// against a different endpoint than waited for.
+const TRICKLE_FLOOR: u64 = 4096;
 /// Give up only when NOTHING has succeeded for this long. See the module header.
 const STALL_TIMEOUT: Duration = Duration::from_secs(600);
 /// How often the governor re-reads throughput, and the watchdog checks for a stall.
@@ -78,6 +91,9 @@ pub struct Tuning {
     pub stall_timeout: Duration,
     pub epoch: Duration,
     pub requeue_delay: Duration,
+    /// Bytes/s a delivering connection must average over its lifetime — sets the size-scaled part of the
+    /// per-request deadline (see `REQUEST_TIMEOUT`).
+    pub trickle_floor: u64,
 }
 
 impl Default for Tuning {
@@ -87,6 +103,7 @@ impl Default for Tuning {
             stall_timeout: STALL_TIMEOUT,
             epoch: EPOCH,
             requeue_delay: REQUEUE_DELAY,
+            trickle_floor: TRICKLE_FLOOR,
         }
     }
 }
@@ -191,6 +208,8 @@ struct State {
     /// How many blocks have been delivered to the sink (unordered mode's completion test).
     delivered: usize,
     failure: Option<String>,
+    /// Most recent transient (requeued) failure, surfaced only if the run later stalls out.
+    last_requeue: Option<String>,
     last_success: Instant,
 }
 
@@ -259,8 +278,9 @@ pub trait Sink: Send + Sync + 'static {
 
 fn client(tuning: &Tuning) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
-        // The deadline that matters — see REQUEST_TIMEOUT.
-        .timeout(tuning.request_timeout)
+        // Only the silence bound lives on the client; the whole-request deadline is per-request because
+        // it scales with the block's size — see REQUEST_TIMEOUT.
+        .read_timeout(tuning.request_timeout)
         .connect_timeout(Duration::from_secs(20))
         // Chunk requests hammer a handful of hosts; keep their connections rather than reopening.
         .pool_max_idle_per_host(256)
@@ -301,6 +321,7 @@ fn new_shared<IO: ChunkIo>(
             emitted: 0,
             delivered: 0,
             failure: None,
+            last_requeue: None,
             last_success: Instant::now(),
         }),
         emit_cv: Condvar::new(),
@@ -346,7 +367,14 @@ async fn fetch_one<IO: ChunkIo>(shared: &Arc<Shared<IO>>, idx: usize) -> Option<
         }
     };
     let started = Instant::now();
-    let resp = shared.client.get(&target.url).send().await;
+    // A slow link is not a dead link: the deadline grows with the block so only a connection averaging
+    // below TRICKLE_FLOOR is killed (silence is the client read timeout's job). Sizes are decompressed —
+    // an overestimate of wire bytes, which only errs toward patience.
+    let deadline = shared.tuning.request_timeout
+        + Duration::from_secs_f64(
+            shared.sizes[idx] as f64 / shared.tuning.trickle_floor.max(1) as f64,
+        );
+    let resp = shared.client.get(&target.url).timeout(deadline).send().await;
     let body = match resp {
         Ok(r) => {
             let status = r.status().as_u16();
@@ -420,7 +448,13 @@ async fn fetch_one<IO: ChunkIo>(shared: &Arc<Shared<IO>>, idx: usize) -> Option<
 /// ends.
 fn requeue<IO: ChunkIo>(shared: &Arc<Shared<IO>>, idx: usize, why: &str) {
     shared.epoch_errors.fetch_add(1, Ordering::Relaxed);
-    eprintln!("\n  {why} — requeued");
+    // Quiet by default: a requeue is routine (public CDNs fail ~1% of requests steady-state), and under
+    // `nix build` the last complete line sticks as the visible status, making a healthy download read as
+    // failed or hung. The reason is kept so a stall-timeout can still say what the link was doing.
+    if std::env::var_os("PROPNIX_PIN_DEBUG").is_some() {
+        eprintln!("\n  {why} — requeued");
+    }
+    shared.state.lock().unwrap().last_requeue = Some(why.to_owned());
     let shared = Arc::clone(shared);
     tokio::spawn(async move {
         tokio::time::sleep(shared.tuning.requeue_delay).await;
@@ -559,8 +593,10 @@ async fn govern<IO: ChunkIo>(shared: Arc<Shared<IO>>, max: usize) {
             return;
         }
         if stalled_for > shared.tuning.stall_timeout {
+            let last = shared.state.lock().unwrap().last_requeue.clone();
+            let last = last.map(|why| format!("; last error: {why}")).unwrap_or_default();
             shared.fail(format!(
-                "no chunk has succeeded in {}s — giving up (the link looks down, not slow)",
+                "no chunk has succeeded in {}s — giving up (the link looks down, not slow){last}",
                 stalled_for.as_secs()
             ));
             return;
@@ -680,6 +716,47 @@ mod tests {
         Status(u16),
         /// Close without answering — what a dropped connection looks like.
         Hangup,
+        /// Body served in small slices, each drawing on the shared bucket — connections on a slow LINK,
+        /// whose aggregate rate is the bucket's, however many draw on it.
+        Paced(Vec<u8>, Arc<Bucket>),
+        /// Send this many bytes, then hold the socket open in silence — a half-open connection.
+        FrozenAfter(Vec<u8>, usize),
+    }
+
+    /// A token bucket shared by every connection of a paced server: the link's aggregate byte rate.
+    struct Bucket {
+        rate: f64,
+        state: Mutex<(f64, Instant)>,
+    }
+
+    impl Bucket {
+        fn new(rate: f64) -> Arc<Self> {
+            Arc::new(Self {
+                rate,
+                state: Mutex::new((0.0, Instant::now())),
+            })
+        }
+        fn take(&self, n: usize) {
+            // The lock is held ACROSS the wait on purpose: a link serializes bytes, and handing tokens
+            // out under one held lock is what keeps the model fair. The obvious sleep-outside-and-retry
+            // loop is not — mutex wake order starved one connection for 1.9s (measured) while the others
+            // streamed, which tests the CLIENT'S read timeout instead of the link.
+            let mut st = self.state.lock().unwrap();
+            for _ in 0..2 {
+                let now = Instant::now();
+                let dt = now.duration_since(st.1).as_secs_f64();
+                // Cap stored tokens: idle time may be cashed in as a small burst (so a writer thread the
+                // scheduler starved can catch up) but never as a large one.
+                st.0 = (st.0 + dt * self.rate).min(8192.0 + n as f64);
+                st.1 = now;
+                if st.0 >= n as f64 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_secs_f64((n as f64 - st.0) / self.rate));
+            }
+            // A hair short after the sleep only leaves a debt the next taker pays for.
+            st.0 -= n as f64;
+        }
     }
 
     /// A minimal loopback HTTP/1.1 server, so the tests drive the ENGINE'S REAL PATH — reqwest, the
@@ -728,6 +805,30 @@ mod tests {
                                 b.len()
                             );
                             let _ = stream.write_all(&b);
+                        }
+                        Reply::Paced(b, bucket) => {
+                            let _ = write!(
+                                stream,
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                b.len()
+                            );
+                            for slice in b.chunks(1024) {
+                                bucket.take(slice.len());
+                                if stream.write_all(slice).is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        Reply::FrozenAfter(b, sent) => {
+                            let _ = write!(
+                                stream,
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                b.len()
+                            );
+                            let _ = stream.write_all(&b[..sent]);
+                            let _ = stream.flush();
+                            // Silence, socket open, until well after the test is over.
+                            std::thread::sleep(Duration::from_secs(8));
                         }
                     }
                     let _ = stream.flush();
@@ -809,6 +910,7 @@ mod tests {
             stall_timeout: Duration::from_millis(600),
             epoch: Duration::from_millis(40),
             requeue_delay: Duration::from_millis(5),
+            trickle_floor: TRICKLE_FLOOR,
         }
     }
 
@@ -973,6 +1075,9 @@ mod tests {
         let o = ordered(io, work(8), 4, (LEN * 4) as u64, fast()).unwrap();
         let err = o.next_chunk().expect_err("a dead link must surface an error");
         assert!(err.contains("no chunk has succeeded"), "got: {err}");
+        // Requeues are silent by default, so the stall message is the one place the user learns WHAT
+        // kept failing.
+        assert!(err.contains("HTTP 503"), "the stall message must carry the last error: {err}");
     }
 
     #[test]
@@ -1049,5 +1154,127 @@ mod tests {
         let scored = io.scored.lock().unwrap();
         assert!(scored.iter().any(|(_, ok)| *ok), "successes must be scored");
         assert!(scored.iter().any(|(_, ok)| !*ok), "failures must be scored");
+    }
+
+    /// Like TestIo, for the low-bandwidth tests: blocks big enough that TRANSFER TIME is the subject.
+    struct SizedIo {
+        base: String,
+        blen: usize,
+    }
+
+    impl ChunkIo for SizedIo {
+        type Item = usize;
+        fn target(&self, item: &usize) -> Result<Target, String> {
+            Ok(Target {
+                url: format!("{}/block/{item}", self.base),
+                endpoint: 0,
+            })
+        }
+        fn decode(&self, item: &usize, b: Vec<u8>) -> Result<Vec<u8>, String> {
+            if b.len() != self.blen || b.iter().any(|x| *x != *item as u8) {
+                return Err(format!("block {item}: body mismatch"));
+            }
+            Ok(b)
+        }
+        fn observe(&self, _item: &usize, _endpoint: usize, _outcome: Outcome) {}
+        fn label(&self, item: &usize) -> String {
+            format!("block {item}")
+        }
+    }
+
+    fn sized_work(n: usize, blen: usize) -> Work<usize> {
+        Work {
+            items: (0..n).collect(),
+            sizes: vec![blen as u64; n],
+        }
+    }
+
+    #[test]
+    fn a_link_slower_than_the_flat_deadline_still_completes_without_retransfers() {
+        // THE field failure this guards: on a ~2 Mbit/s 4G link, a chunk needs longer than a flat
+        // whole-body deadline allows, so every transfer was killed mid-body, requeued and killed again —
+        // the link fully busy, nothing ever delivered. The deadline must scale with the block, so a
+        // slow-but-moving link completes every block on the FIRST attempt.
+        const BLEN: usize = 384 * 1024;
+        const BLOCKS: usize = 4;
+        let bucket = Bucket::new(256.0 * 1024.0); // a 2 Mbit/s-class link — the field report's
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let a = Arc::clone(&attempts);
+        let base = serve(move |p| {
+            // Only real block requests count as attempts — serve()'s readiness probe and stray
+            // connections must not skew the retransfer assertion.
+            if !p.starts_with("/block/") {
+                return Reply::Status(404);
+            }
+            a.fetch_add(1, Ordering::Relaxed);
+            Reply::Paced(vec![idx_of(p) as u8; BLEN], Arc::clone(&bucket))
+        });
+        let t = Tuning {
+            // One block at the link's FULL rate takes 1.5s — beyond this flat deadline, so under the
+            // old flat scheme this run could never have delivered anything. As the read timeout, a full
+            // second also rides out scheduler starvation of the paced writer threads on a loaded test
+            // box (production is 120s; a tighter value here only buys test flakiness).
+            request_timeout: Duration::from_secs(1),
+            stall_timeout: Duration::from_secs(8),
+            epoch: Duration::from_millis(40),
+            requeue_delay: Duration::from_millis(5),
+            // 384 KiB at 8 KiB/s adds 48s: tolerates a share far below the nominal 64 KiB/s of a fair
+            // 4-way split, so scheduling unfairness cannot flake the test.
+            trickle_floor: 8 * 1024,
+        };
+        let io = Arc::new(SizedIo { base, blen: BLEN });
+        let o = ordered(io, sized_work(BLOCKS, BLEN), 4, (BLEN * 4) as u64, t).unwrap();
+        let started = Instant::now();
+        for i in 0..BLOCKS {
+            let b = o.next_chunk().unwrap_or_else(|e| panic!("block {i}: {e}"));
+            assert_eq!(b.len(), BLEN, "block {i} truncated");
+        }
+        let goodput = (BLOCKS * BLEN) as f64 / started.elapsed().as_secs_f64() / 1024.0;
+        eprintln!("  slow-link goodput: {goodput:.0} KiB/s of 256 offered");
+        assert_eq!(
+            attempts.load(Ordering::Relaxed),
+            BLOCKS,
+            "a slow healthy link must not cost retransfers"
+        );
+    }
+
+    #[test]
+    fn a_frozen_connection_is_cut_by_the_silence_bound_not_the_scaled_deadline() {
+        // A half-open connection (network change, suspend) sends part of a body and then nothing. The
+        // read timeout must cut it in about request_timeout — waiting out the size-scaled total deadline
+        // per frozen socket would look like a hang.
+        const BLEN: usize = 32 * 1024;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let a = Arc::clone(&attempts);
+        let base = serve(move |p| {
+            if !p.starts_with("/block/") {
+                return Reply::Status(404);
+            }
+            let i = idx_of(p);
+            if a.fetch_add(1, Ordering::Relaxed) == 0 {
+                Reply::FrozenAfter(vec![i as u8; BLEN], BLEN / 2)
+            } else {
+                Reply::Body(vec![i as u8; BLEN])
+            }
+        });
+        let t = Tuning {
+            request_timeout: Duration::from_millis(300),
+            stall_timeout: Duration::from_secs(10),
+            epoch: Duration::from_millis(40),
+            requeue_delay: Duration::from_millis(5),
+            // 32 KiB at 64 B/s: a total deadline over eight MINUTES, so only the silence bound can be
+            // what rescues the run within the assertion below.
+            trickle_floor: 64,
+        };
+        let io = Arc::new(SizedIo { base, blen: BLEN });
+        let started = Instant::now();
+        let o = ordered(io, sized_work(1, BLEN), 2, BLEN as u64, t).unwrap();
+        assert_eq!(o.next_chunk().unwrap().len(), BLEN);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the frozen socket must be cut by the read timeout, took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(attempts.load(Ordering::Relaxed), 2, "exactly one retry");
     }
 }

@@ -125,15 +125,20 @@ mkApp (
     # so with the depots mounted and nothing else, `SteamAPI_Init` fails ("did not locate a running instance
     # of Steam"), the engine logs `dlc.cpp: Could not find item in store backend.`, and Additional Content
     # lists every DLC as unowned. The FRAMEWORK closes that automatically: declaring this `dlc.available`
-    # on a Steam-fetched thin build flips `steam.emu.enable` on (modules/steam-emu.nix), which preloads the
-    # gbe_fork shim and projects the entitlement list from these SAME rows — nothing to wire here. (This is
-    # also why `maskFiles` couldn't be the tool for the shipped libsteam_api.so: the engine LINKS it, and
-    # the preload interposes it instead.)
+    # on a Steam-fetched thin build flips `steam.emu.enable` on (modules/steam-emu.nix), which wires the
+    # gbe_fork shim and projects the entitlement list from these SAME rows. (This is also why `maskFiles`
+    # couldn't be the tool for the shipped libsteam_api.so: the engine LINKS it, and the shim replaces or
+    # interposes it instead.)
     #
     # Three observables, in the order they fail: `$PROPNIX_SAVE_DIR/stellaris/dlc_signature` exists at all
     # (the engine saw the trees); `logs/error.log` has no "store backend" line (entitlement resolved); and
     # the signature is the ENTITLED one, distinct from the value a run with the same trees but no shim
     # produces. Additional Content is the human check.
     dlc.available = lib.mapAttrs (_: fetchSteamDepot) versions.dlc;
+
+    # The engine LINKS the shipped copy beside the exe. Under box64 the guest preload interposes it; on
+    # the native backend (an x86_64 host) there is no preload and the shim is bound over this path — the
+    # declaration mk-app.nix requires there.
+    steam.emu.libPaths = [ "libsteam_api.so" ];
   }
 )

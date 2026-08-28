@@ -160,6 +160,7 @@ steer **all** games:
 | `PROPNIX_WINEDEBUG` | override `WINEDEBUG` (default `-all`) |
 | `PROPNIX_NO_PREFETCH` | skip the cold-launch prefetch (the wine path warms the assembled prefix's PE modules — `.dll`/`.drv`/`.exe`, system32 + the game's own — into the page cache while wine starts) |
 | `PROPNIX_EXTRA_BINDS` | extra `;`-separated `TARGET\|SOURCE` bind rows (TARGET prefix-relative or `$`-expandable; SOURCE an absolute/`$`-expandable host path) — an ad-hoc redirect (e.g. a secondary saves/mods dir) without a rebuild |
+| `PROPNIX_STEAM_ACCOUNT` | which stored Steam account's **SteamID64** the offline entitlement shim reports (Steam-fetched games; the same variable `propnix pin` honors). Default: the first stored account by name. The launcher reads the ID out of the credential store per launch — no credential → the shim makes an identity up, as upstream does. |
 
 Debug escape hatches: `--shell` (sealed shell in the prefix), `--propnix-unseal` (skip the scrub).
 

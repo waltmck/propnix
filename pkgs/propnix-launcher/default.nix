@@ -55,6 +55,37 @@ rustPlatform.buildRustPackage {
   # The self-contained unit tests (steamid.rs's ini merge — the launch orchestration itself is still
   # validated by the end-to-end game runs, §9). Everything they touch is pure fs, so this stays sandbox-safe.
   doCheck = true;
+
+  # KWin AUTHORIZATION for the focus paths (focus.rs). KDE hides `org_kde_plasma_window_management` — its
+  # only window list/activate protocol; KWin implements no wlr foreign-toplevel-management and no ext
+  # toplevel list — from every client except those whose INSTALLED desktop file (a) has an `Exec` whose
+  # first token canonicalizes to the client's /proc/<pid>/exe and (b) declares the interface in
+  # `X-KDE-Wayland-Interfaces` (KWin src/utils/serviceutils.h; xdg-desktop-portal-kde is granted its
+  # screencast global the same way). Two subtleties both live in that sentence:
+  #   * the CONNECTING exe is `.propnix-launcher-wrapped` — wrapGAppsHook4's wrapper execs it — so Exec
+  #     must name the wrapped file, not the friendly `bin/propnix-launcher` (the paths never match
+  #     otherwise). postFixup runs after the per-output fixup hooks have wrapped, so the wrapped name
+  #     exists here; the plain name is the fallback if the hook ever stops wrapping.
+  #   * NoDisplay keeps this out of menus; KWin's KApplicationTrader query still considers it.
+  # mkLauncherPackage links this file into every game package (under a launcher-unique name), so
+  # INSTALLING a game is what grants its launcher the global. Without the grant the plasma paths see no
+  # manager and degrade to a graceful no-op — `nix run` without installation keeps working, just without
+  # raise/window-watch on KDE.
+  postFixup = ''
+    exe="$out/bin/.propnix-launcher-wrapped"
+    [ -e "$exe" ] || exe="$out/bin/propnix-launcher"
+    mkdir -p "$out/share/applications"
+    {
+      echo "[Desktop Entry]"
+      echo "Type=Application"
+      echo "Name=propnix launcher"
+      echo "Comment=Internal entry granting the propnix launcher KWin window management (X-KDE-Wayland-Interfaces); not a menu item"
+      echo "Exec=$exe"
+      echo "NoDisplay=true"
+      echo "X-KDE-Wayland-Interfaces=org_kde_plasma_window_management"
+    } > "$out/share/applications/org.propnix.launcher.desktop"
+  '';
+
   meta.description = "propnix per-app launcher: GTK4 splash + single-instance + env-seal + in-process mount-table prefix orchestration (links propnix-mount + propnix-prefetch)";
   meta.mainProgram = "propnix-launcher";
 }

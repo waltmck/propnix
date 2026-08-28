@@ -19,7 +19,8 @@ serde_json = "1"
 libc = "0.2"
 # Raise-the-running-window for the single-instance guard. X11/Xwayland via EWMH (x11rb); Wayland via the
 # wlr-foreign-toplevel-management protocol (wayland-client + wayland-protocols-wlr) — portable across the
-# wlroots family + COSMIC; a graceful no-op where the compositor doesn't advertise it (GNOME/KDE).
+# wlroots family + COSMIC — with KDE served by its own plasma-window-management (below); a graceful no-op
+# where no activate verb exists at all (GNOME).
 # The mount + prefetch helpers, LINKED as libraries (compiled in) rather than exec'd as separate binaries:
 # `propnix_mount::enter_and_mount` runs in a Command::pre_exec hook on the mount child; `propnix_prefetch::warm`
 # runs on a detached thread. Path deps in a Cargo workspace (see ../Cargo.toml).
@@ -39,6 +40,10 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # output's current mode + logical position (to pick the primary), deriving the PROPNIX_WIDTH/HEIGHT runtime
 # facts (display.rs).
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+# KDE's counterpart to the two above: KWin implements NEITHER wlr-foreign-toplevel-management nor any
+# other portable activate verb, only its own plasma-window-management (what Plasma's taskbar itself
+# uses to raise windows) — and on Plasma 5 it is also the only toplevel LIST (ext-list is KWin 6+).
+wayland-protocols-plasma = { version = "0.3", features = ["client"] }
 
 [profile.release]
 # The launcher is glue; optimise for a small, quick-to-build binary rather than peak throughput.

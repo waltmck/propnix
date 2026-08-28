@@ -111,9 +111,9 @@ benefits of native kernel mounts. That design leans on several host capabilities
 | Unprivileged overlayfs + `userxattr` in a userns (Linux **5.11+**) | copy-on-write prefix/game/save overlays over the store | yes |
 | `user.*` xattrs + overlay-upper support on `$XDG_STATE_HOME` & saves fs (ext4/xfs/btrfs/tmpfs; ZFS **≥ 2.2**) | persisting the overlay *uppers* | yes |
 | A Vulkan ICD (e.g. Mesa on Asahi) | the default DXVK/vkd3d D3D backend | hard *unless* `PROPNIX_WINE_D3D=wined3d` |
-| Wayland (+ Xwayland) or X11 | the GTK4 splash + the game window | yes |
+| Wayland (+ Xwayland) | the GTK4 splash + the game window | yes |
 | `/dev/ntsync` (Linux **6.14+**) | fast wine synchronization | recommended |
-| `wlr-foreign-toplevel-management` compositor | single-instance raise, splash dismiss, close-to-quit | optional (degrades gracefully) |
+| `wlr-foreign-toplevel-management` or `org_kde_plasma_window_management` compositor (basically anything but GNOME) | single-instance raise, splash dismiss, close-to-quit | optional (degrades gracefully) |
 | GOG/Steam account owning the title + its token | **building** a game payload (FOD fetch) | yes (build-time) |
 | Nix's classic build users, i.e. `auto-allocate-uids = false` | reading that token inside the FOD sandbox — an auto-allocated build runs as a synthetic uid/gid in no host group, so a 0640 token is unreadable and only a world-readable one would work | yes (build-time) |
 

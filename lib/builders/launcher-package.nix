@@ -42,6 +42,19 @@ let
       --add-flags "--config ${configFile}"
   '';
 
+  # The launcher's KWin-authorization desktop entry (see propnix-launcher's postFixup: it is what grants
+  # the launcher binary KDE's window-management global for the raise + window-watcher paths), linked into
+  # the GAME package so installing a game installs the grant — a bare launcher package is never in a
+  # profile. Named by the launcher's store hash: two games pinning DIFFERENT launcher builds then install
+  # two entries (each authorizing its own binary) instead of colliding in the merged profile, while games
+  # sharing one build dedupe to identical links.
+  launcherHash = lib.substring 0 8 (lib.removePrefix "/nix/store/" "${propnix-launcher}");
+  kwinGrant = runCommand "${pname}-kwin-grant" { } ''
+    mkdir -p "$out/share/applications"
+    ln -s ${propnix-launcher}/share/applications/org.propnix.launcher.desktop \
+      "$out/share/applications/org.propnix.launcher-${launcherHash}.desktop"
+  '';
+
   desktopItem = mkDesktopItem {
     inherit appid name iconSymbolic;
     exec = pname; # resolves from PATH once the package is installed
@@ -56,6 +69,7 @@ symlinkJoin {
   paths = [
     wrapper
     desktopItem
+    kwinGrant
   ]
   ++ lib.optional (iconTree != null) iconTree # the freedesktop hicolor raster theme
   ++ extraChecks; # empty dirs; here only so their assertions are forced by a build

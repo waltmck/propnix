@@ -526,10 +526,11 @@ pub fn content_hosts(cell_id: u32) -> R<Vec<String>> {
         vhost: String,
         #[serde(default)]
         https_support: String,
+        // Steam reports these as fractional for some cells (e.g. "weighted_load":151.5).
         #[serde(default)]
-        load: u32,
+        load: f64,
         #[serde(default)]
-        weighted_load: u32,
+        weighted_load: f64,
     }
     let url = format!(
         "https://api.steampowered.com/IContentServerDirectoryService/GetServersForSteamPipe/v1/?cell_id={cell_id}"
@@ -552,7 +553,11 @@ pub fn content_hosts(cell_id: u32) -> R<Vec<String>> {
         .response
         .servers;
     servers.retain(|s| (s.kind == "SteamCache" || s.kind == "CDN") && s.https_support != "none");
-    servers.sort_by_key(|s| (s.weighted_load, s.load));
+    servers.sort_by(|a, b| {
+        a.weighted_load
+            .total_cmp(&b.weighted_load)
+            .then(a.load.total_cmp(&b.load))
+    });
     let hosts: Vec<String> = servers
         .into_iter()
         .map(|s| if s.vhost.is_empty() { s.host } else { s.vhost })

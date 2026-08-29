@@ -10,6 +10,7 @@ mod config;
 mod display;
 mod env;
 mod focus;
+mod glstack;
 mod graphics;
 mod mount;
 mod run;

@@ -165,6 +165,9 @@ pkgs.lib.makeScope pkgs.newScope (
     # owner's already-decrypted DLC is owned: the payload-ABI gbe_fork shim (a COPY, so its
     # beside-the-library settings probe resolves here) + the generated settings tree it reads.
     mkSteamOfflineEntitlement = callPackage ./builders/steam-offline-entitlement.nix { };
+    # The baked GL/Vulkan fallback stack (mesa + discovery paths) both backends hand the launcher; takes
+    # the app's `mesa` knob (null → nixpkgs mesa as a fallback; a derivation → forced). See its header.
+    mkFallbackGl = callPackage ./builders/gl-fallback.nix { };
     wineDefaults = callPackage ./backends/wine/defaults.nix { }; # the base wine tuning layer; override to re-base all games
 
     # ── icons ── three SOURCES, one output layout (hicolor theme + share/propnix/<id>.png splash):

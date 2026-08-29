@@ -30,6 +30,21 @@ impl ChildEnv {
         let mut set: Vec<(String, String)> = Vec::new();
         let mut push = |k: &str, v: String| set.push((k.to_string(), v));
 
+        // The GL/Vulkan fallback stack (glstack.rs): active only when the host has no `/run/opengl-driver`
+        // (non-NixOS) or the game's `mesa` knob forced one. Feeds winevulkan/DXVK (VK_DRIVER_FILES) and
+        // wined3d-GL (the GLX/EGL vendor). Pushed FIRST so the baked per-game env below overrides any of
+        // these names; an inherited session var wins too (the guard), matching thin.rs.
+        if let Some(gl) = crate::glstack::resolve(cfg.fallback_gl.as_ref()) {
+            // The seal scrubs inherited LD_*, so this is the child's whole LD_LIBRARY_PATH — one dir,
+            // holding only mesa sonames, searched before the glvnd RUNPATH that would find the host stack.
+            push("LD_LIBRARY_PATH", gl.lib_dir.clone());
+            for (k, v) in &gl.vars {
+                if !cfg.seal.set_env.contains_key(*k) && std::env::var_os(k).is_none() {
+                    push(k, v.clone());
+                }
+            }
+        }
+
         // The baked "meant" vars (USER/LOGNAME + any per-game extras), each value `$VAR`-expanded — so a
         // config env value means the same on both backends (thin.rs expands its `env` values identically).
         // WINEDEBUG is recomputed below.

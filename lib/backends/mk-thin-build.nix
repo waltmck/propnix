@@ -8,6 +8,7 @@
   stdenv,
   strategy,
   mkThinApp,
+  mkFallbackGl, # builders/gl-fallback.nix: the baked GL/Vulkan stack of last resort (its header has the why)
 }:
 let
   # The launch-block contract (see builders/thin.nix, which consumes the launch fields verbatim).
@@ -80,6 +81,9 @@ lib.throwIfNot (lib.hasSuffix "-linux" cfg.emulatedPlatform)
     extraLowers = (b.extraLowers or [ ]) ++ (map (d: "${d}") cfg.extraLowers);
     # gbe_fork wired in (modules/steam-emu.nix) → the launcher seats the stored account's SteamID64.
     steamEmu = cfg.steam.emu.enable;
+    # The GL/Vulkan userspace of last resort (host-native arch; the guest reaches GL through the
+    # emulator's native bridge). See builders/gl-fallback.nix for the rationale and field contract.
+    fallbackGl = mkFallbackGl cfg.mesa;
     inherit (b)
       backend
       emulator

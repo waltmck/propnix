@@ -401,9 +401,20 @@ fn run_inner(cfg: &ThinConfig, settings: &Settings, paths: &Paths, passthrough: 
     }
 
     // The baked LD_LIBRARY_PATH (native bridging libs ∪ x86_64 guest libs) box64 folds into both its native
-    // bridge resolution and the guest search path.
-    if !cfg.ld_library_path.is_empty() {
-        cmd.env("LD_LIBRARY_PATH", &cfg.ld_library_path);
+    // bridge resolution and the guest search path — extended with the GL/Vulkan fallback stack when the
+    // host provides none (or the game forced one). Each discovery var is guarded: a per-game env entry or
+    // an inherited session var for the same name wins over what the fallback derives.
+    let gl = crate::glstack::resolve(cfg.fallback_gl.as_ref());
+    let ld_library_path = crate::glstack::extend_ld_path(&cfg.ld_library_path, gl.as_ref());
+    if !ld_library_path.is_empty() {
+        cmd.env("LD_LIBRARY_PATH", &ld_library_path);
+    }
+    if let Some(g) = &gl {
+        for (k, v) in &g.vars {
+            if !cfg.env.contains_key(*k) && std::env::var_os(k).is_none() {
+                cmd.env(k, v);
+            }
+        }
     }
 
     // box64 DynaCache (box64 only): box64 serializes JIT'd guest blocks to disk and reuses them on later
@@ -449,10 +460,10 @@ fn run_inner(cfg: &ThinConfig, settings: &Settings, paths: &Paths, passthrough: 
                     "fps,frame_timing,cpu_stats,engine_version",
                 );
             }
-            let ld = if cfg.ld_library_path.is_empty() {
+            let ld = if ld_library_path.is_empty() {
                 mhlib.clone()
             } else {
-                format!("{mhlib}:{}", cfg.ld_library_path)
+                format!("{mhlib}:{ld_library_path}")
             };
             cmd.env("LD_LIBRARY_PATH", ld);
             // Compose with a baked LD_PRELOAD (a game's own box64.guestPreload on the native face —

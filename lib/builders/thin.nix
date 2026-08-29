@@ -87,6 +87,9 @@
   # targeted scrub, never env_clear+allowlist).
   scrubPrefixes ? sealing.defaultScrub,
   mangohud, # MangoHud package root (PROPNIX_BENCH shim preload; see thin.rs)
+  # The baked GL/Vulkan fallback stack (builders/gl-fallback.nix — field contract and rationale there) —
+  # activated by the launcher when `/run/opengl-driver` is absent (non-NixOS) or `forced` (the `mesa` knob).
+  fallbackGl,
 }:
 let
   # The exec-bit fix: ONE metacopy skeleton PER GAME TREE, each a sparse, zero-data-copy mirror of its own
@@ -191,6 +194,7 @@ let
         inherit splash singleInstance windowWatch;
         tar = "${gnutar}/bin/tar";
         mangohud = mangohud;
+        inherit fallbackGl;
         # gbe_fork present → the launcher seats the stored Steam account's identity (see the param above).
         steamEmu = steamEmu;
       }

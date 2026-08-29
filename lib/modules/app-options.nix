@@ -97,6 +97,31 @@ in
         outside this list.
       '';
     };
+    mesa = lib.mkOption {
+      type = knobTypes.lastWins;
+      default = null;
+      defaultText = lib.literalExpression "null";
+      description = ''
+        The Mesa the launch's GL/Vulkan userspace comes from. `null` (the default) means "the host's
+        driver stack when it has one, the bundled nixpkgs `mesa` otherwise": nix-built glvnd/vulkan-loader
+        resolve their vendor through `/run/opengl-driver`, which only NixOS provides, so on a foreign
+        distro the launcher falls back to the mesa baked into the closure (env-only: vendor name, DRI
+        path, EGL vendor dir, Vulkan ICDs). Set to a mesa DERIVATION to force THAT stack everywhere —
+        including on NixOS, over `/run/opengl-driver` — the ergonomic form of a per-game driver patch:
+
+            no-mans-sky.apply { mesa = pkgs.mesa.overrideAttrs (old: { … }); }
+
+        replaces hand-setting `env.VK_DRIVER_FILES` (and covers GLX/EGL too). A per-game `env` entry for
+        any of the driver-selection vars still wins over what this knob derives.
+
+        The value's real contract is "any glvnd-layout vendor tree" — the GLX vendor name is sniffed
+        from the tree's `libGLX_<vendor>.so.0` at launch, not assumed to be mesa. That is the
+        PROPRIETARY-DRIVER escape hatch for a non-NixOS host: arrange the nix-built userspace matching
+        the host's kernel module (nixGL's recipe — e.g. `nvidia_x11` libs + its Vulkan ICD JSON under
+        `share/vulkan/icd.d` + its EGL vendor JSON under `share/glvnd/egl_vendor.d`) and hand it to this
+        knob. Unsupported but deliberately unblocked; nothing nix-side hardcodes mesa.
+      '';
+    };
     fetcher = lib.mkOption {
       type = lib.types.enum (lib.attrNames fetchers);
       default =

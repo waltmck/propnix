@@ -112,6 +112,9 @@ pub struct Config {
     /// per-launch view (see steamid.rs) — gated so a GOG game's launch never touches the credential store.
     #[serde(rename = "steamEmu", default)]
     pub steam_emu: bool,
+    /// The baked GL/Vulkan fallback stack (see `FallbackGl`); optional so a pre-existing baked config loads.
+    #[serde(rename = "fallbackGl", default)]
+    pub fallback_gl: Option<FallbackGl>,
 }
 
 /// A mount-table entry (keyed by target). The `spec` is a type-tagged SUM so a bind and an overlay can't be
@@ -299,6 +302,33 @@ impl ModeProbe {
     }
 }
 
+/// The GL/Vulkan userspace of last resort: a mesa baked into the closure. Nix-built glvnd/vulkan-loader
+/// resolve their vendor through `/run/opengl-driver`, which only NixOS provides — on any other distro the
+/// launcher points the standard discovery env vars at this stack instead (glstack.rs), so a game runs on a
+/// host with nothing but nix installed. `forced` (the `mesa` knob set to a derivation) applies it even when
+/// `/run/opengl-driver` exists — a per-game driver patch must beat the host stack too.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FallbackGl {
+    pub forced: bool,
+    /// `<mesa>/lib` — the GLX/EGL vendor libraries (libGLX_mesa/libEGL_mesa); goes on LD_LIBRARY_PATH.
+    #[serde(rename = "libDir")]
+    pub lib_dir: String,
+    /// `<mesa>/lib/dri` — the DRI megadrivers (LIBGL_DRIVERS_PATH, and LIBVA_DRIVERS_PATH: mesa keeps its
+    /// VA-API drivers in the same dir on the arches that build them).
+    #[serde(rename = "driDir")]
+    pub dri_dir: String,
+    /// `<mesa>/lib/gbm` — the gbm backend (GBM_BACKENDS_PATH); winewayland allocates through gbm.
+    #[serde(rename = "gbmDir")]
+    pub gbm_dir: String,
+    /// `<mesa>/share/glvnd/egl_vendor.d` (__EGL_VENDOR_LIBRARY_DIRS).
+    #[serde(rename = "eglVendorDir")]
+    pub egl_vendor_dir: String,
+    /// `<mesa>/share/vulkan/icd.d` — its *.json files become VK_DRIVER_FILES.
+    #[serde(rename = "vulkanIcdDir")]
+    pub vulkan_icd_dir: String,
+}
+
 /// THIN-mode config: a native/box64 Linux game. No wine prefix — $HOME is a fresh per-launch tmpfs view; the
 /// game tree (`gameLowers`, read-only overlay) is mounted at the view's game dir and run from there under a
 /// scrubbed env with the library union on LD_LIBRARY_PATH; the declared save dirs are bound out of the view to
@@ -406,6 +436,9 @@ pub struct ThinConfig {
     /// per-launch view (see steamid.rs) — gated so a GOG game's launch never touches the credential store.
     #[serde(rename = "steamEmu", default)]
     pub steam_emu: bool,
+    /// The baked GL/Vulkan fallback stack (see `FallbackGl`); optional so a pre-existing baked config loads.
+    #[serde(rename = "fallbackGl", default)]
+    pub fallback_gl: Option<FallbackGl>,
 }
 
 /// THIN-mode exec-bit fix for ONE game tree (see `ThinConfig::game_mode_fixes`): a metacopy skeleton

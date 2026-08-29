@@ -11,6 +11,7 @@
   knobTypes,
   wineDefaults, # the applied defaults.nix: { platform, wine }: tuning defs (scope-injected — override the scope attr to re-base all games)
   mkWineApp,
+  mkFallbackGl, # builders/gl-fallback.nix: the baked GL/Vulkan stack of last resort (its header has the why)
 }:
 {
   modules = [
@@ -64,5 +65,8 @@
       inherit enabledDlc;
       # gbe_fork wired in (modules/steam-emu.nix) → the launcher seats the stored account's SteamID64.
       steamEmu = cfg.steam.emu.enable;
+      # The GL/Vulkan userspace of last resort — on wine it feeds winevulkan/DXVK (VK_DRIVER_FILES),
+      # wined3d-GL (GLX/EGL vendor) and winewayland's gbm buffers. See builders/gl-fallback.nix.
+      fallbackGl = mkFallbackGl cfg.mesa;
     };
 }

@@ -62,6 +62,12 @@
 runCommand (lib.strings.sanitizeDerivationName "${pname}")
   {
     inherit outputHash outputHashAlgo;
+
+    meta = {
+      license = lib.licenses.unfree;
+      sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
+    };
+
     outputHashMode = "recursive";
 
     nativeBuildInputs = [
@@ -71,7 +77,7 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}")
 
     impureEnvVars = lib.fetchers.proxyImpureEnvVars;
 
-    allowSubstitutes = false; # proprietary content — never offer it to a substituter
+    allowSubstitutes = true;
     preferLocalBuild = true;
 
     inherit

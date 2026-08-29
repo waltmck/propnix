@@ -93,6 +93,11 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}-${version}")
   {
     inherit outputHash outputHashMode outputHashAlgo;
 
+    meta = {
+      license = lib.licenses.unfree;
+      sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
+    };
+
     nativeBuildInputs = [
       propnix-cli
       coreutils
@@ -107,7 +112,7 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}-${version}")
     # network fetcher; PROPNIX_DROP_DIR is the Rung-1 override (must be bind-mounted to be reachable).
     impureEnvVars = lib.fetchers.proxyImpureEnvVars ++ [ "PROPNIX_DROP_DIR" ];
 
-    allowSubstitutes = false;
+    allowSubstitutes = true;
     preferLocalBuild = true;
 
     # Passed into the builder env (buildId/productId/os/lang/workers steer the download; the rest are

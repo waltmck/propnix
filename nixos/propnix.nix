@@ -12,8 +12,9 @@
 #   6. creates the `propnix` group — its members manage the credential store, so `propnix cred add`/`rm`
 #      and `propnix pin` need no sudo at all. Members come from `allowedUsers` (default:
 #      {option}`nix.settings.allowed-users`) or from `users.users.<you>.extraGroups = [ "propnix" ]`.
-#      A second, derived group `propnix-fetch` holds those same humans PLUS the Nix build users, and owns
-#      the token files: a build can READ a credential, never write one. See the group comment below.
+#      A second, derived group `propnix-fetch` holds those same humans and owns the token files; the
+#      sandboxed BUILDER reads them through a POSIX ACL naming the build-users group instead (a build can
+#      READ a credential, never write one). See the group comment below for why three mechanisms.
 #
 # ── Declarative credentials (sops-nix &c.) ──────────────────────────────────────────────────────────────
 # `propnix cred add gog` is imperative: it logs in once and drops a token in /var/lib/propnix. To keep the
@@ -63,27 +64,32 @@ let
   # The store contract (layout, pointer body, per-type token filenames), shared with the CLI + fetchers.
   credLib = import ../config/credentials.nix;
 
-  # TWO groups, because read and write have to be separable. Everyone who reads a token — every human, AND
-  # the Nix build users that run the credentialed fetch — must share the group on the token FILE, since a file
-  # has only one. But a build must never be able to WRITE the store, so write can't hang off that same group.
-  # It hangs off the group on the DIRECTORIES instead, which the build users are not in:
+  # TWO groups plus an ACL, because three access shapes have to be separable — human write, human read, and
+  # builder read — and no single mechanism covers all of them:
   #
   #   propnix        the humans. Owns the dirs (2775) → `propnix cred add`/`rm` need no sudo.
-  #   propnix-fetch  those same humans PLUS the build users. Owns the token files (0640) → read only.
+  #   propnix-fetch  those same humans. Owns the token files (0640) → humans read, never write via files.
+  #   g:nixbld:r     a POSIX ACL on every token file (+ a DEFAULT entry on the account dirs, so rewrites
+  #                  inherit it) → the sandboxed BUILDER reads.
+  #
+  # The ACL exists because supplementary group membership NO LONGER REACHES a sandboxed builder: the modern
+  # Nix sandbox (observed on 2.34) runs builds in a user namespace that maps exactly one uid and one gid —
+  # the build user's own — and drops every supplementary group, so listing the build users in
+  # `propnix-fetch` grants a build nothing. (An earlier propnix relied on exactly that, citing the
+  # getgrouplist path in libstore's user-lock.cc — the mechanism still exists, but the userns sandbox never
+  # applies its result.) What a builder keeps is its PRIMARY gid — the build-users group — and an ACL naming
+  # that group is checked against it. It has to be an ACL rather than making `nixbld` the file group,
+  # because an unprivileged `cred add` can only chgrp into a group the human belongs to, and putting a human
+  # in `nixbld` would make them eligible to run builds as; an owner may `setfacl` any group in unprivileged.
   #
   # `propnix` is the one users touch (`users.users.<you>.extraGroups = [ "propnix" ]`); membership of
-  # `propnix-fetch` is derived from it below, so the two can't drift. Neither is the build-users group
-  # (`nixbld`) itself: its members are exactly who nix picks to RUN builds as, so putting a human in it would
-  # hand builds their uid.
+  # `propnix-fetch` is derived from it below, so the two can't drift.
   credGroup = "propnix";
   fetchGroup = "propnix-fetch";
 
-  # The build users, for the read group only. Nix applies a build user's supplementary groups to the builder
-  # (`getgrouplist` in libstore's user-lock.cc — the same mechanism that gets builders into `kvm`), so
-  # supplementary membership is enough; their primary group stays `nixbld`.
-  buildUsers = lib.optionals config.nix.enable (
-    map (n: "nixbld${toString n}") (lib.range 1 config.nix.nrBuildUsers)
-  );
+  # The group whose PRIMARY membership sandboxed builders carry — the target of the builder-read ACL. The
+  # CLI is told via PROPNIX_SANDBOX_GROUP below, so the two writers of the store name the same group.
+  buildUsersGroup = config.nix.settings.build-users-group or "nixbld";
 
   # The humans, resolved from `allowedUsers` using nix's own spelling for that kind of list: a bare name is a
   # user, `@grp` is every member of a group, `*` is every human account (nix's default for allowed-users).
@@ -159,8 +165,9 @@ in
         per-account tokens under `<type>/<username>/` (populated by `propnix cred add <type>`). When
         {option}`services.propnix.enable` is set, this is bound into the Nix build sandbox as `/propnix`
         via {option}`nix.settings.extra-sandbox-paths`, so credentialed fetches can read it. Token files are
-        group-owned by `propnix-fetch` (mode 0640) — the group that holds both the readers from
-        {option}`services.propnix.allowedUsers` and the Nix build users. Never copied into the Nix store.
+        group-owned by `propnix-fetch` (mode 0640) for the human readers from
+        {option}`services.propnix.allowedUsers`, plus a POSIX ACL granting the nix build group read — which
+        is how the sandboxed fetch reads them. Never copied into the Nix store.
 
         The bare directory is created by {option}`systemd.tmpfiles.rules`, which runs in `sysinit.target`
         — BEFORE `nix-daemon.socket` — so the sandbox bind can never dangle. That ordering is the whole
@@ -258,8 +265,9 @@ in
         {option}`source` — a runtime path to the decrypted file — is named here. Add
         `restartUnits = [ "propnix-credentials.service" ]` to the secret so rotating it re-copies.
 
-        Tokens are installed `root:propnix-fetch` mode 0640, so who can read one is
-        {option}`services.propnix.allowedUsers`.
+        Tokens are installed `root:propnix-fetch` mode 0640 plus a POSIX ACL granting the nix build group
+        read, so the humans who can read one are {option}`services.propnix.allowedUsers` and the sandboxed
+        fetch reads through the ACL.
 
         Declarative and imperative credentials coexist: this only ever writes the accounts listed here, and
         prunes one when you remove it, so tokens added with `propnix cred add` are left alone. In the other
@@ -337,19 +345,18 @@ in
     # `extraGroups`, so a hand-added user is not displaced.
     users.groups.${credGroup}.members = credentialUsers;
 
-    # May-read-a-credential: whoever ended up in `propnix` by either route, plus the build users. Derived from
-    # the group above rather than from `allowedUsers`, so a user hand-added with `extraGroups` gets read
-    # access too instead of write-without-read.
-    users.groups.${fetchGroup}.members = lib.unique (
-      config.users.groups.${credGroup}.members ++ buildUsers
-    );
+    # May-read-a-credential (humans): whoever ended up in `propnix` by either route. Derived from the group
+    # above rather than from `allowedUsers`, so a user hand-added with `extraGroups` gets read access too
+    # instead of write-without-read. The BUILD users are deliberately absent — their read rides the
+    # `g:${buildUsersGroup}:r` ACL (see the group comment above); listing them here would grant nothing.
+    users.groups.${fetchGroup}.members = config.users.groups.${credGroup}.members;
 
     warnings = lib.optional (config.nix.settings.auto-allocate-uids or false) ''
       services.propnix: nix `auto-allocate-uids` runs each build as a per-build synthetic uid/gid that
-      belongs to no host user or group (and, under the user namespace it maps, cannot override permissions
-      on a root-owned file), so no `propnix-fetch` membership can reach the builder. A bound-in token would
-      have to be world-readable for a credentialed fetch (the GOG/Steam payloads) to read it, which propnix
-      does not do. Turn `auto-allocate-uids` off on a host that builds propnix game packages.
+      belongs to no host user or group, so neither group membership nor the builder-read ACL (which names
+      the `${buildUsersGroup}` group) can reach the builder. A bound-in token would have to be
+      world-readable for a credentialed fetch (the GOG/Steam payloads) to read it, which propnix does not
+      do. Turn `auto-allocate-uids` off on a host that builds propnix game packages.
     '';
 
     # `propnix cred add gog` etc. — the tool that populates the credential dir bound in below.
@@ -363,6 +370,9 @@ in
       # The group for token FILES. The CLI takes the dirs' group by inheritance instead (the store root is
       # setgid `propnix`), which is what keeps a `cred add` from ever group-writing to the read group.
       PROPNIX_BUILD_GROUP = fetchGroup;
+      # The group the builder-read ACL names — the build users' PRIMARY group, the one thing the userns
+      # sandbox leaves a builder. Exported so the CLI's ACL and this module's convergence can't disagree.
+      PROPNIX_SANDBOX_GROUP = buildUsersGroup;
     };
 
     # The sandbox bind target, created EARLY. `extra-sandbox-paths` names this path unconditionally, and
@@ -383,6 +393,7 @@ in
       path = [
         pkgs.coreutils
         pkgs.gnugrep
+        pkgs.acl
       ];
       serviceConfig = {
         Type = "oneshot";
@@ -420,7 +431,8 @@ in
           fi
           if install -d -m 2775 -o root -g ${credGroup} "$root/$type" \
             && install -d -m 0755 -o root -g ${credGroup} "$root/$type/$user" \
-            && install -m 0640 -o root -g ${fetchGroup} "$src" "$root/$type/$user/$file"; then
+            && install -m 0640 -o root -g ${fetchGroup} "$src" "$root/$type/$user/$file" \
+            && setfacl -m g:${buildUsersGroup}:r "$root/$type/$user/$file"; then
             return
           fi
           echo "propnix: $type/$user: failed to install credential from $src" >&2
@@ -454,6 +466,24 @@ in
           done < "$manifest"
         fi
         install -D -m 0644 -o root -g root ${managedList} "$manifest"
+
+        # Converge builder-read ACLs across the WHOLE store — declared and imperative tokens alike. This is
+        # the in-place repair for stores written before the ACL leg of the contract existed (the sandbox
+        # dropped supplementary groups out from under the old propnix-fetch mechanism, leaving those tokens
+        # unreadable by fetches); idempotent afterwards. Dirs carry the DEFAULT entry so anything written
+        # into them later inherits the grant. Secrecy discipline: no token path is ever printed — a failure
+        # names only the store root.
+        acl_fail() { echo "propnix: setfacl failed under $root (no POSIX ACL support on this filesystem?)" >&2; rc=1; }
+        shopt -s nullglob
+        for d in "$root"/*/ "$root"/*/*/; do
+          setfacl -d -m g:${buildUsersGroup}:r "$d" || acl_fail
+        done
+        for f in "$root"/*/*/*; do
+          if [ -f "$f" ]; then
+            setfacl -m g:${buildUsersGroup}:r "$f" || acl_fail
+          fi
+        done
+        shopt -u nullglob
 
         exit $rc
       '';

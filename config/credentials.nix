@@ -34,20 +34,27 @@
 #       change WHAT is fetched.
 #     * The fetcher tries each stored GOG account until one OWNS the pinned build (transparent multi-account).
 #
-#   4. Read is one group, WRITE is another. Token files are group-owned mode 0640; store dirs are 0755 (their
-#      names aren't secret, so a plain user can `cred list` without privilege). Two parties must READ a token
-#      — the sandboxed builder, and the human running `propnix pin` — and a file has only one group, so both
-#      go in the same one. Write cannot hang off that group, or a build could rewrite the store, so it hangs
-#      off the group on the DIRECTORIES, which the build users are not in. Under the NixOS module:
-#          propnix        the humans. Owns the dirs, 2775 (group-writable + setgid) → `cred add`/`cred rm`
-#                         need no sudo, and a new dir inherits the group instead of being chowned.
-#          propnix-fetch  those humans PLUS the Nix build users (nix passes a build user's supplementary
-#                         groups to the builder). Owns the token files → read only.
-#      `propnix cred` takes the FILE group from `PROPNIX_BUILD_GROUP` (which the module sets to
-#      `propnix-fetch`) and the DIR group by inheritance from the setgid parent — never the file group, which
-#      would hand builds the store. Off NixOS both collapse to `nixbld`: dirs stay 0755 owner-only, the human
+#   4. THREE access shapes, three mechanisms. Token files are group-owned mode 0640; store dirs are 0755
+#      (their names aren't secret, so a plain user can `cred list` without privilege). The parties:
+#          human write    the group on the DIRECTORIES. Under the NixOS module: `propnix`, dirs 2775
+#                         (group-writable + setgid) → `cred add`/`cred rm` need no sudo, and a new dir
+#                         inherits the group instead of being chowned.
+#          human read     the group on the token FILES. Under the module: `propnix-fetch` (the same humans;
+#                         0640 group bits). Write cannot hang off this group or a reader could rewrite the
+#                         store.
+#          builder read   a POSIX ACL `g:nixbld:r` on every token file, plus a DEFAULT entry on the account
+#                         dirs so a rewritten token inherits it. An ACL, not a group, for two reasons that
+#                         corner every group design: the modern Nix sandbox runs builds in a user namespace
+#                         that keeps ONLY the build user's primary gid (`nixbld`) and drops supplementary
+#                         groups — so no membership list reaches a builder — and an unprivileged owner may
+#                         `setfacl` any group in but can only `chgrp` into groups they belong to, while a
+#                         human must never join `nixbld` (nix would pick them to run builds as).
+#      `propnix cred` takes the FILE group from `PROPNIX_BUILD_GROUP` (module: `propnix-fetch`), the ACL
+#      group from `PROPNIX_SANDBOX_GROUP` (module: `nix.settings.build-users-group`, i.e. `nixbld`), and the
+#      DIR group by inheritance from the setgid parent — never the file group, which would hand builds the
+#      store. Off NixOS the file group collapses to `nixbld` and the ACL is skipped as redundant (the
+#      builder's primary gid reads through the plain 0640 group bits): dirs stay 0755 owner-only, the human
 #      reads as the file's owner, and store writes sudo-escalate as before.
-#      NEVER the reverse — putting a human in `nixbld` would make them eligible to run builds as.
 #
 #   5. Declared credentials are the config's, not the CLI's. The NixOS module records what it materializes in
 #      `<root>-declarative-credentials` (beside the store, never inside it — the bind carries auth only): one

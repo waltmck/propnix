@@ -6,10 +6,14 @@
 //!
 //! `<root>` is bound into the Nix build sandbox at `/propnix`, so the fetcher reads `/propnix/credentials.toml`
 //! and `/propnix/gog/*/galaxy_tokens.json`. Token files are OWNED BY THE USER WHO CREATED THEM and
-//! group-owned by the build group (`$PROPNIX_BUILD_GROUP`, default `nixbld`), mode 0640: the sandbox builder
-//! reads them via the group, and the owner reads them without any privilege — which is what lets
-//! `propnix pin` refresh a hash without sudo. Leaving them root-owned would have meant every re-pin needed
-//! root just to read a token it had already been granted. Dirs are 0755 (their names aren't secret).
+//! group-owned by `$PROPNIX_BUILD_GROUP` (`propnix-fetch` under the NixOS module; default `nixbld`), mode
+//! 0640, PLUS — when that group is not the sandbox build group itself — a POSIX ACL granting the sandbox
+//! build group (`$PROPNIX_SANDBOX_GROUP`, default `nixbld`) read; see `grant_build_read` for why group
+//! membership alone stopped reaching builders. The owner reads without any privilege — which is what lets
+//! `propnix pin` refresh a hash without sudo. Leaving tokens root-owned would have meant every re-pin needed
+//! root just to read a token it had already been granted. Dirs are 0755 (their names aren't secret), and a
+//! dir this store creates carries the matching DEFAULT ACL, so a token rewritten by any code path inherits
+//! builder read instead of silently regressing.
 //! (An older propnix DID write tokens root-owned; the first read that fails on one converges it back onto
 //! this contract automatically — see `repair_unreadable_token` — instead of asking for a manual chown.)
 //!
@@ -34,6 +38,11 @@ pub struct CredStore {
     /// a group nobody created. `None` = no suitable group exists (a single-user Nix has no `nixbld`), in
     /// which case token files simply keep the creator's primary group.
     file_group: Option<String>,
+    /// The group a SANDBOXED builder actually runs as — its PRIMARY gid, nix's build-users-group
+    /// (`$PROPNIX_SANDBOX_GROUP`, which the NixOS module sets from `nix.settings.build-users-group`;
+    /// default `nixbld`), resolved against the host's groups. `None` = single-user Nix, builds run as the
+    /// invoking user and need no grant. See `grant_build_read` for why this is distinct from `file_group`.
+    sandbox_group: Option<String>,
 }
 
 /// One account type's stored accounts, for `cred list`.
@@ -52,10 +61,14 @@ impl CredStore {
         // Resolve now: the NixOS module points this at `propnix-fetch`, but the variable outlives the module
         // in an already-open login session, and a host may have no `nixbld` either.
         let file_group = resolve_file_group(&build_group);
+        let sandbox_group = resolve_file_group(
+            &std::env::var("PROPNIX_SANDBOX_GROUP").unwrap_or_else(|_| "nixbld".to_string()),
+        );
         CredStore {
             root,
             build_group,
             file_group,
+            sandbox_group,
         }
     }
 
@@ -167,8 +180,54 @@ impl CredStore {
         args.push(&dest_s);
         self.priv_run("install", &args)?;
         let _ = std::fs::remove_file(&tmp);
+        self.grant_build_read(&dest)?;
         self.ensure_pointer()?;
         Ok(())
+    }
+
+    /// The third leg of the store contract: a POSIX ACL granting the SANDBOX build group read on a token.
+    ///
+    /// Group ownership alone no longer covers the builder: the modern Nix sandbox (2.34-era) runs builders
+    /// inside a user namespace that maps exactly one uid and one gid — the build user's own — and drops
+    /// every supplementary group, so membership of the token's file group (`propnix-fetch`) never reaches a
+    /// build. What DOES survive is the builder's PRIMARY gid (`nixbld`), and an ACL naming that group is
+    /// checked against it. An ACL rather than `chgrp nixbld` because the file GROUP must stay one humans
+    /// may be members of: an unprivileged owner can `setfacl` any group in, but can only `chgrp` into a
+    /// group they belong to, and a human must never join `nixbld` (nix would pick them to run builds as).
+    ///
+    /// Skipped when the two groups coincide — the plain non-module layout already carries group `nixbld`,
+    /// which the primary gid reads through the ordinary 0640 group bits — and when there is no build group
+    /// at all (single-user Nix: builds run as the invoking user).
+    fn grant_build_read(&self, file: &Path) -> Result<(), String> {
+        let Some(g) = self.acl_group() else {
+            return Ok(());
+        };
+        let entry = format!("g:{g}:r");
+        self.priv_run("setfacl", &["-m", &entry, &file.to_string_lossy()])
+            .map_err(|e| acl_failure_context(&e, g))
+    }
+
+    /// The DEFAULT-ACL counterpart of `grant_build_read`, for a directory this store creates: every file
+    /// later created inside it — a token refresh, a re-`cred add` — inherits the builder-read entry, so the
+    /// contract cannot silently regress on a rewrite that bypasses `put`.
+    fn grant_build_read_default(&self, dir: &str) -> Result<(), String> {
+        let Some(g) = self.acl_group() else {
+            return Ok(());
+        };
+        let entry = format!("g:{g}:r");
+        self.priv_run("setfacl", &["-d", "-m", &entry, dir])
+            .map_err(|e| acl_failure_context(&e, g))
+    }
+
+    /// The group the builder-read ACL should name, or `None` when no ACL is needed: no sandbox build group
+    /// exists (single-user Nix), or the token file group IS the sandbox group (the plain `nixbld` layout,
+    /// already readable through the group bits).
+    fn acl_group(&self) -> Option<&str> {
+        match (&self.sandbox_group, &self.file_group) {
+            (Some(s), Some(f)) if s == f => None,
+            (Some(s), _) => Some(s.as_str()),
+            (None, _) => None,
+        }
     }
 
     /// Create one store directory IF IT IS MISSING, and otherwise leave it exactly as it is. Never adjusting
@@ -193,7 +252,8 @@ impl CredStore {
             let mut args: Vec<&str> = vec!["-d", "-m", "0755", "-o", &owner];
             args.extend(self.group_args());
             args.push(&path);
-            return self.priv_run("install", &args);
+            self.priv_run("install", &args)?;
+            return self.grant_build_read_default(&path);
         }
 
         // A group-managed store. mkdir inherits the parent's group either way; the mode we ask for is only
@@ -204,7 +264,8 @@ impl CredStore {
         let install_d = |mode: &str| {
             self.priv_run("install", &["-d", "-m", mode, "-o", &owner, &path])
         };
-        install_d("2775").or_else(|_| install_d("0775"))
+        install_d("2775").or_else(|_| install_d("0775"))?;
+        self.grant_build_read_default(&path)
     }
 
     /// `["-g", <group>]` for an `install` call, or nothing when no configured group exists on this host —
@@ -381,13 +442,18 @@ fn invoking_uid() -> String {
 }
 
 /// Make a token file the current user was DENIED reading readable again, by converging it onto the store
-/// contract: owner = the invoking user, group = the resolved file group, mode 0640. This is the one-off
-/// repair for stores created by an older propnix, which wrote tokens root-owned — the issue instructions
-/// used to ask for a manual `sudo chown` instead. Escalates with sudo exactly like store writes do.
+/// contract: owner = the invoking user, group = the resolved file group, mode 0640, plus the builder-read
+/// ACL (`grant_build_read`). This is the one-off repair for stores written before some part of the
+/// contract existed — root-owned tokens from the oldest layout, or `propnix-fetch` tokens from before the
+/// ACL leg. Escalates with sudo exactly like store writes do.
 ///
 /// A DECLARATIVE token is refused: the NixOS module keeps those root-owned on purpose (humans read them
 /// via the `propnix-fetch` group), so a denied read there means missing group membership, and a chown
 /// would only be undone by the next activation.
+///
+/// INSIDE A NIX BUILD it refuses with host-side instructions instead: the sandbox has no sudo (and no way
+/// to prompt), so the old behaviour — exec'ing sudo anyway — could only ever die with a baffling
+/// "No such file or directory". The denied read is real, but the repair belongs on the host.
 pub fn repair_unreadable_token(root: &Path, token: &Path) -> Result<(), String> {
     if declared_token(root, token) {
         return Err(format!(
@@ -397,17 +463,24 @@ pub fn repair_unreadable_token(root: &Path, token: &Path) -> Result<(), String> 
             token.display()
         ));
     }
+    let sandbox_group = resolve_file_group(
+        &std::env::var("PROPNIX_SANDBOX_GROUP").unwrap_or_else(|_| "nixbld".to_string()),
+    );
+    if std::env::var_os("NIX_BUILD_TOP").is_some() {
+        return Err(in_sandbox_instructions(root, token, sandbox_group.as_deref()));
+    }
     let uid = invoking_uid();
-    let spec = match resolve_file_group(
+    let file_group = resolve_file_group(
         &std::env::var("PROPNIX_BUILD_GROUP").unwrap_or_else(|_| "nixbld".to_string()),
-    ) {
+    );
+    let spec = match &file_group {
         Some(g) => format!("{uid}:{g}"),
         None => uid,
     };
     let path = token.to_string_lossy();
     eprintln!(
-        "propnix: {path} is not readable by you — the store predates user-ownership; converging it with \
-         a one-off `chown {spec}` (this may ask for your sudo password)"
+        "propnix: {path} is not readable by you — converging it onto the store contract with a one-off \
+         `chown {spec}` (+ builder-read ACL; this may ask for your sudo password)"
     );
     let run = |program: &str, args: &[&str]| -> Result<(), String> {
         let (prog, full): (&str, Vec<&str>) = if is_root() {
@@ -427,6 +500,12 @@ pub fn repair_unreadable_token(root: &Path, token: &Path) -> Result<(), String> 
     // The contract mode, best-effort: an old token is normally 0640 already, and owner-readability —
     // checked below — is what actually matters.
     let _ = run("chmod", &["0640", &path]);
+    // The builder-read ACL, for the same reasons as in `grant_build_read` — skipped when the file group IS
+    // the sandbox group (plain layout: group bits already grant the read).
+    if let Some(g) = sandbox_group.filter(|g| Some(g.as_str()) != file_group.as_deref()) {
+        run("setfacl", &["-m", &format!("g:{g}:r"), &path])
+            .map_err(|e| acl_failure_context(&e, &g))?;
+    }
     if !readable(token) {
         return Err(format!(
             "{path} is still not readable after the repair; fix it by hand with: \
@@ -434,6 +513,34 @@ pub fn repair_unreadable_token(root: &Path, token: &Path) -> Result<(), String> 
         ));
     }
     Ok(())
+}
+
+/// The refusal a DENIED READ inside the build sandbox gets: the exact host-side commands, with the
+/// in-sandbox path translated to the conventional host store root. The builder cannot repair anything
+/// itself — no sudo exists here — and the fix is one command on the host (or simply re-running
+/// `propnix cred add`, whose store write applies the full contract including the ACL).
+fn in_sandbox_instructions(root: &Path, token: &Path, sandbox_group: Option<&str>) -> String {
+    let group = sandbox_group.unwrap_or("nixbld");
+    // /propnix/gog/alice/galaxy_tokens.json → gog/alice/galaxy_tokens.json, under the default host root.
+    // A non-default services.propnix.credentialsPath can't be seen from in here — say so.
+    let rel = token.strip_prefix(root).unwrap_or(token).to_string_lossy().into_owned();
+    format!(
+        "the token is not readable by the sandboxed builder (builds carry only their primary group \
+         `{group}`; supplementary groups like `propnix-fetch` never reach a sandbox). Fix it ON THE HOST \
+         with:\n  sudo setfacl -m g:{group}:r /var/lib/propnix/{rel}\n(adjust the path if \
+         services.propnix.credentialsPath is not the default), or re-run `propnix cred add` with a \
+         current propnix, which applies the builder-read ACL itself."
+    )
+}
+
+/// Context for a failed `setfacl`: it is load-bearing (without it sandboxed fetches are denied), and the
+/// two realistic causes are the tool missing from PATH and a filesystem without POSIX ACL support.
+fn acl_failure_context(err: &str, group: &str) -> String {
+    format!(
+        "{err}\n  propnix: could not grant the nix build group '{group}' read via a POSIX ACL — sandboxed \
+         fetches would be denied the token. This needs the `setfacl` tool and POSIX-ACL support on the \
+         filesystem holding the credential store."
+    )
 }
 
 /// Is this exact token path one the NixOS module declares — a line of the manifest beside the store?
@@ -490,11 +597,13 @@ mod tests {
 
     fn store_at(root: &Path) -> CredStore {
         // A numeric gid is always a valid `install -g`, and our own is always one we may chown to.
+        // `sandbox_group: None` = the single-user-Nix shape, so layout tests exercise no ACL machinery.
         let gid = unsafe { libc::getgid() }.to_string();
         CredStore {
             root: root.to_path_buf(),
             build_group: gid.clone(),
             file_group: Some(gid),
+            sandbox_group: None,
         }
     }
 
@@ -725,6 +834,69 @@ mod tests {
         assert_eq!(mode_of(&a), 0o600);
         assert_eq!(std::fs::read(&a).unwrap(), b"tok-a");
         assert_eq!(std::fs::read(&b).unwrap(), b"tok-b");
+    }
+
+    #[test]
+    fn put_grants_the_sandbox_build_group_read_via_an_acl() {
+        // The contract's third leg: with a sandbox group DISTINCT from the file group, the token must
+        // carry a named-group ACL entry (the userns sandbox only keeps the builder's primary gid, so the
+        // file group can't reach it). Skips where the environment can't exercise it: no `nixbld` group
+        // (non-Nix CI), no setfacl, or a filesystem without POSIX ACLs.
+        if !group_exists("nixbld") {
+            eprintln!("skipped: no nixbld group on this host");
+            return;
+        }
+        let root = tmp_root("acl-put");
+        let gid = unsafe { libc::getgid() }.to_string();
+        let store = CredStore {
+            root: root.to_path_buf(),
+            build_group: gid.clone(),
+            file_group: Some(gid),
+            sandbox_group: Some("nixbld".to_string()),
+        };
+        if let Err(e) = store.put("gog", "alice", "galaxy_tokens.json", b"{}") {
+            let acl_unsupported = e.contains("setfacl");
+            assert!(acl_unsupported, "put failed for a non-ACL reason: {e}");
+            eprintln!("skipped: {e}");
+            return;
+        }
+        let token = root.join("gog/alice/galaxy_tokens.json");
+        let out = Command::new("getfacl")
+            .args(["-c", "--", &token.to_string_lossy()])
+            .output()
+            .expect("getfacl must run where setfacl just did");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            text.lines().any(|l| l.starts_with("group:nixbld:r")),
+            "the token must carry a builder-read ACL entry; getfacl said:\n{text}"
+        );
+        // …and the account dir carries the DEFAULT entry, so a rewrite outside `put` inherits the grant.
+        let out = Command::new("getfacl")
+            .args(["-c", "--", &root.join("gog/alice").to_string_lossy()])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            text.lines().any(|l| l.starts_with("default:group:nixbld:r")),
+            "the account dir must carry the default builder-read entry; getfacl said:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_in_sandbox_refusal_names_the_host_side_fix() {
+        // Inside a build there is no sudo to exec and nothing to repair with — the refusal must hand the
+        // user the host-side command with the store-relative path translated out of the sandbox mount.
+        let msg = in_sandbox_instructions(
+            Path::new("/propnix"),
+            Path::new("/propnix/gog/alice/galaxy_tokens.json"),
+            Some("nixbld"),
+        );
+        assert!(
+            msg.contains("sudo setfacl -m g:nixbld:r /var/lib/propnix/gog/alice/galaxy_tokens.json"),
+            "got: {msg}"
+        );
+        assert!(msg.contains("propnix cred add"), "must offer the CLI route too; got: {msg}");
+        assert!(!msg.contains("sudo: "), "must not look like a failed sudo exec; got: {msg}");
     }
 
     #[test]

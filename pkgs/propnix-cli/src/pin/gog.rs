@@ -299,9 +299,10 @@ pub fn gog_credentials(
     for (account, p) in candidates {
         let text = match std::fs::read_to_string(&p) {
             Ok(t) => t,
-            // A store from before user-ownership holds root-owned tokens: converge this one onto the
-            // store contract (a one-off, sudo-escalated chown) and retry, rather than misreporting a
-            // token we were denied as "no credential".
+            // A token from before some part of the store contract (root-owned from the oldest layout, or
+            // group-only from before the builder-read ACL): converge it (one-off, sudo-escalated
+            // chown+setfacl) and retry, rather than misreporting a token we were denied as "no
+            // credential". Inside a build sandbox the repair instead returns the host-side fix verbatim.
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                 match crate::cred::store::repair_unreadable_token(cred_dir, &p)
                     .and_then(|()| {

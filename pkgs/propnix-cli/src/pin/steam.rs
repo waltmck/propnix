@@ -156,8 +156,9 @@ pub fn credentials_from_store(
     for t in &tars {
         let f = match std::fs::File::open(t) {
             Ok(f) => f,
-            // A store from before user-ownership holds root-owned tokens: converge this one onto the
-            // store contract (a one-off, sudo-escalated chown) and retry.
+            // A token from before some part of the store contract (root-owned, or group-only from before
+            // the builder-read ACL): converge it (one-off, sudo-escalated chown+setfacl) and retry.
+            // Inside a build sandbox the repair instead returns the host-side fix verbatim.
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                 crate::cred::store::repair_unreadable_token(cred_dir, t)
                     .map_err(SteamError::NoCredential)?;

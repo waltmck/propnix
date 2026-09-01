@@ -7,27 +7,42 @@
 #
 #   nix run .#baldurs-gate-3 --extra-sandbox-paths /propnix=/var/lib/propnix
 #
-# ── WHICH EXECUTABLE, AND WHY NOT THE PRIMARY ONE ──────────────────────────────────────────────────────
+# ── WHICH EXECUTABLE, AND WHY THE D3D11 ONE ────────────────────────────────────────────────────────────
 # `goggame-1456460669.info` lists three play tasks:
 #   isPrimary=true   Launcher/LariLauncher.exe   category=launcher   121 KB
 #   isPrimary=false  bin/bg3.exe                 category=game        35 MB   (native Vulkan)
 #   isPrimary=false  bin/bg3_dx11.exe            category=game        34 MB   (D3D11)
-# We launch `bin/bg3.exe` DIRECTLY, not the isPrimary task. LariLauncher is a .NET single-file WPF app that
-# embeds CefSharp — running it would drag in the whole Chromium-under-wine problem for no benefit, since it
-# only ever execs one of the two real binaries. Its own manifest shows it passes `--skip-launcher` and
-# nothing else the game needs, so launching the game directly loses no setup.
+# We launch a game binary DIRECTLY, not the isPrimary task. LariLauncher is a .NET WPF app that embeds
+# CefSharp — running it would drag in the whole Chromium-under-wine problem for no benefit: its own
+# `Launcher/launcher.cfg` shows its "DirectX 11 vs Vulkan" option is nothing but an exe pick
+# ({ "vulkan": "..\bin\bg3.exe", "dx11": "..\bin\bg3_dx11.exe" }), so launching a game binary directly
+# loses no setup — choosing `exe` here IS the launcher's renderer setting.
 #
-# bg3.exe (Vulkan) over bg3_dx11.exe (D3D11) is the fewer-layers choice on this stack: the Vulkan renderer
-# goes straight to winevulkan, whereas the D3D11 path adds D3D11 -> DXVK -> Vulkan. If the Vulkan backend
-# misbehaves, `.apply { exe = "bin/bg3_dx11.exe"; }` is the one-line fallback.
+# bg3_dx11.exe (D3D11 → DXVK) over bg3.exe (native Vulkan) is the HDR choice, and it INVERTS the
+# fewer-layers preference this spec used to follow (Vulkan → winevulkan beats D3D11 → DXVK → Vulkan):
+#   * bg3.exe does HDR — it reads HDR10 colorspaces straight off the Vulkan surface (mesa ≥25.1 wayland
+#     WSI color management + a compositor output in HDR mode; winevulkan passes surface formats through)
+#     — but only ENGAGES it in its exclusive-fullscreen display mode, and that mode loses a state fight
+#     between winewayland and the compositor: the mode-set transition bounces the toplevel out of
+#     fullscreen (observed settling as a floating window), and a compositor-initiated fullscreen resizes
+#     the window from outside, which knocks the engine back out of its fullscreen mode and turns its HDR
+#     gate off with it.
+#   * bg3_dx11.exe gets HDR through DXVK's DXGI (`env.DXVK_HDR` below) in ANY display mode — no
+#     exclusive-fullscreen requirement, so no state fight to lose.
+# `.apply { exe = "bin/bg3.exe"; }` is the one-line switch back to the Vulkan renderer.
 #
 # ── VERIFIED BY PLAYING IT ─────────────────────────────────────────────────────────────────────────────
-# Reaches the main menu, starts a new game, plays through the intro and autosaves (engine state machine
-# reaches Running/Save). Two ~18-minute sessions exited cleanly with no page faults.
+# bg3.exe (the previous default): reaches the main menu, starts a new game, plays through the intro and
+# autosaves (engine state machine reaches Running/Save); two ~18-minute sessions exited cleanly with no
+# page faults. bg3_dx11.exe: verified on x86_64 (2026-09-01) — launches and plays, and with DXVK_HDR the
+# swapchain presents HDR10_ST2084 on an HDR wayland session (Hyprland 0.56, mesa 26.1, RADV). The
+# FEX/ARM64EC soak tests above were all bg3.exe; DXVK is already the aarch64 d3d default (RESEARCH §22),
+# but re-verify on that host before trusting a long session there.
 #
-# graphics: the tree default (winewayland) is CORRECT here — do not add an x11 override. A/B measured:
-# wayland 18 min clean exit / 0 faults / 0 swapchain recreates, x11 17 min clean exit / 0 faults. The
-# fullscreen-Vulkan swapchain-recreate NULL-deref that forces x11 for Skyrim SE does not reproduce.
+# graphics: the tree default (winewayland) is CORRECT here — do not add an x11 override. A/B measured
+# (on bg3.exe): wayland 18 min clean exit / 0 faults / 0 swapchain recreates, x11 17 min clean exit /
+# 0 faults. The fullscreen-Vulkan swapchain-recreate NULL-deref that forces x11 for Skyrim SE does not
+# reproduce.
 {
   lib,
   mkApp,
@@ -39,7 +54,17 @@ mkApp {
 
   fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
 
-  exe = "bin/bg3.exe";
+  exe = "bin/bg3_dx11.exe";
+
+  # DXVK's stand-in for the Windows "HDR on" display toggle: with it set, DXGI reports an HDR10 display
+  # and the engine offers HDR. Without it DXVK NEVER reports HDR under winewayland — wine writes no EDID
+  # into the registry, so there is nothing for DXVK to auto-detect from (its dxgi logs "colorimetry
+  # info, using blank"). Safe when the session is SDR: the engine also gates on CheckColorSpaceSupport,
+  # which follows the REAL Vulkan surface (sRGB-only unless the compositor output is in HDR mode), so it
+  # degrades to SDR instead of rendering PQ into an sRGB swapchain; HDR brightness is calibrated
+  # in-game. (Not a tree-wide default on purpose: careless titles trust the DXGI report alone — UE4 DX11
+  # games even crash on it, see DXVK's own isHDRDisallowed guard — so each title opts in knowingly.)
+  env.DXVK_HDR = "1";
 
   # The engine writes its log as `gold.<timestamp>.log` into the GAME directory, which is read-only here,
   # so CreateFileW fails with STATUS_ACCESS_DENIED and it runs with NO log sink at all. `--logPath <dir>`

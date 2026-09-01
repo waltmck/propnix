@@ -92,12 +92,23 @@ mkApp (
       }
     ];
 
-    # ── box64 / Linux tuning ── the emulator lib triage (only forced by thin backends). The two dynarec
-    # workarounds are box64-SPECIFIC (native x86_64 needs neither): Unity picks a dying renderer under
-    # box64 without -force-opengl, and SDL's Wayland backend trips box64's dynarec — pin x11.
+    # ── box64 / Linux tuning ── the emulator lib triage (only forced by thin backends). The renderer
+    # workaround is box64-SPECIFIC (native x86_64 doesn't need it): Unity picks a dying renderer under
+    # box64 without -force-opengl.
     box64 = import ./box64-tuning.nix;
     exeArgs = lib.optionals (config.backend == "box64") [ "-force-opengl" ];
-    env.SDL_VIDEODRIVER = lib.mkIf (config.backend == "box64") "x11";
+
+    # SDL video driver: x11 on EVERY thin backend (was box64-only), for two independent reasons:
+    #   * box64: SDL's Wayland backend trips box64's dynarec.
+    #   * native x86_64: Unity vendors a pre-2.26 SDL fork inside UnityPlayer.so — SDL_DYNAMIC_API is
+    #     compiled out (no swapping in a modern SDL) and there is no wayland mode emulation — so a
+    #     Wayland window can only ever see the output's LOGICAL size. On a fractionally-scaled output
+    #     that caps the in-game resolution list (2560x1440 on a 1.5x-scaled 4K monitor, Player.log:
+    #     "Display 0: 2560x1440") and the compositor upscales the result. Under Xwayland the game sees
+    #     whatever the compositor exposes there — the physical mode when so configured (Hyprland
+    #     `xwayland:force_zero_scaling`), and never less than the wayland backend's logical cap.
+    # Inert on the wine backend (wine has no SDL). Revisit if the vendored SDL ever reaches ≥2.26.
+    env.SDL_VIDEODRIVER = "x11";
 
     # ── wine tuning ── HK is well-behaved on the global defaults; what remains per-title is the Unity
     # frame-pacing preset (agreeing with the launcher's PROPNIX_FPS modes) + the de-Galaxy stubs for the

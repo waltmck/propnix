@@ -48,6 +48,22 @@ enum Command {
         #[command(subcommand)]
         what: HashCmd,
     },
+    /// Which stored Steam account (if any) can fetch each of these depots? All answers ride the same
+    /// login per account — Steam rate-limits logons hard enough that asking depot-by-depot in separate
+    /// invocations once shut the account out for an hour. A login failure ABORTS rather than reporting
+    /// "unowned": a refused logon says nothing about ownership.
+    SteamProbe {
+        #[arg(long)]
+        app: u32,
+        #[arg(long, default_value = "public")]
+        branch: String,
+        /// Which stored Steam account to try first; default: every stored account.
+        #[arg(long)]
+        steam_account: Option<String>,
+        /// The depot ids to probe.
+        #[arg(required = true)]
+        depots: Vec<u32>,
+    },
     /// Check a payload ALREADY on disk against the store's own per-chunk hashes.
     ///
     /// The arbiter when `hash` and `download` disagree: both are candidate answers, and `hash` is what
@@ -254,6 +270,13 @@ enum DownloadCmd {
         /// MiB of chunks admitted ahead of the disk — the download's memory bound.
         #[arg(long, default_value_t = 128)]
         window_mib: u64,
+        /// Cache trust anchor: sha256 (hex) of the depot key, from the pin's `depotKeySha256`. With
+        /// BOTH anchors present and the /propnix cache warm, the download makes no Steam login at all.
+        #[arg(long)]
+        depot_key_sha256: Option<String>,
+        /// Cache trust anchor: sha256 (hex) of the raw manifest, from the pin's `manifestSha256`.
+        #[arg(long)]
+        manifest_sha256: Option<String>,
     },
     /// Download a GOG Galaxy build (replaces gogdl).
     Gog {
@@ -304,6 +327,15 @@ enum CredAction {
         #[arg(value_name = "USERNAME")]
         username: String,
     },
+    /// Materialize the declarative credential store from a config file. INTERNAL — run as root by the NixOS
+    /// module's activation service, not by hand: it installs declared tokens, prunes dropped ones, and
+    /// converges the store's ownership/permissions to contract.
+    #[command(hide = true)]
+    Materialize {
+        /// Path to the JSON config the NixOS module renders.
+        #[arg(value_name = "CONFIG")]
+        config: std::path::PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -315,12 +347,21 @@ fn main() -> ExitCode {
             CredAction::Rm { r#type, username } => {
                 cmd_rm(&username, r#type.as_deref()).map_err(Into::into)
             }
+            CredAction::Materialize { config } => {
+                cred::materialize::materialize(&config).map_err(Into::into)
+            }
         },
         Command::Games { repo } => pin::all_games(&repo)
             .map(|gs| gs.iter().for_each(|g| println!("{g}")))
             .map_err(Into::into),
         Command::Pin(args) => cmd_pin(args),
         Command::Hash { what } => cmd_hash(what),
+        Command::SteamProbe {
+            app,
+            branch,
+            steam_account,
+            depots,
+        } => cmd_steam_probe(app, &branch, steam_account, &depots),
         Command::Download { what } => cmd_download(what),
         Command::Verify { what } => cmd_verify(what),
     };
@@ -328,10 +369,12 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("propnix: {e}");
-            // Exit 4 means "a human needs to act" — no credential, the account does not own the title,
-            // or a construct we refuse to guess at — as opposed to 1, which means the tool itself hit
-            // something unexpected. CI uses the distinction to open an issue instead of failing.
-            if e.downcast_ref::<pin::Blocked>().is_some() {
+            // Exit 4 means "a human needs to act" — no/stale credential, the account does not own the
+            // title, or a construct we refuse to guess at — as opposed to 1, which means the tool itself
+            // hit something unexpected. CI uses the distinction to open an issue instead of failing.
+            // EVERY subcommand maps the same way (pin wraps these in `Blocked`; the others surface the
+            // raw store error), so scripts can rely on 4 regardless of which command met the problem.
+            if pin::is_human_actionable(e.as_ref()) {
                 ExitCode::from(4)
             } else {
                 ExitCode::FAILURE
@@ -357,6 +400,24 @@ fn env_account(var: &str) -> Option<String> {
     std::env::var(var).ok().filter(|s| !s.trim().is_empty())
 }
 
+/// Validate a NAMED account selection (flag or env) against the store IMMEDIATELY — local token reads
+/// only, never a login — so a typo'd `--steam-account` fails on the spot instead of weeks later on the
+/// first run that actually has something to hash (classically in CI at the worst moment). No selection
+/// means nothing to check: try-all stays lazy and anonymous flows stay anonymous.
+fn validate_accounts(
+    dir: &std::path::Path,
+    gog: Option<&str>,
+    steam: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if gog.is_some() {
+        pin::gog::gog_credentials(dir, gog)?;
+    }
+    if steam.is_some() {
+        pin::steam::credentials_from_store(dir, steam)?;
+    }
+    Ok(())
+}
+
 fn cmd_pin(a: PinArgs) -> Result<(), Box<dyn std::error::Error>> {
     let opts = pin::Opts {
         repo: a.repo,
@@ -377,6 +438,7 @@ fn cmd_pin(a: PinArgs) -> Result<(), Box<dyn std::error::Error>> {
         gog_account: a.gog_account.or_else(|| env_account("PROPNIX_GOG_ACCOUNT")),
         steam_account: a.steam_account.or_else(|| env_account("PROPNIX_STEAM_ACCOUNT")),
     };
+    validate_accounts(&opts.credential_dir, opts.gog_account.as_deref(), opts.steam_account.as_deref())?;
     if a.new {
         // Refuse BEFORE the expensive resolve-and-hash, not at landing time. A scaffold is generic
         // placeholders, and — since `pin` writes in place — landing one over an existing versions.json
@@ -482,6 +544,30 @@ fn land(
     Ok(())
 }
 
+fn cmd_steam_probe(
+    app: u32,
+    branch: &str,
+    steam_account: Option<String>,
+    depots: &[u32],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let opts = pin::gog::HashOpts {
+        workers: 1,
+        window_bytes: 0,
+        credential_dir: cred_dir(),
+        gog_account: None,
+        steam_account: steam_account.or_else(|| env_account("PROPNIX_STEAM_ACCOUNT")),
+        progress: false,
+    };
+    validate_accounts(&opts.credential_dir, opts.gog_account.as_deref(), opts.steam_account.as_deref())?;
+    for (depot, owner) in pin::steam::probe_depots(app, depots, branch, &opts)? {
+        match owner {
+            Some(account) => println!("{app}\t{depot}\towned\t{account}"),
+            None => println!("{app}\t{depot}\tunowned"),
+        }
+    }
+    Ok(())
+}
+
 fn cmd_download(what: DownloadCmd) -> Result<(), Box<dyn std::error::Error>> {
     use pin::{gog, steam};
     match what {
@@ -495,6 +581,8 @@ fn cmd_download(what: DownloadCmd) -> Result<(), Box<dyn std::error::Error>> {
             dir,
             workers,
             window_mib,
+            depot_key_sha256,
+            manifest_sha256,
         } => {
             std::fs::create_dir_all(&dir)?;
             let opts = gog::HashOpts {
@@ -505,8 +593,12 @@ fn cmd_download(what: DownloadCmd) -> Result<(), Box<dyn std::error::Error>> {
                 steam_account: steam_account.or_else(|| env_account("PROPNIX_STEAM_ACCOUNT")),
                 progress: true,
             };
+            validate_accounts(&opts.credential_dir, opts.gog_account.as_deref(), opts.steam_account.as_deref())?;
+            // Both anchors or neither: a lone anchor can never complete the cache path, and passing a
+            // half-pair through would just make `acquire` probe the cache for nothing.
+            let anchors = depot_key_sha256.as_deref().zip(manifest_sha256.as_deref());
             let w = steam::download_depot_any(
-                app, depot, manifest, &branch, anonymous, &dir, &opts,
+                app, depot, manifest, &branch, anonymous, &dir, anchors, &opts,
             )?;
             eprintln!(
                 "  wrote {} files, {} dirs, {} content bytes to {}",
@@ -539,6 +631,7 @@ fn cmd_download(what: DownloadCmd) -> Result<(), Box<dyn std::error::Error>> {
                 steam_account: None,
                 progress: true,
             };
+            validate_accounts(&opts.credential_dir, opts.gog_account.as_deref(), opts.steam_account.as_deref())?;
             // Same contract as `hash gog`: be explicit about a tree that buildId alone does not pin.
             let deps = deps_build_id.map(gog::DepsPin::Expect);
             let w = gog::download_build(
@@ -604,6 +697,7 @@ fn cmd_hash(what: HashCmd) -> Result<(), Box<dyn std::error::Error>> {
                 steam_account: None,
                 progress: true,
             };
+            validate_accounts(&opts.credential_dir, opts.gog_account.as_deref(), opts.steam_account.as_deref())?;
             // `Expect` when the flag is given, and NO DepsPin at all when it is not: the harness
             // contract is to be explicit about a tree buildId does not pin, so a bare `hash gog` on
             // such a build is refused with the current repository build named. (`propnix pin` passes
@@ -644,7 +738,8 @@ fn cmd_hash(what: HashCmd) -> Result<(), Box<dyn std::error::Error>> {
                 steam_account: account.clone(),
                 progress: true,
             };
-            let (sri, stats, _) = if anonymous {
+            validate_accounts(&opts.credential_dir, opts.gog_account.as_deref(), opts.steam_account.as_deref())?;
+            let (sri, stats, _, _anchors) = if anonymous {
                 steam::hash_depot(
                     app,
                     depot,
@@ -671,7 +766,10 @@ fn cmd_list() -> Result<(), String> {
     let listing = store.list();
     if listing.is_empty() {
         println!("No credentials stored ({}).", store.root().display());
-        println!("Add one with: propnix cred add gog");
+        println!(
+            "Add one with: propnix cred add <{}>",
+            cred::provider::type_names().join("|")
+        );
         return Ok(());
     }
     for t in &listing {
@@ -684,13 +782,28 @@ fn cmd_list() -> Result<(), String> {
             println!("  (none)");
         } else {
             for u in &t.usernames {
-                // Flag the ones materialized from the host's configuration: `cred rm` won't remove those,
-                // and re-adding one with `cred add` would be overwritten at the next activation.
-                if store.is_declarative(&t.type_name, u) {
-                    println!("  - {u} (declarative)");
+                // Annotate the exceptions to "mine, writable"; a plain line is your own account. Every
+                // account listed is READABLE by a build regardless — the tag is about who may REWRITE it.
+                //   (declarative)        — materialized from the host config; `cred rm` refuses it, and a
+                //                          re-`cred add` would be overwritten at the next activation.
+                //   (managed by <name>)  — a different human on this host added it; readable by builds,
+                //                          not writable by you (an account dir is 0750, owned by its
+                //                          creator). The multi-user store's isolation.
+                // A ROOT-owned account is NOT tagged this way: on a plain (no-module) store `cred add`
+                // keeps ownership with the human even through its sudo step, so a root owner means the
+                // module put it there — already caught by the declarative check above — and a stray
+                // root-owned token should not read as "another user".
+                let tag = if store.is_declarative(&t.type_name, u) {
+                    " (declarative)".to_string()
                 } else {
-                    println!("  - {u}");
-                }
+                    match store.account_access(&t.type_name, u) {
+                        cred::store::AccountAccess::Other { user, uid } if uid != 0 => {
+                            format!(" (managed by {user})")
+                        }
+                        _ => String::new(),
+                    }
+                };
+                println!("  - {u}{tag}");
             }
         }
     }
@@ -706,6 +819,59 @@ fn cmd_add(type_name: &str) -> Result<(), String> {
     })?;
     let store = CredStore::from_env();
     let cred = provider.login()?;
+    // The USERNAME is only known once the login has completed, so the replace/ownership checks can only
+    // run now. These are the FRIENDLY versions; `put` re-checks everything as the authoritative gate
+    // (declarative accounts skip straight to put's own refusal, which names the config option to edit).
+    let token_path = store
+        .root()
+        .join(provider.type_name())
+        .join(&cred.username)
+        .join(provider.token_filename());
+    let replacing = token_path.exists();
+    if replacing && !store.is_declarative(provider.type_name(), &cred.username) {
+        match store.account_access(provider.type_name(), &cred.username) {
+            // Another human's account: adding over it would leave the token owned by you inside THEIR
+            // account dir — a mixed-ownership state nothing expects. Point at the clean sequence instead.
+            cred::store::AccountAccess::Other { user, uid } if uid != 0 => {
+                return Err(format!(
+                    "{} account '{}' already exists and belongs to {user} — have them refresh it \
+                     themselves, or (as an administrator) remove it first: sudo propnix cred rm -t {} {}",
+                    provider.display_name(),
+                    cred.username,
+                    provider.type_name(),
+                    cred.username,
+                ));
+            }
+            // Your own token: replacing it is the normal refresh flow, but make it deliberate — an
+            // accidental duplicate `add` should not silently clobber a working credential. On a terminal,
+            // ask; without one (automation), warn and proceed rather than hang.
+            _ => {
+                use std::io::{BufRead, IsTerminal, Write};
+                if std::io::stdin().is_terminal() {
+                    eprint!(
+                        "propnix: {} account '{}' already has a stored token — replace it? [y/N] ",
+                        provider.display_name(),
+                        cred.username
+                    );
+                    let _ = std::io::stderr().flush();
+                    let mut answer = String::new();
+                    let _ = std::io::stdin().lock().read_line(&mut answer);
+                    if !matches!(answer.trim(), "y" | "Y" | "yes") {
+                        return Err(format!(
+                            "left the existing token for '{}' in place",
+                            cred.username
+                        ));
+                    }
+                } else {
+                    eprintln!(
+                        "propnix: replacing the existing stored token for {} account '{}'",
+                        provider.display_name(),
+                        cred.username
+                    );
+                }
+            }
+        }
+    }
     store.put(
         provider.type_name(),
         &cred.username,
@@ -713,7 +879,8 @@ fn cmd_add(type_name: &str) -> Result<(), String> {
         &cred.token,
     )?;
     println!(
-        "propnix: added {} account '{}' → {}/{}/{}/{}",
+        "propnix: {} {} account '{}' → {}/{}/{}/{}",
+        if replacing { "replaced" } else { "added" },
         provider.display_name(),
         cred.username,
         store.root().display(),
@@ -753,6 +920,7 @@ fn cmd_verify(what: VerifyCmd) -> Result<(), Box<dyn std::error::Error>> {
                 steam_account: account,
                 progress: true,
             };
+            validate_accounts(&opts.credential_dir, opts.gog_account.as_deref(), opts.steam_account.as_deref())?;
             let rep = steam::verify_depot_any(app, depot, manifest, &branch, anonymous, &dir, &opts)?;
             println!(
                 "{} files, {} dirs, {} chunks checked",

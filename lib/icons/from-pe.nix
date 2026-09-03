@@ -8,7 +8,7 @@
 #
 # iconName is the reverse-DNS id (org.propnix.<appid>) so `Icon=<iconName>` in the .desktop resolves.
 {
-  runCommand,
+  runCommandLocal,
   icoutils,
 }:
 {
@@ -16,7 +16,7 @@
   exe, # executable holding the icon resource, relative to payload
   iconName, # freedesktop icon name, e.g. "org.propnix.hollow-knight"
 }:
-runCommand "propnix-icon-${iconName}"
+runCommandLocal "propnix-icon-${iconName}"
   {
     nativeBuildInputs = [ icoutils ];
     meta.description = "freedesktop hicolor icon theme extracted from ${exe}'s PE resources";

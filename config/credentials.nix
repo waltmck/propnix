@@ -34,35 +34,47 @@
 #       change WHAT is fetched.
 #     * The fetcher tries each stored GOG account until one OWNS the pinned build (transparent multi-account).
 #
-#   4. THREE access shapes, three mechanisms. Token files are group-owned mode 0640; store dirs are 0755
-#      (their names aren't secret, so a plain user can `cred list` without privilege). The parties:
-#          human write    the group on the DIRECTORIES. Under the NixOS module: `propnix`, dirs 2775
-#                         (group-writable + setgid) → `cred add`/`cred rm` need no sudo, and a new dir
-#                         inherits the group instead of being chowned.
-#          human read     the group on the token FILES. Under the module: `propnix-fetch` (the same humans;
-#                         0640 group bits). Write cannot hang off this group or a reader could rewrite the
-#                         store.
-#          builder read   a POSIX ACL `g:nixbld:r` on every token file, plus a DEFAULT entry on the account
-#                         dirs so a rewritten token inherits it. An ACL, not a group, for two reasons that
-#                         corner every group design: the modern Nix sandbox runs builds in a user namespace
-#                         that keeps ONLY the build user's primary gid (`nixbld`) and drops supplementary
-#                         groups — so no membership list reaches a builder — and an unprivileged owner may
-#                         `setfacl` any group in but can only `chgrp` into groups they belong to, while a
-#                         human must never join `nixbld` (nix would pick them to run builds as).
-#      `propnix cred` takes the FILE group from `PROPNIX_BUILD_GROUP` (module: `propnix-fetch`), the ACL
-#      group from `PROPNIX_SANDBOX_GROUP` (module: `nix.settings.build-users-group`, i.e. `nixbld`), and the
-#      DIR group by inheritance from the setgid parent — never the file group, which would hand builds the
-#      store. Off NixOS the file group collapses to `nixbld` and the ACL is skipped as redundant (the
-#      builder's primary gid reads through the plain 0640 group bits): dirs stay 0755 owner-only, the human
-#      reads as the file's owner, and store writes sudo-escalate as before.
+#   4. A token has EXACTLY TWO readers, and its plain permission bits name them both:
+#          owner  the human who created it — reads via the owner bits (what lets `propnix pin` run
+#                 without privilege).
+#          group  the BUILD-USERS group (`nixbld`; `PROPNIX_BUILD_GROUP` overrides) — reads via the group
+#                 bits (what lets a sandboxed fetch read it). Mode 0640; the account dir above is 2750, so
+#                 nobody else reads or traverses in.
+#      Plain group OWNERSHIP is load-bearing, not a style choice. A sandboxed builder runs in a user
+#      namespace that keeps only its single primary gid (`nixbld`): supplementary groups are dropped (a
+#      members-list group grants a build nothing), and — verified the hard way on ZFS — a POSIX ACL group
+#      entry is not honored for such a build either. The group bits are the one mechanism that reaches it.
+#      And since a human is not (and must never be — nix would run builds as them) a member of `nixbld`,
+#      the group arrives by SETGID INHERITANCE rather than chgrp: the TYPE dirs (`gog/`, `steam/`) are
+#      `root:nixbld` mode 3777 — setgid + sticky + world-writable, the /tmp model — so any human creates
+#      their account dir unprivileged and everything beneath inherits the build group. World-writability
+#      stops at the type-dir level, which holds no secrets (account-dir names only); the sticky bit keeps
+#      one user from removing another's account dir. Off NixOS the CLI bootstraps the same layout itself
+#      (the type-dir creation sudo-escalates once when the store root isn't writable).
+#
+#   4b. `<root>/cache` is a companion artifact cache, not a credential (Steam depot keys and manifest
+#      snapshots — pin/steamcache.rs): a fetch whose pin carries the trust anchors
+#      (`depotKeySha256`/`manifestSha256` on the row) completes from it with zero Steam logins.
+#      WRITE is open to everyone (world-writable, builders included) and NEVER privileged — a sandboxed
+#      FOD cannot sudo, so the cache is entirely self-managing: correctness never rests on it (every entry
+#      is hash-verified against the pin before use; stale, truncated, or arbitrarily wrong bytes from a
+#      malfunctioning builder read as a MISS that falls back to the login path). READ follows the token
+#      rule in spirit: entries are 0640, owned by their WRITER, group = the writer's — a depot key is an
+#      ownership-gated content-decryption key, so it is never world-readable. A build user's primary group
+#      IS `nixbld`, so build-written entries are shared by all builds unprivileged; a host pin's entries
+#      stay the human's (on a module store the setgid `cache/steam` dir lands even those in `nixbld`, so
+#      the pin→build handoff is cache-hot there too). The dir is deliberately NON-sticky: a build that
+#      meets an entry it cannot read replaces it with its own readable copy (self-heal — a host pin never
+#      clobbers, avoiding ping-pong), and each run prunes a depot's superseded manifests, so the cache
+#      holds ~1 manifest + 1 key per depot regardless of users, accounts, or update history.
 #
 #   5. Declared credentials are the config's, not the CLI's. The NixOS module records what it materializes in
 #      `<root>-declarative-credentials` (beside the store, never inside it — the bind carries auth only): one
 #      store-relative token path per line, world-readable. That manifest is the contract by which the module
 #      prunes a credential dropped from the config, and by which the CLI answers "is this declarative?" —
-#      `cred list` marks such an account `(declarative)` and `cred rm` refuses it, naming the option to edit.
-#      The module also keeps a declared account's dir root-owned 0755, so the unprivileged path cannot delete
-#      what activation would only restore.
+#      `cred list` marks such an account `(declarative)` and `cred rm` refuses it, naming the option to edit
+#      (and `cred add` over one is refused the same way). The module keeps a declared account's dir
+#      root-owned (2750), so the unprivileged CLI path cannot delete or overwrite what activation restores.
 #
 #      Those modes are hygiene, not a security boundary. `sandbox-paths` is GLOBAL: once the bind is
 #      configured, EVERY sandboxed build on the host sees `/propnix`, so anyone allowed to use the daemon can

@@ -27,15 +27,26 @@
     "Iron Lung_Data/Plugins/x86_64/Galaxy64.dll"
   ];
 
-  # De-Steam: this GOG build ALSO bundles real Steamworks (Iron Lung_Data/Plugins/x86_64/steam_api64.dll +
-  # steam_appid.txt=1846170) and calls SteamAPI_Init() at startup. Under wine+FEX that init DEADLOCKS the
-  # main thread (blocks in guest steam_api64 code right after the DLL's PROCESS_ATTACH, making no further
-  # wine calls — a low-CPU wait; a Steam worker thread aborts under FEX and never signals init-complete), so
-  # the game reaches its first scene but never presents its first frame (a white window forever). Disable the
-  # DLL via WINEDLLOVERRIDES ("" = don't load): the game's plugin loader then can't load Steamworks, Steam
-  # init fails cleanly, and the game falls back to the (stubbed) Galaxy / offline path and boots to its menu.
-  dllOverrides."steam_api64" = {
-    value = "";
-    reason = "disabled: SteamAPI_Init() deadlocks the main thread under wine+FEX (never presents first frame); this GOG build only needs Steam for stats, so disabling it lets the game boot offline.";
-  };
+  # Steamworks note — NO override shipped, but the diagnosis is worth keeping. This GOG build ALSO bundles
+  # real Steamworks (Iron Lung_Data/Plugins/x86_64/steam_api64.dll + steam_appid.txt=1846170) and calls
+  # SteamAPI_Init() at startup.
+  #
+  #   * Native wine (x86_64): the DLL MUST load. The game's SteamManager is the stock Steamworks.NET
+  #     template, whose DllNotFoundException handler calls Application.Quit() — with the DLL disabled the
+  #     game exits CLEANLY (status 0) a few frames after startup, right after Enlighten worker setup, which
+  #     presents as an instant silent crash (diagnosed on x86_64: Player.log shows the canonical
+  #     "[Steamworks.NET] Could not load [lib]steam_api.dll" + DllNotFoundException at SteamManager.Awake,
+  #     then the truncated log of a mid-frame exit). With the real DLL loading and no Steam client,
+  #     RestartAppIfNecessary() returns false and init fails SOFT ("[GalaxySteamWrapper] Authentication
+  #     failed." under the launcher's no-network namespace) — verified booting and staying up on x86_64.
+  #
+  #   * wine+FEX (aarch64): SteamAPI_Init() DEADLOCKS the main thread (blocks in guest steam_api64 code
+  #     right after the DLL's PROCESS_ATTACH, making no further wine calls — a low-CPU wait; a Steam worker
+  #     thread aborts under FEX and never signals init-complete), so the game never presents its first
+  #     frame (a white window forever). A WINEDLLOVERRIDES steam_api64="" workaround was tried and DID get
+  #     past the deadlock — but the game then dies anyway at first-scene/menu construction with the
+  #     worker-thread abort recorded in default.nix's `broken` (likely FEX on a 16K-page kernel, beyond
+  #     its design limits), so the override buys nothing and is not carried. If that abort is ever
+  #     resolved (FEX 16K-page support, or a 4K kernel) and aarch64 revisited, expect to need a FEX-scoped
+  #     disable of this DLL again (and only there — see the native-wine leg above).
 }

@@ -5,8 +5,8 @@
 #     needs free disk equal to the title — hundreds of GB for a modern AAA game, impossible on a CI runner.
 #
 # A Rust crate built with rustPlatform.buildRustPackage; deps vendored offline from Cargo.lock. One
-# sibling path-dep, propnix-steam-cred (the stored Steam credential's wire formats, shared with
-# propnix-launcher so the two readers of the store can never drift). Arch-independent (runs on both hosts).
+# sibling path-dep, propnix-steam-cred (the stored Steam credential's wire formats — kept as its own crate
+# so the tar/protobuf/JWT decoders are testable in isolation). Arch-independent (runs on both hosts).
 #
 # TLS. Two clients end up in the binary:
 #   * reqwest — Steam's CM control plane AND all bulk chunk traffic (pin/engine.rs) — resolves trust
@@ -26,7 +26,7 @@
   makeWrapper,
   depotdownloader,
   gnutar,
-  acl,
+
   cacert,
 }:
 let
@@ -71,20 +71,15 @@ rustPlatform.buildRustPackage {
   doCheck = true;
 
   nativeBuildInputs = [ makeWrapper ];
-  # The store contract's builder-read ACL is exercised by the tests (getfacl/setfacl).
-  nativeCheckInputs = [ acl ];
   # `propnix cred add steam` drives DepotDownloader (the interactive Steam Guard login) and `tar` (to capture
   # its account.config). It is ONLY used to obtain the token — the depot download itself is this crate's own
   # (pin/engine.rs). PIN it anyway: the .NET isolated-storage path is part of the on-disk layout that
   # `pin::steam::credentials_from_store` later reads back out of the stored tar, so a version bump that moved
   # that path would strand every credential already captured.
-  # `acl` (setfacl) is pinned for the same load-bearing reason: the unprivileged store write applies the
-  # builder-read ACL itself, and a host PATH without setfacl would strand every `cred add` on a module-managed
-  # store. (Under sudo it still resolves via secure_path, i.e. the host's setfacl — same as `install`.)
   # (`xdg-open`/`sudo`/`install`/`rm` stay unpinned host tools — see the header of the GOG login path.)
   postInstall = ''
     wrapProgram $out/bin/propnix \
-      --prefix PATH : ${lib.makeBinPath [ depotdownloader gnutar acl ]} \
+      --prefix PATH : ${lib.makeBinPath [ depotdownloader gnutar ]} \
       --run ${lib.escapeShellArg ''
         # Point reqwest's platform verifier at a CA bundle, but only when nothing real is configured.
         # `--set-default` is not enough: a Nix BUILD sandbox pre-sets SSL_CERT_FILE to the sentinel

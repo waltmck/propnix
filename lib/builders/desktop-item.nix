@@ -9,7 +9,7 @@
 {
   lib,
   makeDesktopItem,
-  runCommand,
+  runCommandLocal,
   symlinkJoin,
 }:
 {
@@ -38,7 +38,7 @@ let
   # Symbolic variant: `<id>-symbolic.svg` under scalable/apps, the freedesktop convention for symbolic
   # icons (GTK/GNOME pick it up in symbolic contexts).
   symbolicPkgs = lib.optional (iconSymbolic != null) (
-    runCommand "propnix-icon-symbolic-${appid}" { } ''
+    runCommandLocal "propnix-icon-symbolic-${appid}" { } ''
       install -Dm444 ${iconSymbolic} "$out/share/icons/hicolor/scalable/apps/${desktopId}-symbolic.svg"
     ''
   );

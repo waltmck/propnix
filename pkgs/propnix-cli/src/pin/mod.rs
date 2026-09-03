@@ -19,6 +19,7 @@ pub mod hosts;
 pub mod nar;
 pub mod retry;
 pub mod steam;
+pub mod steamcache;
 pub mod versions;
 
 use std::collections::BTreeMap;
@@ -57,14 +58,17 @@ pub(crate) fn try_accounts<C, T, E>(
     accounts: &[C],
     name: impl Fn(&C) -> String,
     is_not_owned: impl Fn(&E) -> bool,
-    exhausted: impl FnOnce(Vec<String>, String) -> E,
+    exhausted: impl FnOnce(Vec<String>, Vec<E>) -> E,
     mut attempt: impl FnMut(&C) -> Result<T, E>,
 ) -> Result<T, E>
 where
     E: std::fmt::Display,
 {
     let mut tried: Vec<String> = Vec::new();
-    let mut last = String::new();
+    // Every ownership-class refusal, kept (not just the last, and not just its text): the caller's
+    // `exhausted` needs the whole set to decide the aggregate CLASS — e.g. Steam must report a walk in
+    // which some account never LOGGED IN as inconclusive, not as a definitive "no account owns this".
+    let mut refusals: Vec<E> = Vec::new();
     for c in accounts {
         let n = name(c);
         tried.push(n.clone());
@@ -72,12 +76,12 @@ where
             Ok(v) => return Ok(v),
             Err(e) if is_not_owned(&e) => {
                 eprintln!("  account {n:?} cannot fetch this ({e}); trying the next");
-                last = e.to_string();
+                refusals.push(e);
             }
             Err(e) => return Err(e),
         }
     }
-    Err(exhausted(tried, last))
+    Err(exhausted(tried, refusals))
 }
 
 /// Which Steam branch a pin sits on: the explicit flag, else the row's own `branch`, else public.
@@ -511,6 +515,13 @@ pub fn emit(opts: &Opts) -> Result<String, Box<dyn std::error::Error>> {
         if let Some(d) = hashed.deps_build_id {
             fields.push(("depsBuildId".to_string(), d));
         }
+        // The Steam cache trust anchors travel WITH the hash they were computed alongside — a row
+        // whose outputHash moves gets matching anchors in the same batch, and a pre-anchor row gains
+        // them on its first re-pin (both keys are on the insert allowlist).
+        if let Some((key_sha, manifest_sha)) = hashed.anchors {
+            fields.push(("depotKeySha256".to_string(), key_sha));
+            fields.push(("manifestSha256".to_string(), manifest_sha));
+        }
         staged.push((c.loc.clone(), fields));
     }
 
@@ -542,6 +553,9 @@ fn previous_manifest(mode: Mode, pin: &Pin) -> Option<u64> {
 struct Hashed {
     sri: String,
     deps_build_id: Option<String>,
+    /// Steam cache trust anchors (depotKeySha256, manifestSha256) — recorded so the FOD that fetches
+    /// this pin can take the loginless cache path. None for the GOG stores.
+    anchors: Option<(String, String)>,
 }
 
 /// Identity of the CONTENT a pin resolves to — everything `hash_pin` would feed the hasher, and nothing
@@ -593,6 +607,7 @@ fn hash_pin(
                 Ok((sri, _, plan)) => Ok(Hashed {
                     sri,
                     deps_build_id: plan.deps_build_id,
+                    anchors: None,
                 }),
                 Err(e) => Err(classify(e, pin, game, dlc.is_some())),
             }
@@ -606,9 +621,10 @@ fn hash_pin(
             let branch = steam_branch(opts, pin);
             let previous = previous_manifest(opts.mode, pin);
             match steam::hash_depot_any(app, depot, manifest, previous, &branch, hopts) {
-                Ok((sri, _, _)) => Ok(Hashed {
+                Ok((sri, _, _, anchors)) => Ok(Hashed {
                     sri,
                     deps_build_id: None,
+                    anchors: Some((anchors.depot_key_sha256, anchors.manifest_sha256)),
                 }),
                 Err(e) => Err(classify(e, pin, game, pin.is_dlc())),
             }
@@ -634,11 +650,26 @@ fn hash_pin(
 /// mistaken for an ownership refusal.
 type Verdict = Option<Option<fn(String) -> Blocked>>;
 
+/// Is this error the exit-4 class — "a human must act" (no/stale credential, not owned, refused
+/// construct) — rather than a tool/transport failure? `pin` reports these pre-wrapped in [`Blocked`];
+/// every other subcommand surfaces the raw store error, so the exit-code mapping consults the same
+/// by-type classifier for both. Shared so `steam-probe`/`hash`/`download`/`verify` cannot disagree with
+/// `pin` about what a credential problem is.
+pub fn is_human_actionable(e: &(dyn std::error::Error + 'static)) -> bool {
+    if e.downcast_ref::<Blocked>().is_some() {
+        return true;
+    }
+    matches!(blocked_ctor(e), Some(Some(_)))
+}
+
 fn blocked_ctor(e: &(dyn std::error::Error + 'static)) -> Verdict {
     if let Some(g) = e.downcast_ref::<gog::GogError>() {
         return Some(match g {
             gog::GogError::NoCredential(_) => Some(Blocked::NoCredential),
             gog::GogError::NotOwned(_) => Some(Blocked::NotOwned),
+            // A rejected token needs a human to re-add a credential, same as Steam's LoginFailed — never a
+            // false "not owned".
+            gog::GogError::LoginFailed(_) => Some(Blocked::NoCredential),
             gog::GogError::Unsupported(_) => Some(Blocked::Refused),
             // Transport and parse failures are OUR problem, or the CDN's: a red run, so somebody looks.
             gog::GogError::Http(_) | gog::GogError::Parse(_) => None,
@@ -648,6 +679,10 @@ fn blocked_ctor(e: &(dyn std::error::Error + 'static)) -> Verdict {
         return Some(match s {
             steam::SteamError::NoCredential(_) => Some(Blocked::NoCredential),
             steam::SteamError::NotOwned(_) => Some(Blocked::NotOwned),
+            // A refused LOGIN needs a human either way: a stale token wants `cred add steam`, and the
+            // rate limiter (which reports throttling as invalid credentials) wants patience — a red
+            // run could only retry into the same wall.
+            steam::SteamError::LoginFailed(_) => Some(Blocked::NoCredential),
             steam::SteamError::Unsupported(_) => Some(Blocked::Refused),
             steam::SteamError::Http(_) | steam::SteamError::Parse(_) => None,
         });
@@ -720,10 +755,18 @@ fn classify(
     }
 }
 
-/// Every game directory in the repo, in a stable order.
+/// Every game directory in the repo, in a stable order. The error NAMES the path it tried — a bare
+/// "No such file or directory" from a `propnix games` run outside a repo checkout points at nothing.
 pub fn all_games(repo: &std::path::Path) -> std::io::Result<Vec<String>> {
+    let games = repo.join("pkgs/games");
+    let entries = std::fs::read_dir(&games).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("{}: {e} (run from a propnix checkout, or pass --repo)", games.display()),
+        )
+    })?;
     let mut out = Vec::new();
-    for e in std::fs::read_dir(repo.join("pkgs/games"))? {
+    for e in entries {
         let e = e?;
         if e.path().join("versions.json").exists() {
             out.push(e.file_name().to_string_lossy().into_owned());
@@ -872,7 +915,7 @@ pub fn scaffold(opts: &Opts, spec: &NewSpec) -> Result<String, Box<dyn std::erro
                     .clone()
                     .unwrap_or_else(|| default_platform(d.oslist.as_deref().unwrap_or("windows")));
                 eprintln!("  app {app} depot {depot} manifest {} ({plat})", d.gid);
-                let (sri, _, _) =
+                let (sri, _, _, anchors) =
                     steam::hash_depot_any(*app, *depot, manifest, None, &branch, &hopts)?;
                 let mut row = serde_json::json!({
                     "pname": format!("{}-{}", opts.game, depot),
@@ -884,6 +927,10 @@ pub fn scaffold(opts: &Opts, spec: &NewSpec) -> Result<String, Box<dyn std::erro
                     // until the pin next MOVES, and a `pin.version.steam` hold never moves.
                     "version": info.build_id,
                     "outputHash": sri,
+                    // The cache trust anchors (pin/steamcache.rs): with these on the row, the FOD can
+                    // fetch this pin without a single Steam login when the cache is warm.
+                    "depotKeySha256": anchors.depot_key_sha256,
+                    "manifestSha256": anchors.manifest_sha256,
                     "title": format!("{} ({}, Steam)", opts.game, d.oslist.as_deref().unwrap_or("?")),
                 });
                 // A public pin carries no `branch` key at all — absent IS public, and every existing
@@ -1094,6 +1141,10 @@ mod tests {
         assert_eq!(ck(Box::new(gog::GogError::Unsupported("x".into()))), Some("refused"));
         assert_eq!(ck(Box::new(steam::SteamError::NoCredential("x".into()))), Some("cred"));
         assert_eq!(ck(Box::new(steam::SteamError::Unsupported("x".into()))), Some("refused"));
+        // A refused/expired LOGIN is a credential problem for BOTH stores — never a false "not owned",
+        // which is how throttled walks once filed bogus ownership issues.
+        assert_eq!(ck(Box::new(steam::SteamError::LoginFailed("throttled".into()))), Some("cred"));
+        assert_eq!(ck(Box::new(gog::GogError::LoginFailed("rejected".into()))), Some("cred"));
         // A fetcher key this binary predates is a human/upgrade problem, not a tool bug.
         assert_eq!(
             ck(Box::new(versions::Error::UnknownFetcher("unknown fetcher \"epic\"".into()))),

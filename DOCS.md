@@ -52,10 +52,10 @@ knobs, how it runs, and credentials.
 - **An account that owns the title (GOG or Steam), and its token.** Payloads are fetched as
   content-addressed FODs pinned in `versions.json` — GOG Windows builds by Galaxy `buildId`, Steam builds by
   `(appId, depotId, manifestId)`. Add an account with `propnix cred add gog` / `propnix cred add steam`
-  (token stored in `/var/lib/propnix`, readable by the `propnix-fetch` group — `nixbld` off NixOS); the token is
-  **never** copied into the store or printed (download-only). Multiple accounts are supported — the fetcher
-  tries each until one owns the pinned content. See **Credentials** in the README. `--extra-sandbox-paths`
-  requires a **trusted Nix user**.
+  (token stored in `/var/lib/propnix`, mode 0640 and **group-owned by the build-users group** `nixbld`,
+  which is how a sandboxed fetch reads it); the token is **never** copied into the store or printed
+  (download-only). Multiple accounts are supported — the fetcher tries each until one owns the pinned
+  content. See **Credentials** in the README. `--extra-sandbox-paths` requires a **trusted Nix user**.
 - **Nix's classic build users (`auto-allocate-uids = false`).** The builder reads the token through group
   membership; an auto-allocated build runs as a per-build synthetic uid/gid that is in no host group (and its
   user namespace doesn't map root), so only a world-readable token would work — which propnix declines to
@@ -63,6 +63,23 @@ knobs, how it runs, and credentials.
 - **Build closure.** aarch64 builds the full emulator closure the first time (Hangover wine ~1 h, FEX
   DLLs, ARM64EC DXVK/vkd3d, llvm-mingw); pin nixpkgs to the flake's rev so these substitute rather than
   rebuild. x86_64 builds the same wine source natively (no FEX).
+
+### What the credential store looks like on disk
+
+`ls -la /var/lib/propnix` looks alarming on purpose, so here is the map before an audit flags it. The
+type-level dirs (`gog/`, `steam/`) are `3777 root:nixbld` — the `/tmp` model, setgid + sticky +
+world-writable — because any human must be able to `cred add` without privilege, while the token they
+create must come out **group-owned by the build-users group** (`nixbld`): a sandboxed builder keeps only
+that one primary gid (supplementary groups are dropped in its user namespace, and a POSIX ACL entry is
+ignored on ZFS), and a human must never *be* in `nixbld`, so the group can only arrive by setgid
+inheritance from the directory. World-writability stops at that level, which holds no secrets — only
+account-dir names, and the sticky bit keeps one user from removing another's. Below it every account dir
+is `2750 <owner>:nixbld` and every token `0640`, so a token has exactly two readers: the human who added
+it and the build sandbox. The `cache/` sibling (`0777`, its `cache/steam` leaf `2777`) holds no secrets
+by that standard either — Steam depot keys and manifest snapshots, each verified against a
+`versions.json` hash before use, so anything a local user or a malfunctioning builder scribbles there is
+just a cache miss. On NixOS the `propnix-credentials` unit re-converges the whole layout at every
+activation.
 
 ## Configuration — which store, which build
 
@@ -241,6 +258,12 @@ unauthenticated appinfo endpoint, and the credential-free alternative is an anon
 which is the fallback if that mirror ever goes away. What a bad mirror could do is bounded: the
 never-move-backwards guard rejects a rollback, and Steam itself issues the manifest request codes, so a
 fabricated manifest id simply fails to download.)
+
+Every `propnix` subcommand distinguishes "a human must act" from "the tool broke" in its **exit code**:
+`4` means a credential or ownership problem — no stored token, a stale/revoked login, an account that
+does not own the title, or a construct the tool refuses to guess at — while `1` is an unexpected failure
+(transport, parse, a bug). CI keys on `4` to open an issue instead of failing the run, and scripts can
+rely on the same distinction from every subcommand (`pin`, `hash`, `steam-probe`, `download`, `verify`).
 
 - **`.github/workflows/auto-update.yml`** (weekly, plus `workflow_dispatch`) builds and pushes the CLI to
   cachix, then substitutes it (`--max-jobs 0`, so it fails loudly rather than quietly recompiling) and runs

@@ -12,9 +12,9 @@
 #   6. creates the `propnix` group — its members manage the credential store, so `propnix cred add`/`rm`
 #      and `propnix pin` need no sudo at all. Members come from `allowedUsers` (default:
 #      {option}`nix.settings.allowed-users`) or from `users.users.<you>.extraGroups = [ "propnix" ]`.
-#      A second, derived group `propnix-fetch` holds those same humans and owns the token files; the
-#      sandboxed BUILDER reads them through a POSIX ACL naming the build-users group instead (a build can
-#      READ a credential, never write one). See the group comment below for why three mechanisms.
+#      Tokens themselves are group-owned by the BUILD-USERS group (`nixbld`) via setgid type dirs, which is
+#      how a sandboxed build can READ a credential while never being able to write one — see the group
+#      comment below for why plain group bits are the only mechanism that reaches a builder.
 #
 # ── Declarative credentials (sops-nix &c.) ──────────────────────────────────────────────────────────────
 # `propnix cred add gog` is imperative: it logs in once and drops a token in /var/lib/propnix. To keep the
@@ -29,15 +29,15 @@
 #   services.propnix.credentials.gog.alice.source = config.sops.secrets."propnix/gog/alice".path;
 #
 # `propnix-credentials.service` then copies that file to
-# `${credentialsPath}/gog/alice/galaxy_tokens.json` (`root:propnix-fetch`, 0640) and writes the non-secret
+# `${credentialsPath}/gog/alice/galaxy_tokens.json` (`root:nixbld`, 0640) and writes the non-secret
 # `credentials.toml` pointer. It COPIES rather than symlinks on purpose: sops-nix's `path` option
 # only creates a symlink into `/run/secrets.d/<generation>/`, and that target does not exist inside the Nix
 # build sandbox — the fetcher would see a dangling link. Anything decrypted to a readable path works the same
 # way (agenix, a hand-rolled unit, …); this module never knows which one you use.
 #
 # A declared credential belongs to the config, not to the CLI: `propnix cred list` marks it `(declarative)`
-# and `propnix cred rm` refuses it, pointing at the option to edit. Both read the manifest the service keeps
-# beside the store (see `managedList` below), which is also what prunes a credential you stop declaring.
+# and `propnix cred rm`/`cred add` refuse it, pointing at the option to edit. Both read the manifest the
+# materializer writes beside the store, which is also what it uses to prune a credential you stop declaring.
 #
 # The copy means the token is plaintext at rest wherever {option}`services.propnix.credentialsPath` points —
 # exactly as with `propnix cred add`. For a fully declarative host, set that path to `/run/propnix`: /run is
@@ -64,31 +64,31 @@ let
   # The store contract (layout, pointer body, per-type token filenames), shared with the CLI + fetchers.
   credLib = import ../config/credentials.nix;
 
-  # TWO groups plus an ACL, because three access shapes have to be separable — human write, human read, and
-  # builder read — and no single mechanism covers all of them:
+  # A token has EXACTLY TWO permitted readers, and its plain permission bits name them both:
   #
-  #   propnix        the humans. Owns the dirs (2775) → `propnix cred add`/`rm` need no sudo.
-  #   propnix-fetch  those same humans. Owns the token files (0640) → humans read, never write via files.
-  #   g:nixbld:r     a POSIX ACL on every token file (+ a DEFAULT entry on the account dirs, so rewrites
-  #                  inherit it) → the sandboxed BUILDER reads.
+  #   owner  = the human who created it  (reads via the owner bits — what lets `propnix pin` run unprivileged)
+  #   group  = the BUILD-USERS group     (reads via the group bits — what lets a sandboxed fetch read it)
+  #   mode 0640, and the account dir above it 2750, so nobody else reads or even traverses in.
   #
-  # The ACL exists because supplementary group membership NO LONGER REACHES a sandboxed builder: the modern
-  # Nix sandbox (observed on 2.34) runs builds in a user namespace that maps exactly one uid and one gid —
-  # the build user's own — and drops every supplementary group, so listing the build users in
-  # `propnix-fetch` grants a build nothing. (An earlier propnix relied on exactly that, citing the
-  # getgrouplist path in libstore's user-lock.cc — the mechanism still exists, but the userns sandbox never
-  # applies its result.) What a builder keeps is its PRIMARY gid — the build-users group — and an ACL naming
-  # that group is checked against it. It has to be an ACL rather than making `nixbld` the file group,
-  # because an unprivileged `cred add` can only chgrp into a group the human belongs to, and putting a human
-  # in `nixbld` would make them eligible to run builds as; an owner may `setfacl` any group in unprivileged.
+  # Why plain group OWNERSHIP and nothing fancier: a sandboxed builder runs in a user namespace that keeps
+  # only its single primary gid (`nixbld`) — supplementary groups are dropped (so a members-list group like
+  # the old `propnix-fetch` grants a build nothing), and, decisively on ZFS, the kernel does not honor a
+  # POSIX ACL group entry for such a build either (a short-lived ACL contract silently failed exactly
+  # there). Plain group-ownership bits are the one mechanism that reliably reaches the builder.
   #
-  # `propnix` is the one users touch (`users.users.<you>.extraGroups = [ "propnix" ]`); membership of
-  # `propnix-fetch` is derived from it below, so the two can't drift.
+  # Why a human can produce a group-`nixbld` file without sudo (humans are not, and must not be, members of
+  # `nixbld` — nix would pick them to run builds as): SETGID INHERITANCE. The TYPE dirs (`gog/`, `steam/`)
+  # are `root:nixbld` mode 3777 — setgid + sticky + world-writable, the /tmp model — so any human creates
+  # their account dir there unprivileged and it (and the token beneath) inherit group `nixbld` for free.
+  # World-writable is confined to the type-dir level, which holds no secrets (account-dir names only), and
+  # the sticky bit keeps one user from removing another's account dir.
+  #
+  # The `propnix` group survives with one job: managing the store ROOT (creating/removing whole type dirs,
+  # `cred rm` beside other users' accounts) without sudo.
   credGroup = "propnix";
-  fetchGroup = "propnix-fetch";
 
-  # The group whose PRIMARY membership sandboxed builders carry — the target of the builder-read ACL. The
-  # CLI is told via PROPNIX_SANDBOX_GROUP below, so the two writers of the store name the same group.
+  # The group whose PRIMARY membership sandboxed builders carry — the group every token must be OWNED by.
+  # The CLI is told via PROPNIX_BUILD_GROUP below, so the two writers of the store name the same group.
   buildUsersGroup = config.nix.settings.build-users-group or "nixbld";
 
   # The humans, resolved from `allowedUsers` using nix's own spelling for that kind of list: a bare name is a
@@ -103,8 +103,8 @@ let
           let
             g = lib.removePrefix "@" entry;
           in
-          # `@propnix`/`@propnix-fetch` would be this very list — skip rather than recurse.
-          if g == credGroup || g == fetchGroup then [ ] else config.users.groups.${g}.members or [ ]
+          # `@propnix` would be this very list — skip rather than recurse.
+          if g == credGroup then [ ] else config.users.groups.${g}.members or [ ]
         else
           [ entry ];
     in
@@ -125,19 +125,34 @@ let
     ) cfg.credentials
   );
 
-  # Store-relative paths this generation manages, one per line. Recorded as a manifest NEXT TO the credential
-  # dir — never inside it, because the store is bind-mounted into the build sandbox and must carry nothing
-  # but authentication. Comparing last generation's manifest against this one prunes a credential the config
-  # dropped, while never listing (and so never touching) a token `propnix cred add` created.
-  #
-  # It is also the CLI's answer to "is this account declarative?" (`CredStore::is_declarative`) — hence a
-  # world-readable file at a path derived from the store root, not a private detail of this unit.
-  managedList = pkgs.writeText "propnix-managed-credentials" (
-    lib.concatMapStrings (c: "${c.type}/${c.username}/${c.file}\n") credentials
-  );
+  # The declarative manifest lives NEXT TO the credential dir — never inside it, because the store is
+  # bind-mounted into the build sandbox and must carry nothing but authentication. The materializer writes
+  # it (one managed store-relative token path per line, world-readable) and uses last generation's copy to
+  # prune a credential the config dropped; it is also the CLI's answer to "is this account declarative?"
+  # (`CredStore::is_declarative`). Only its PATH is needed here; the contents are derived in the materializer.
   manifestPath = "${lib.removeSuffix "/" cfg.credentialsPath}-declarative-credentials";
 
-  pointerFile = pkgs.writeText "propnix-credentials.toml" credLib.mkCredentialsToml;
+  # The activation config for `propnix cred materialize` (the Rust materializer that replaced this unit's
+  # former inline shell — pkgs/propnix-cli/src/cred/materialize.rs). It carries everything the store
+  # assembly + prune + convergence needs, so the unit itself is a one-line exec. `owner_uid = 0`: the unit
+  # runs as root and stamps declared tokens root-owned. Group NAMES (not gids) — the materializer resolves
+  # them at activation, when the groups certainly exist. `types` seeds the convergence sweep; it unions the
+  # declared types itself, so a custom `tokenFile` type is still converged.
+  materializeConfig = pkgs.writeText "propnix-cred-materialize.json" (
+    builtins.toJSON {
+      root = cfg.credentialsPath;
+      owner_uid = 0;
+      root_group = credGroup;
+      build_group = buildUsersGroup;
+      meta_group = "root";
+      pointer_body = credLib.mkCredentialsToml;
+      manifest_path = manifestPath;
+      types = lib.attrNames credLib.tokenFilenames;
+      credentials = map (c: {
+        inherit (c) type username file source;
+      }) credentials;
+    }
+  );
 in
 {
   options.services.propnix = {
@@ -164,10 +179,10 @@ in
         Host directory holding the propnix credential store — the `credentials.toml` pointer plus the
         per-account tokens under `<type>/<username>/` (populated by `propnix cred add <type>`). When
         {option}`services.propnix.enable` is set, this is bound into the Nix build sandbox as `/propnix`
-        via {option}`nix.settings.extra-sandbox-paths`, so credentialed fetches can read it. Token files are
-        group-owned by `propnix-fetch` (mode 0640) for the human readers from
-        {option}`services.propnix.allowedUsers`, plus a POSIX ACL granting the nix build group read — which
-        is how the sandboxed fetch reads them. Never copied into the Nix store.
+        via {option}`nix.settings.extra-sandbox-paths`, so credentialed fetches can read it. A token file is
+        readable by exactly two parties: its owner (the human who added it — how `propnix pin` reads it)
+        and the nix build group that OWNS it (mode 0640 — how the sandboxed fetch reads it). Never copied
+        into the Nix store.
 
         The bare directory is created by {option}`systemd.tmpfiles.rules`, which runs in `sysinit.target`
         — BEFORE `nix-daemon.socket` — so the sandbox bind can never dangle. That ordering is the whole
@@ -176,8 +191,8 @@ in
         window at every boot (and, on a tmpfs path like `/run/propnix`, at every boot without fail) in
         which EVERY sandboxed build on the host breaks. `propnix-credentials.service` then materializes
         the contents. Either way it ends up `root:propnix` mode 2775: group-writable, so that
-        `propnix cred add`/`rm` need no sudo, and setgid, which is how the CLI recognises a store under
-        group management. With every credential declared via {option}`services.propnix.credentials`, set
+        `propnix cred add`/`rm` need no sudo, and setgid, so anything a member creates at the root level
+        keeps the managing group. With every credential declared via {option}`services.propnix.credentials`, set
         this to `/run/propnix`: /run is a tmpfs, so the store is rebuilt from the encrypted sources at
         each boot and no token is ever written to disk.
       '';
@@ -192,10 +207,11 @@ in
         "@wheel"
       ];
       description = ''
-        Users who may MANAGE the credential store. They go in the `propnix` group, which owns the store
-        directories, and in the derived `propnix-fetch`, which owns the token files — so a member can run
-        `propnix cred add`, `propnix cred rm` and `propnix pin` with no sudo anywhere. Building a game needs
-        no membership at all (the sandboxed fetcher gets read access of its own).
+        Users who may MANAGE the credential store beyond their own accounts. Adding one's own credential
+        needs NO membership at all (the type dirs are world-writable-with-sticky, /tmp-style, and `propnix
+        pin` reads one's own tokens as their owner); the `propnix` group additionally owns the store root,
+        so a member can remove other users' accounts or add a new backend type dir without sudo. Building a
+        game needs no membership either (the sandboxed fetcher reads tokens via its build group).
 
         Written like nix's user lists, and defaulting to {option}`nix.settings.allowed-users` because that
         is already the real boundary: the credential dir is bound into EVERY sandboxed build on this host
@@ -265,9 +281,10 @@ in
         {option}`source` — a runtime path to the decrypted file — is named here. Add
         `restartUnits = [ "propnix-credentials.service" ]` to the secret so rotating it re-copies.
 
-        Tokens are installed `root:propnix-fetch` mode 0640 plus a POSIX ACL granting the nix build group
-        read, so the humans who can read one are {option}`services.propnix.allowedUsers` and the sandboxed
-        fetch reads through the ACL.
+        Tokens are installed `root:<build group>` mode 0640: the sandboxed fetch reads them via the group
+        bits, and no human reads them directly at all — a declared token belongs to the configuration, so
+        `propnix pin` on a declarative-only host runs under sudo (root reads anything) or alongside an
+        imperative account of one's own.
 
         Declarative and imperative credentials coexist: this only ever writes the accounts listed here, and
         prunes one when you remove it, so tokens added with `propnix cred add` are left alone. In the other
@@ -323,21 +340,30 @@ in
           plain =
             what: v:
             let
-              bad = lib.hasInfix "/" v || lib.hasInfix ".." v || lib.hasInfix "\n" v || v == "";
+              bad = lib.hasInfix "/" v || lib.hasInfix ".." v || lib.hasInfix "\n" v || v == "" || v == ".";
             in
             {
               assertion = !bad;
               message =
                 "services.propnix.credentials.${c.type}.${c.username}: ${what} must be a plain path "
-                + "component (got '${v}'): no '/', no '..', no newline, not empty. It becomes one level "
-                + "of <credentialsPath>/<type>/<username>/<token file> and is recorded verbatim, one per "
-                + "line, in the declarative-credentials manifest.";
+                + "component (got '${v}'): no '/', no '..', no '.', no newline, not empty. It becomes one "
+                + "level of <credentialsPath>/<type>/<username>/<token file> and is recorded verbatim, one "
+                + "per line, in the declarative-credentials manifest.";
             };
         in
         [
           (plain "the account type" c.type)
           (plain "the username" c.username)
           (plain "tokenFile" c.file)
+          {
+            # `cache/` is the artifact-cache sibling with its own (world-writable, non-secret) contract;
+            # a credential "type" of that name would re-stamp it to the token contract and hide the
+            # account from `cred list`. The materializer refuses it too; catch it at eval time.
+            assertion = c.type != "cache";
+            message =
+              "services.propnix.credentials.cache.${c.username}: 'cache' is the artifact cache beside "
+              + "the credential store, not a credential type.";
+          }
         ]
       ) credentials;
 
@@ -345,18 +371,12 @@ in
     # `extraGroups`, so a hand-added user is not displaced.
     users.groups.${credGroup}.members = credentialUsers;
 
-    # May-read-a-credential (humans): whoever ended up in `propnix` by either route. Derived from the group
-    # above rather than from `allowedUsers`, so a user hand-added with `extraGroups` gets read access too
-    # instead of write-without-read. The BUILD users are deliberately absent — their read rides the
-    # `g:${buildUsersGroup}:r` ACL (see the group comment above); listing them here would grant nothing.
-    users.groups.${fetchGroup}.members = config.users.groups.${credGroup}.members;
-
     warnings = lib.optional (config.nix.settings.auto-allocate-uids or false) ''
       services.propnix: nix `auto-allocate-uids` runs each build as a per-build synthetic uid/gid that
-      belongs to no host user or group, so neither group membership nor the builder-read ACL (which names
-      the `${buildUsersGroup}` group) can reach the builder. A bound-in token would have to be
-      world-readable for a credentialed fetch (the GOG/Steam payloads) to read it, which propnix does not
-      do. Turn `auto-allocate-uids` off on a host that builds propnix game packages.
+      belongs to no host group, so a token group-owned by `${buildUsersGroup}` is unreadable to the
+      builder. A bound-in token would have to be world-readable for a credentialed fetch (the GOG/Steam
+      payloads) to read it, which propnix does not do. Turn `auto-allocate-uids` off on a host that
+      builds propnix game packages.
     '';
 
     # `propnix cred add gog` etc. — the tool that populates the credential dir bound in below.
@@ -367,12 +387,9 @@ in
     # the unprivileged CLI process before it sudo-escalates the store write, so a session variable lands.)
     environment.sessionVariables = {
       PROPNIX_CRED_DIR = cfg.credentialsPath;
-      # The group for token FILES. The CLI takes the dirs' group by inheritance instead (the store root is
-      # setgid `propnix`), which is what keeps a `cred add` from ever group-writing to the read group.
-      PROPNIX_BUILD_GROUP = fetchGroup;
-      # The group the builder-read ACL names — the build users' PRIMARY group, the one thing the userns
-      # sandbox leaves a builder. Exported so the CLI's ACL and this module's convergence can't disagree.
-      PROPNIX_SANDBOX_GROUP = buildUsersGroup;
+      # The group every token must be OWNED by — the build users' PRIMARY group, the one identity a
+      # user-namespaced builder keeps. Exported so the CLI and this module's convergence can't disagree.
+      PROPNIX_BUILD_GROUP = buildUsersGroup;
     };
 
     # The sandbox bind target, created EARLY. `extra-sandbox-paths` names this path unconditionally, and
@@ -381,112 +398,55 @@ in
     # the host breaks, and with the recommended tmpfs `/run/propnix` that window is EVERY boot.
     # systemd-tmpfiles-setup runs in sysinit.target, well before nix-daemon.socket. The unit below then
     # brings the same directory to policy and fills it; both agree on root:propnix 2775.
-    systemd.tmpfiles.rules = [ "d ${cfg.credentialsPath} 2775 root ${credGroup} -" ];
+    #
+    # `cache/` is the ARTIFACT CACHE beside the credential dirs (pin/steamcache.rs). WRITE side: open to
+    # everyone (`cache` is 0777, world-writable and NON-sticky), builders included — the point being that a
+    # fetch holding the pin's trust anchors runs with NO Steam login. World-WRITE is safe because nothing in
+    # it is trusted: every entry is verified against a versions.json hash before use, and any mismatch —
+    # including whatever a malfunctioning builder scribbles — is just a cache miss. READ side: the leaf
+    # `cache/steam` is setgid `${buildUsersGroup}` and NON-sticky (2777) — setgid so even a host-side pin's
+    # entries land in the build group (cache-hot pin→build handoff), non-sticky so a build can replace an
+    # entry it can't read and `supersede` can prune old manifests regardless of who wrote them. Its entries
+    # are 0640, so a cached depot key (an ownership-gated content key) is readable only by its creator and
+    # the build sandbox — the same two readers a token has — never world-readable.
+    #
+    # The TYPE dirs are pre-created per the token contract (see the group comment above): setgid
+    # `${buildUsersGroup}` + sticky + world-writable, so a human's `cred add` needs no privilege and the
+    # token inherits the build group. One rule per known backend, straight from the shared contract table.
+    systemd.tmpfiles.rules = [
+      "d ${cfg.credentialsPath} 2775 root ${credGroup} -"
+      "d ${cfg.credentialsPath}/cache 0777 root root -"
+      # setgid so even a host-side pin's entries land in the build group (cache-hot pin→build handoff);
+      # NON-sticky (2777, not 3777) so a build can replace an entry it can't read and `supersede` can
+      # prune old manifests regardless of which build user wrote them — the cache is regenerable and
+      # anchor-verified, so it needs no sticky deletion-guard.
+      "d ${cfg.credentialsPath}/cache/steam 2777 root ${buildUsersGroup} -"
+    ]
+    ++ map (t: "d ${cfg.credentialsPath}/${t} 3777 root ${buildUsersGroup} -") (
+      lib.attrNames credLib.tokenFilenames
+    );
 
-    # Materialize the credential store: the non-secret pointer always, plus a copy of every declared token.
+    # Materialize the credential store: assemble the pointer + declared tokens, prune what a previous
+    # generation declared and this one doesn't, and converge the whole store onto the group-ownership
+    # contract. This was a long inline shell script; it is now `propnix cred materialize` (Rust —
+    # pkgs/propnix-cli/src/cred/materialize.rs), because the store's type dirs are WORLD-WRITABLE and the
+    # convergence has to re-own/re-mode entries beneath them without ever following a symlink some other
+    # user planted there. Shell `chmod` always dereferences and has no per-fd form, leaving a check-then-
+    # chmod race the script could not close; the Rust version opens every entry with `O_NOFOLLOW` and
+    # mutates the resulting descriptor (`fchmod`/`fchown`/`fremovexattr`), so a swapped-in symlink either
+    # fails the `openat` or is simply not what the `fchmod` acts on. All the policy (modes, groups, owner)
+    # lives in the JSON config rendered above.
     systemd.services.propnix-credentials = {
       description = "Materialize the propnix credential store";
       wantedBy = [ "multi-user.target" ];
       # sops-nix decrypts during activation (before units start) and, in setups that use it, from this unit;
       # ordering against a unit that doesn't exist is a no-op, so this covers both without a dependency.
       after = [ "sops-install-secrets.service" ];
-      path = [
-        pkgs.coreutils
-        pkgs.gnugrep
-        pkgs.acl
-      ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
+        ExecStart = "${lib.getExe cfg.package} cred materialize ${materializeConfig}";
       };
-      script = ''
-        root=${lib.escapeShellArg cfg.credentialsPath}
-        rc=0
-
-        # The store root, created if absent and otherwise brought to policy: this unit running at all means
-        # the module manages the store, so a root first made by `propnix cred add` (owned by whoever ran it,
-        # group `nixbld` before this module existed) converges here. 2775 = group-writable by `propnix`, so a
-        # member adds/removes a credential without sudo, and setgid so what they create keeps that group —
-        # which is also the flag `propnix cred` reads to know the store is under group management.
-        install -d -m 2775 -o root -g ${credGroup} "$root"
-
-        # The fetcher pointer. Names the in-sandbox root (/propnix); holds no secret.
-        install -m 0644 -o root -g ${fetchGroup} ${pointerFile} "$root/credentials.toml"
-
-        # Copy one decrypted token into the store, readable by the propnix-fetch group and nobody else. A
-        # failure is reported and skipped rather than fatal, so a single missing/unreadable secret can't
-        # strand every other account. `[ -e ]` follows symlinks, which is what catches a sops secret whose
-        # generation dir is gone.
-        #
-        # The type dir matches the root (2775 `propnix`) so imperative accounts can still be added beside a
-        # declared one, but the ACCOUNT dir is deliberately root-owned and NOT group-writable: a declared
-        # credential belongs to the config, so `propnix cred rm` refuses it (it reads the manifest, and could
-        # not unlink the token anyway) rather than deleting something the next activation restores.
-        install_cred() { # <type> <username> <token file> <source>
-          local type=$1 user=$2 file=$3 src=$4
-          if [ ! -e "$src" ]; then
-            echo "propnix: $type/$user: credential source $src does not exist — skipped" >&2
-            rc=1
-            return
-          fi
-          if install -d -m 2775 -o root -g ${credGroup} "$root/$type" \
-            && install -d -m 0755 -o root -g ${credGroup} "$root/$type/$user" \
-            && install -m 0640 -o root -g ${fetchGroup} "$src" "$root/$type/$user/$file" \
-            && setfacl -m g:${buildUsersGroup}:r "$root/$type/$user/$file"; then
-            return
-          fi
-          echo "propnix: $type/$user: failed to install credential from $src" >&2
-          rc=1
-        }
-
-        ${lib.concatMapStrings (
-          c:
-          "install_cred ${
-            lib.escapeShellArgs [
-              c.type
-              c.username
-              c.file
-              c.source
-            ]
-          }\n"
-        ) credentials}
-
-        # Prune credentials a previous generation declared and this one doesn't. Only paths from our own
-        # manifest are considered, so an imperatively added token is never a candidate.
-        manifest=${lib.escapeShellArg manifestPath}
-        if [ -f "$manifest" ]; then
-          while IFS= read -r rel; do
-            [ -n "$rel" ] || continue
-            if ! grep -Fxq -- "$rel" ${managedList}; then
-              rm -f -- "$root/$rel"
-              # Tidy the now-possibly-empty <type>/<username>/ and <type>/ dirs; a non-empty one just fails.
-              rmdir -- "$root/$(dirname "$rel")" 2>/dev/null || true
-              rmdir -- "$root/$(dirname "$(dirname "$rel")")" 2>/dev/null || true
-            fi
-          done < "$manifest"
-        fi
-        install -D -m 0644 -o root -g root ${managedList} "$manifest"
-
-        # Converge builder-read ACLs across the WHOLE store — declared and imperative tokens alike. This is
-        # the in-place repair for stores written before the ACL leg of the contract existed (the sandbox
-        # dropped supplementary groups out from under the old propnix-fetch mechanism, leaving those tokens
-        # unreadable by fetches); idempotent afterwards. Dirs carry the DEFAULT entry so anything written
-        # into them later inherits the grant. Secrecy discipline: no token path is ever printed — a failure
-        # names only the store root.
-        acl_fail() { echo "propnix: setfacl failed under $root (no POSIX ACL support on this filesystem?)" >&2; rc=1; }
-        shopt -s nullglob
-        for d in "$root"/*/ "$root"/*/*/; do
-          setfacl -d -m g:${buildUsersGroup}:r "$d" || acl_fail
-        done
-        for f in "$root"/*/*/*; do
-          if [ -f "$f" ]; then
-            setfacl -m g:${buildUsersGroup}:r "$f" || acl_fail
-          fi
-        done
-        shopt -u nullglob
-
-        exit $rc
-      '';
     };
 
     # Expose the credential dir inside the build sandbox at the fixed guest path propnix fetchers expect.

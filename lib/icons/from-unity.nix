@@ -7,14 +7,14 @@
 # iconName is the reverse-DNS id (org.propnix.<appid>) so `Icon=<iconName>` in the .desktop resolves.
 {
   lib,
-  runCommand,
+  runCommandLocal,
   imagemagick,
 }:
 {
   payloads, # the game-tree derivations (thin overlay lowers); UnityPlayer.png is searched across them
   iconName, # freedesktop icon name, e.g. "org.propnix.hollow-knight"
 }:
-runCommand "propnix-icon-${iconName}"
+runCommandLocal "propnix-icon-${iconName}"
   {
     nativeBuildInputs = [ imagemagick ];
     meta.description = "freedesktop hicolor icon theme + splash png extracted from a Unity Linux build's UnityPlayer.png";

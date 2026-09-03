@@ -28,12 +28,17 @@ mkApp (
     # Primary task from goggame-1310178756.info (isPrimary FileTask), x86_64 PE — the real Unity player, not a
     # launcher stub. Full-color icon auto-extracted from its PE resources (icon.auto default).
     exe = "Iron Lung.exe";
-    # BROKEN on aarch64 (wine+FEX): with the tuning below (writable-Managed mscorlib seed + steam_api64 disabled
-    # + Galaxy stub) Unity Mono inits and DXVK presents its first frame, but at first-scene/menu construction a
-    # worker thread dies with a FEX codegen ABORT (KSP-class FEX-2607 bug) — independent of graphics/d3d/stack
-    # levers. Needs an upstream FEX fix; native x86_64 wine is unaffected, so only BUILDING on aarch64 is refused.
+    # BROKEN on aarch64 (wine+FEX), two independent blockers deep: SteamAPI_Init() deadlocks the main
+    # thread at startup (see the Steamworks note in wine-tuning.nix), and when that was worked around by
+    # disabling steam_api64, first-scene/menu construction still killed a worker thread with an abort
+    # under FEX — independent of graphics/d3d/stack levers. Not necessarily a FEX defect: this host runs
+    # a 16K-page kernel, which FEX does not support — we are pushing it beyond its design limits. (The
+    # crash resembles KSP's, but a shared cause is UNVERIFIED — KSP has since shown the same crash
+    # behavior on native x86_64, so its abort may not be FEX-related at all; see TODO.md.) The
+    # steam_api64 workaround is not carried (it buys nothing while the abort stands); native x86_64 wine
+    # is unaffected, so only BUILDING on aarch64 is refused.
     broken.systems = [ "aarch64-linux" ];
-    broken.reason = "Unity Mono first-scene/menu build hits a FEX codegen abort after the first swapchain present (KSP-class FEX-2607 bug); mscorlib/steam/galaxy tuning gets it to present a frame but it never renders a menu. Needs an upstream FEX fix. Runs on native x86_64.";
+    broken.reason = "wine+FEX cannot reach gameplay: SteamAPI_Init() deadlocks at startup, and even with steam_api64 disabled a worker-thread abort under FEX (likely 16K pages, beyond FEX's design limits) kills first-scene/menu construction. Runs on native x86_64.";
 
     # Save: Iron Lung is a Unity title, so persistent data (settings + Player.log) go to Unity's LocalLow
     # persistentDataPath HKCU\...\AppData\LocalLow\<company>\<product>. Company/product confirmed from the
@@ -48,7 +53,9 @@ mkApp (
     ];
 
     # function-tuning: wine-tuning.nix is a FUNCTION of `payload` (the Managed-assemblies seed references
-    # the payload's store path directly), applied here to the payload store path.
-    wine = (import ./wine-tuning.nix) { payload = lib.head config.payloads; };
+    # the payload's store path directly), applied here to the resolved config.
+    wine = (import ./wine-tuning.nix) {
+      payload = lib.head config.payloads;
+    };
   }
 )

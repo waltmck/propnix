@@ -26,9 +26,6 @@ libc = "0.2"
 # runs on a detached thread. Path deps in a Cargo workspace (see ../Cargo.toml).
 propnix-mount = { path = "../propnix-mount" }
 propnix-prefetch = { path = "../propnix-prefetch" }
-# The stored Steam credential's wire formats (shared with propnix-cli): steamid.rs reads the account's
-# SteamID64 out of the credential store to seat the gbe_fork offline-entitlement identity.
-propnix-steam-cred = { path = "../propnix-steam-cred" }
 x11rb = "0.13"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }

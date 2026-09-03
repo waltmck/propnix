@@ -107,9 +107,12 @@ pub struct Config {
     /// the launch: a setup failure means a packaging bug or a would-be-corrupted prefix, which must surface.
     #[serde(rename = "setupScript", default)]
     pub setup_script: Option<String>,
-    /// Whether this build carries the gbe_fork offline Steam-entitlement shim (steam.emu.enable). When set,
-    /// the launcher seats the stored Steam account's SteamID64 into the shim's global settings inside the
-    /// per-launch view (see steamid.rs) — gated so a GOG game's launch never touches the credential store.
+    /// Whether this build carries the gbe_fork offline Steam-entitlement shim (steam.emu.enable).
+    /// Currently informational: the shim manages its own identity, and the launcher no longer seats a
+    /// stored SteamID64 into it (that seeding read the credential store as the launching human — which the
+    /// group-ownership contract does not permit on declarative/shared hosts — and never delivered the
+    /// stable identity it was added for). Kept so baked configs stay stable and the shim's presence
+    /// remains visible to future consumers.
     #[serde(rename = "steamEmu", default)]
     pub steam_emu: bool,
     /// The baked GL/Vulkan fallback stack (see `FallbackGl`); optional so a pre-existing baked config loads.
@@ -431,9 +434,12 @@ pub struct ThinConfig {
     /// XDG_DATA_DIRS (the Vulkan implicit layer). See thin.rs.
     #[serde(default)]
     pub mangohud: Option<String>,
-    /// Whether this build carries the gbe_fork offline Steam-entitlement shim (steam.emu.enable). When set,
-    /// the launcher seats the stored Steam account's SteamID64 into the shim's global settings inside the
-    /// per-launch view (see steamid.rs) — gated so a GOG game's launch never touches the credential store.
+    /// Whether this build carries the gbe_fork offline Steam-entitlement shim (steam.emu.enable).
+    /// Currently informational: the shim manages its own identity, and the launcher no longer seats a
+    /// stored SteamID64 into it (that seeding read the credential store as the launching human — which the
+    /// group-ownership contract does not permit on declarative/shared hosts — and never delivered the
+    /// stable identity it was added for). Kept so baked configs stay stable and the shim's presence
+    /// remains visible to future consumers.
     #[serde(rename = "steamEmu", default)]
     pub steam_emu: bool,
     /// The baked GL/Vulkan fallback stack (see `FallbackGl`); optional so a pre-existing baked config loads.

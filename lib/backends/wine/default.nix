@@ -63,7 +63,7 @@
       resolvedConfig = cfg.wine; # pre-resolved tuning (defaults layer + game + `.apply`, merged by evalModules)
       dlc = cfg.dlc.available;
       inherit enabledDlc;
-      # gbe_fork wired in (modules/steam-emu.nix) → the launcher seats the stored account's SteamID64.
+      # gbe_fork wired in (modules/steam-emu.nix); informational for the launcher.
       steamEmu = cfg.steam.emu.enable;
       # The GL/Vulkan userspace of last resort — on wine it feeds winevulkan/DXVK (VK_DRIVER_FILES),
       # wined3d-GL (GLX/EGL vendor) and winewayland's gbm buffers. See builders/gl-fallback.nix.

@@ -65,8 +65,15 @@ pub enum SteamError {
     /// No usable Steam credential in the store at all — its own variant, not a `NotOwned` substring,
     /// because the exit-code classifier reads the TYPE and the two need different instructions.
     NoCredential(String),
-    /// The account does not own this depot, or the credential was rejected. NOT a failure: no-op.
+    /// The account does not own this depot — a REAL answer from a healthy session (depot-key eresult,
+    /// missing request code). NOT a failure: the multi-account walkers advance on it.
     NotOwned(String),
+    /// The LOGIN itself was refused (bad/expired token, or Steam's logon rate limiter — which reports
+    /// throttling as "invalid credentials"). Distinct from `NotOwned` because it says nothing about
+    /// ownership: the account walkers still advance on it (a dead account must not strand the others),
+    /// but `probe_depots` must NOT record it as "unowned" — that conflation is how a throttled probe
+    /// run once misclassified 19 depots.
+    LoginFailed(String),
     /// A construct we refuse to guess at rather than emit a possibly-wrong hash.
     Unsupported(String),
     Http(String),
@@ -78,6 +85,7 @@ impl std::fmt::Display for SteamError {
         match self {
             SteamError::NoCredential(m) => write!(f, "{m}"),
             SteamError::NotOwned(m) => write!(f, "not available to this Steam account: {m}"),
+            SteamError::LoginFailed(m) => write!(f, "Steam login failed: {m}"),
             SteamError::Unsupported(m) => write!(f, "refusing to hash: {m}"),
             SteamError::Http(m) => write!(f, "Steam request failed: {m}"),
             SteamError::Parse(m) => write!(f, "unexpected Steam response: {m}"),
@@ -128,11 +136,9 @@ pub struct Credential {
 }
 
 /// Read (account, refresh token) pairs out of every stored credential tar. The wire-format decoding
-/// (tar → account.config → protobuf-net `LoginTokens` → JWT filter) lives in the shared
-/// `propnix-steam-cred` crate: the launcher reads the SAME store for the gbe_fork offline-entitlement
-/// identity, and two hand-kept copies of an undocumented format would drift. What stays here is POLICY —
-/// the sudo-escalated permission repair, the expiry check, the `--steam-account` narrowing, and the
-/// error taxonomy.
+/// (tar → account.config → protobuf-net `LoginTokens` → JWT filter) lives in the `propnix-steam-cred`
+/// crate — kept separate so that undocumented format is testable on its own. What stays here is POLICY —
+/// the expiry check, the `--steam-account` narrowing, and the error taxonomy.
 ///
 /// A LIST, not a single credential, because a propnix host may hold several Steam accounts and only one
 /// of them owns a given depot — the caller tries each in turn, exactly as `fetchSteamDepot` does.
@@ -154,22 +160,29 @@ pub fn credentials_from_store(
 
     let mut all: BTreeMap<String, String> = BTreeMap::new();
     for t in &tars {
+        // SKIP a token we cannot USE, never fail the whole set on one bad account. Two kinds of unusable:
+        //   * unreadable — another user's (0640, owned by them): `store_tars` enumerates every account on
+        //     a shared host, but a human's own credentials stay private, and it is never OURS (we read our
+        //     own via the owner bits). Never "repair" it — that would chown a stranger's token to us.
+        //   * corrupt — openable but the inner account.config is truncated/uninflatable (e.g. a token left
+        //     partial by an interrupted `cred add` on an OLD propnix without the atomic write).
+        // Either way, warn and try the next; a healthy account must not be stranded by a broken sibling.
+        // If EVERY account fails, the empty-check below reports it.
         let f = match std::fs::File::open(t) {
             Ok(f) => f,
-            // A token from before some part of the store contract (root-owned, or group-only from before
-            // the builder-read ACL): converge it (one-off, sudo-escalated chown+setfacl) and retry.
-            // Inside a build sandbox the repair instead returns the host-side fix verbatim.
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                crate::cred::store::repair_unreadable_token(cred_dir, t)
-                    .map_err(SteamError::NoCredential)?;
-                std::fs::File::open(t).map_err(|e| SteamError::Parse(format!("{}: {e}", t.display())))?
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => continue,
+            Err(e) => {
+                eprintln!("propnix: skipping unreadable Steam credential {}: {e}", t.display());
+                continue;
             }
-            Err(e) => return Err(SteamError::Parse(format!("{}: {e}", t.display()))),
         };
-        all.extend(
-            propnix_steam_cred::login_tokens_in_tar(f)
-                .map_err(|e| SteamError::Parse(format!("{}: {e}", t.display())))?,
-        );
+        match propnix_steam_cred::login_tokens_in_tar(f) {
+            Ok(tokens) => all.extend(tokens),
+            Err(e) => {
+                eprintln!("propnix: skipping malformed Steam credential {}: {e}", t.display());
+                continue;
+            }
+        }
     }
 
     // BTreeMap: sorted by account name, so the try-all order is deterministic.
@@ -217,11 +230,24 @@ pub fn credentials_from_store(
         });
     }
     if out.is_empty() {
-        return Err(SteamError::NotOwned(format!(
-            "every stored Steam refresh token has expired ({}) — re-run `propnix cred add steam` \
-             (and re-set the CI secret from the new tar)",
-            expired.join(", ")
-        )));
+        // (Reachable only with expired non-empty: an empty store and an unknown --steam-account both
+        // errored above, so everything the filter admitted was expired.)
+        // A credential-class failure, NOT ownership: an expired token says nothing about who owns what,
+        // so it must classify as "add a credential" (LoginFailed → Blocked::NoCredential), never a false
+        // "no account owns this". Word it for what was actually examined: with `--steam-account`/env
+        // narrowing, only the SELECTED account was checked — other stored tokens may be fine.
+        let msg = match want_account {
+            Some(w) => format!(
+                "the selected Steam account {w:?}'s stored refresh token has expired — re-run \
+                 `propnix cred add steam`, or pick another stored account"
+            ),
+            None => format!(
+                "every stored Steam refresh token has expired ({}) — re-run `propnix cred add steam` \
+                 (a CI runner also needs its secret re-set from the new tar)",
+                expired.join(", ")
+            ),
+        };
+        return Err(SteamError::LoginFailed(msg));
     }
     for a in &expired {
         eprintln!("  Steam account {a:?}: stored refresh token has expired — skipping it");
@@ -261,30 +287,82 @@ pub fn control(app_id: u32, depot_id: u32, manifest_ids: &[u64], branch: &str, a
     )
 }
 
-fn control_once(
-    app_id: u32,
-    depot_id: u32,
-    manifest_ids: &[u64],
-    branch: &str,
-    auth: Auth,
-) -> R<Control> {
-    use steam_vent::{Connection, ConnectionTrait, ServerList};
-    use steam_vent_proto_steam::steammessages_clientserver_2::{
-        CMsgClientGetDepotDecryptionKey, CMsgClientGetDepotDecryptionKeyResponse,
-    };
-    use steam_vent_proto_steam::steammessages_contentsystem_steamclient::CContentServerDirectory_GetManifestRequestCode_Request;
+/// A live CM session: the authenticated connection plus the tokio runtime that drives it (a
+/// multi-thread runtime's workers keep running between `block_on` calls, so heartbeats keep flowing
+/// while we hash or download between control-plane requests).
+///
+/// Sessions live in a process-global registry keyed by account, so ONE LOGIN serves every depot of
+/// every product a run touches. That is not an optimization nicety: Steam rate-limits logons harshly —
+/// a burst of ~90 (an agent probing DLC ownership depot-by-depot) had every subsequent logon refused as
+/// "invalid credentials" for the better part of an hour, and a multi-depot pin used to pay one logon
+/// per depot, so a 4-depot pin could stream 147 GiB and then die on the logon for a 573-byte depot.
+struct CmSession {
+    rt: tokio::runtime::Runtime,
+    conn: steam_vent::Connection,
+}
 
+fn session_key(auth: &Auth) -> String {
+    match auth {
+        Auth::Anonymous => "<anonymous>".to_string(),
+        Auth::Account(c) => c.account.clone(),
+    }
+}
+
+fn sessions() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<CmSession>>> {
+    static SESSIONS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<CmSession>>>,
+    > = std::sync::OnceLock::new();
+    SESSIONS.get_or_init(Default::default)
+}
+
+/// Accounts whose login Steam REFUSED (`LoginFailed` class) — the negative side of the session registry,
+/// and like it strictly PROCESS-LIFETIME. Without this, a dead (revoked-but-unexpired) token re-pays one
+/// failed logon per `control()` call: a large probe or multi-depot pin with one dead account rebuilds the
+/// very logon burst the shared-session design exists to prevent. With it, the first refusal is remembered
+/// and every later request for that account fails fast, no network touched.
+///
+/// Deliberately NEVER persisted — not even in `<store>/cache`: that directory is world-writable by design,
+/// so a persistent "this account is dead" marker would be forgeable by any local user or builder, silently
+/// skipping a HEALTHY account (negative-cache poisoning, strictly worse than the burst). Process lifetime
+/// also self-corrects the one ambiguity Steam forces on us — throttling is reported as invalid credentials
+/// — because a throttle mistaken for a dead token costs only the remainder of one run, and the cross-run
+/// cost of no persistence is a single failed logon per invocation, which the limiter tolerates.
+fn refused_logins() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static REFUSED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    REFUSED.get_or_init(Default::default)
+}
+
+/// The session for `auth`, logging in only if this process has none yet. Built OUTSIDE the registry
+/// lock: a login is a network round-trip, and another thread may want a different account meanwhile.
+fn session_for(auth: &Auth) -> R<std::sync::Arc<CmSession>> {
+    use steam_vent::{Connection, ServerList};
+    let key = session_key(auth);
+    if let Some(s) = sessions().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
+        return Ok(s.clone());
+    }
+    // An account this process already saw refused fails fast — same class, no fresh logon attempt.
+    if let Some(prev) = refused_logins()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+    {
+        return Err(SteamError::LoginFailed(format!(
+            "account {key:?}'s login was already refused in this run — not retrying ({prev})"
+        )));
+    }
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(2)
         .build()
         .map_err(|e| SteamError::Http(format!("tokio: {e}")))?;
-
-    let (depot_key, codes, cell_id): ([u8; 32], BTreeMap<u64, u64>, u32) = rt.block_on(async move {
+    let is_account = matches!(auth, Auth::Account(_));
+    let auth = auth.clone();
+    let conn = rt.block_on(async move {
         let servers = ServerList::discover()
             .await
             .map_err(|e| SteamError::Http(format!("server discovery: {e}")))?;
-        let conn = match &auth {
+        match &auth {
             Auth::Anonymous => Connection::anonymous(&servers).await,
             Auth::Account(c) => Connection::access(&servers, &c.account, &c.refresh_token).await,
         }
@@ -296,12 +374,64 @@ fn control_once(
             steam_vent::ConnectionError::Network(n) => {
                 SteamError::Http(format!("Steam login transport failed: {n}"))
             }
-            other => SteamError::NotOwned(format!(
-                "Steam login failed ({other}) — if this persists, re-run `propnix cred add steam` and \
-                 re-set the CI secret"
+            // NB: this arm also catches steam-vent's non-Network login failures that are really
+            // Steam-side transients (TryAnotherCM/ServiceUnavailable-class eresults, Aborted). Those
+            // classify as "a human should look" rather than a red run — imperfect, but strictly better
+            // than the transport bucket (which would abort the whole account walk) and the message
+            // hedges accordingly.
+            other => SteamError::LoginFailed(format!(
+                "{other} — a refused login is usually a stale token (re-run `propnix cred add steam`) \
+                 or Steam's logon rate limiter, which reports throttling as invalid credentials; when \
+                 in doubt, wait an hour before re-adding anything"
             )),
-        })?;
+        })
+    });
+    let conn = match conn {
+        Ok(c) => c,
+        Err(e) => {
+            // Remember a REFUSAL for the rest of the process (see `refused_logins`); transport failures
+            // are not remembered — they say nothing about the credential and retrying them is correct.
+            // Neither is an ANONYMOUS refusal: there is no credential to be dead there, only a CM having
+            // a bad moment, and blocking anonymous for the whole run over one transient would be wrong.
+            if is_account {
+                if let SteamError::LoginFailed(msg) = &e {
+                    refused_logins()
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(key, msg.clone());
+                }
+            }
+            return Err(e);
+        }
+    };
+    let s = std::sync::Arc::new(CmSession { rt, conn });
+    Ok(sessions().lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(key).or_insert(s).clone())
+}
 
+/// Forget a (presumably stale) session so the next `session_for` logs in afresh. Called on TRANSPORT
+/// failures of a control-plane request; `control()`'s retry-on-Http then re-enters with a new login,
+/// which is how a connection Steam dropped between depots self-heals without a retry ladder here.
+fn drop_session(auth: &Auth) {
+    sessions().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&session_key(auth));
+}
+
+fn control_once(
+    app_id: u32,
+    depot_id: u32,
+    manifest_ids: &[u64],
+    branch: &str,
+    auth: Auth,
+) -> R<Control> {
+    use steam_vent::ConnectionTrait;
+    use steam_vent_proto_steam::steammessages_clientserver_2::{
+        CMsgClientGetDepotDecryptionKey, CMsgClientGetDepotDecryptionKeyResponse,
+    };
+    use steam_vent_proto_steam::steammessages_contentsystem_steamclient::CContentServerDirectory_GetManifestRequestCode_Request;
+
+    let session = session_for(&auth)?;
+    let conn = &session.conn;
+
+    let result: R<([u8; 32], BTreeMap<u64, u64>, u32)> = session.rt.block_on(async move {
         let kreq = CMsgClientGetDepotDecryptionKey {
             depot_id: Some(depot_id),
             app_id: Some(app_id),
@@ -349,13 +479,145 @@ fn control_once(
         }
 
         Ok((depot_key, codes, conn.cell_id()))
-    })?;
+    });
+    let (depot_key, codes, cell_id) = match result {
+        Ok(t) => t,
+        Err(e) => {
+            // A transport-class failure may mean Steam dropped this connection between requests;
+            // forget the session so `control()`'s retry-on-Http re-enters through a fresh login.
+            // Refusals (NotOwned/eresult) keep the session — it is healthy, the answer was just no.
+            if matches!(e, SteamError::Http(_)) {
+                drop_session(&auth);
+            }
+            return Err(e);
+        }
+    };
     let hosts = content_hosts(cell_id)?;
     Ok(Control {
         depot_key,
         codes,
         hosts,
     })
+}
+
+/// Everything a depot fetch needs, however it was obtained: the CM path (one process-wide login) or
+/// the ANCHOR-VERIFIED cache (no login at all — chunk downloads are anonymous HTTP). `manifest()` is
+/// the single reader both paths share, so decode behavior cannot diverge between them, and the CM path
+/// writes back what it fetched (best-effort) so the next run can take the loginless path.
+pub struct DepotAccess {
+    pub depot_key: [u8; 32],
+    pub hosts: Vec<String>,
+    depot_id: u32,
+    codes: BTreeMap<u64, u64>,
+    cached: BTreeMap<u64, Vec<u8>>,
+}
+
+/// One requested manifest plus its pin-recorded trust anchor, if the caller has one (only anchored
+/// artifacts may come from the cache — see pin/steamcache.rs for the trust model).
+pub struct Want<'a> {
+    pub manifest: u64,
+    pub manifest_sha256: Option<&'a str>,
+}
+
+/// A decoded manifest plus the sha256 of its RAW bytes — the anchor `pin` records in versions.json.
+pub struct ManifestData {
+    pub files: Vec<FileEntry>,
+    pub created: u32,
+    pub sha256: String,
+}
+
+/// The cache trust anchors a hash run produces, destined for the versions.json row (`depotKeySha256`,
+/// `manifestSha256`). With both recorded, the FOD that fetches this pin can run with ZERO Steam logins.
+pub struct PinAnchors {
+    pub depot_key_sha256: String,
+    pub manifest_sha256: String,
+}
+
+/// Depot access from the CACHE ALONE — no CM connection, and crucially NO CREDENTIAL: a warm anchored
+/// cache lets a fetch skip not just the login but reading the token at all (which is what lets a
+/// sandboxed FOD fetch a depot whose token it cannot even read). `None` on any gap — no depot-key
+/// anchor, a manifest with no anchor, a missing or wrong-content entry, or the host-directory lookup
+/// failing — so the caller falls through to the credentialed CM path, never to an error.
+///
+/// Every wanted manifest must be anchored AND present: a partial cache is a miss, because the CM path
+/// is all-or-nothing (one login yields every manifest) and mixing the two would gain nothing.
+pub fn acquire_cached(
+    depot_id: u32,
+    wants: &[Want],
+    depot_key_sha256: Option<&str>,
+) -> Option<DepotAccess> {
+    let key = crate::pin::steamcache::read_key(depot_id, depot_key_sha256?)?;
+    let mut cached = BTreeMap::new();
+    for w in wants {
+        let bytes = crate::pin::steamcache::read_manifest(depot_id, w.manifest, w.manifest_sha256?)?;
+        cached.insert(w.manifest, bytes);
+    }
+    // Cell 0 = the global content-server directory. The session's cell id would give marginally better
+    // hosts, but a CACHED cell id would be unverifiable input — and a wrong one yields a dud host list,
+    // which is exactly the wedge the contract forbids.
+    let hosts = content_hosts(0).ok()?;
+    Some(DepotAccess {
+        depot_key: key,
+        hosts,
+        depot_id,
+        codes: BTreeMap::new(),
+        cached,
+    })
+}
+
+/// Obtain depot access, cache-first: `acquire_cached` when the anchors and cache allow it (no login),
+/// otherwise the CM path (one login, whose depot key is written back to warm the cache for next time).
+/// Used by the HASHER, which always has `auth` in hand; the DOWNLOADER instead calls `acquire_cached`
+/// directly first, so a cache hit needs no credential AT ALL — see `download_depot_any`.
+pub fn acquire(
+    app_id: u32,
+    depot_id: u32,
+    wants: &[Want],
+    depot_key_sha256: Option<&str>,
+    branch: &str,
+    auth: Auth,
+) -> R<DepotAccess> {
+    if let Some(access) = acquire_cached(depot_id, wants, depot_key_sha256) {
+        return Ok(access);
+    }
+    let ids: Vec<u64> = wants.iter().map(|w| w.manifest).collect();
+    let ctl = control(app_id, depot_id, &ids, branch, auth)?;
+    crate::pin::steamcache::write_key(depot_id, &ctl.depot_key);
+    Ok(DepotAccess {
+        depot_key: ctl.depot_key,
+        hosts: ctl.hosts,
+        depot_id,
+        codes: ctl.codes,
+        cached: BTreeMap::new(),
+    })
+}
+
+impl DepotAccess {
+    pub fn manifest(&self, agent: &ureq::Agent, manifest_id: u64) -> R<ManifestData> {
+        let raw = match self.cached.get(&manifest_id) {
+            Some(bytes) => bytes.clone(),
+            None => {
+                let code = self.codes.get(&manifest_id).copied().ok_or_else(|| {
+                    SteamError::Parse(format!("no request code for manifest {manifest_id}"))
+                })?;
+                let raw =
+                    fetch_manifest_raw(agent, &self.hosts, self.depot_id, manifest_id, code)?;
+                crate::pin::steamcache::write_manifest(self.depot_id, manifest_id, &raw);
+                raw
+            }
+        };
+        let (files, created) = decode_manifest(&raw, &self.depot_key)?;
+        Ok(ManifestData {
+            files,
+            created,
+            sha256: crate::pin::steamcache::sha256_hex(&raw),
+        })
+    }
+
+    /// The anchor for the key this access carries (recorded by `pin` beside the manifest anchor).
+    pub fn depot_key_sha256(&self) -> String {
+        crate::pin::steamcache::sha256_hex(&self.depot_key)
+    }
 }
 
 /// The content-server directory is a plain unauthenticated GET, so it needs no CM connection and no
@@ -446,10 +708,23 @@ pub fn fetch_manifest(
     request_code: u64,
     depot_key: &[u8; 32],
 ) -> R<(Vec<FileEntry>, u32)> {
+    let body = fetch_manifest_raw(agent, hosts, depot_id, manifest_id, request_code)?;
+    decode_manifest(&body, depot_key)
+}
+
+/// The transport half of a manifest fetch, returning the RAW zip bytes — split out so the cache can
+/// store exactly what came off the wire (its sha256 is the trust anchor `pin` records). A DECODE
+/// failure is deliberately outside the retry: the bytes arrived and we could not make sense of them,
+/// which more hosts will not fix (`read_to_end` failing IS transport, so it stays inside).
+pub fn fetch_manifest_raw(
+    agent: &ureq::Agent,
+    hosts: &[String],
+    depot_id: u32,
+    manifest_id: u64,
+    request_code: u64,
+) -> R<Vec<u8>> {
     // Every host, then the whole sweep again after a pause: a manifest fetch that fails because the
-    // network blinked should not fail the run before any content has been transferred. A DECODE failure
-    // is not retried — the bytes arrived and we could not make sense of them, which more hosts will not
-    // fix (and `read_to_end` failing IS transport, so it stays inside the retry).
+    // network blinked should not fail the run before any content has been transferred.
     crate::pin::retry::with_retry(
         &format!("manifest {manifest_id}"),
         &crate::pin::retry::METADATA,
@@ -463,7 +738,7 @@ pub fn fetch_manifest(
                     Ok(resp) => {
                         let mut body = Vec::new();
                         match resp.into_reader().read_to_end(&mut body) {
-                            Ok(_) => return decode_manifest(&body, depot_key),
+                            Ok(_) => return Ok(body),
                             Err(e) => last = format!("reading manifest: {e}"),
                         }
                     }
@@ -930,6 +1205,96 @@ mod tests {
     // (The JWT and protobuf-walk decoders are tested where they live now: propnix-steam-cred.)
 
     #[test]
+    fn the_ordered_and_unordered_assemblies_agree_on_a_cross_file_deduped_tree() {
+        // The two-writer test below covers ONE file. This covers what a real base depot has and no other
+        // test does: MANY files sharing chunks (cross-file dedup), leading/trailing/interior holes, an
+        // explicit empty dir, an executable, all assembled two ways — the ordered streamer the PIN hashes
+        // vs the pre-sized pwrite the DOWNLOAD writes — and hashed with the SAME serializer, so any
+        // difference is pure content/structure divergence between the two assemblies (a serializer vs Nix
+        // difference is a separate axis and cannot show up here).
+        use std::os::unix::fs::{FileExt, OpenOptionsExt};
+        // Deterministic content per chunk identity: same (sha) => same bytes everywhere it appears.
+        fn content(c: &ChunkRef) -> Vec<u8> {
+            (0..c.cb_original)
+                .map(|i| c.sha[(i as usize) % 20].wrapping_add(i as u8))
+                .collect()
+        }
+        let ch = |seed: u8, off: u64, len: u32| ChunkRef {
+            sha: [seed; 20],
+            offset: off,
+            cb_original: len,
+        };
+        // A pool of chunk seeds reused across files, plus holes (gaps between chunk end and next offset)
+        // and tails (file size beyond the last chunk).
+        let files = vec![
+            FileEntry { path: "dir".into(), size: u64::MAX, executable: false, chunks: vec![] },
+            FileEntry { path: "dir/empty_sub".into(), size: u64::MAX, executable: false, chunks: vec![] },
+            // leading hole (first chunk at offset 8), interior hole, shared seeds 1 & 2
+            FileEntry {
+                path: "dir/a.dat".into(), size: 4096, executable: false,
+                chunks: vec![ch(1, 8, 100), ch(2, 2000, 100)],
+            },
+            // seed 1 again (cross-file dup), plus a trailing hole (size 900 > 300+100)
+            FileEntry {
+                path: "dir/b.dat".into(), size: 900, executable: true,
+                chunks: vec![ch(3, 0, 100), ch(1, 300, 100)],
+            },
+            // same seed 2 twice within one file (intra-file dup) at different offsets
+            FileEntry {
+                path: "c.dat".into(), size: 500, executable: false,
+                chunks: vec![ch(2, 0, 100), ch(2, 200, 100), ch(3, 400, 100)],
+            },
+            FileEntry { path: "z_empty.dat".into(), size: 0, executable: false, chunks: vec![] },
+        ];
+
+        // ORDERED (pin): nar_hash over the manifest tree, each file streamed in offset order by write_file.
+        let tree = tree(&files).unwrap();
+        let (pin_hash, _) = nar::nar_hash(&tree, |idx: &usize, w| {
+            let f = &files[*idx];
+            let mut cs: Vec<&ChunkRef> = f.chunks.iter().collect();
+            cs.sort_by_key(|c| c.offset);
+            let mut it = cs.into_iter();
+            write_file(f, || Ok(content(it.next().expect("chunk"))), w).map_err(nar::NarError::Fetch)
+        })
+        .unwrap();
+
+        // UNORDERED (download): create each file at its declared size, pwrite each chunk at its offset,
+        // then hash the real on-disk tree with the same serializer.
+        let dir = std::env::temp_dir().join(format!("propnix-xdedup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for f in &files {
+            let p = dir.join(&f.path);
+            if f.size == u64::MAX {
+                std::fs::create_dir_all(&p).unwrap();
+                continue;
+            }
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let h = std::fs::OpenOptions::new()
+                .write(true).create(true).truncate(true)
+                .mode(if f.executable { 0o755 } else { 0o644 })
+                .open(&p).unwrap();
+            h.set_len(f.size).unwrap();
+            for c in &f.chunks {
+                h.write_all_at(&content(c), c.offset).unwrap();
+            }
+        }
+        let local = nar::local_tree(&dir).unwrap();
+        let (fetch_hash, _) = nar::nar_hash(&local, |p: &std::path::PathBuf, w| {
+            let mut file = std::fs::File::open(p).map_err(|e| nar::NarError::Fetch(e.to_string()))?;
+            std::io::copy(&mut file, w).map_err(|e| nar::NarError::Fetch(e.to_string()))?;
+            Ok(())
+        })
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            pin_hash, fetch_hash,
+            "the ordered (pin) and unordered (download) assemblies produced different content for a \
+             cross-file-deduped tree"
+        );
+    }
+
+    #[test]
     fn the_two_write_paths_agree_on_a_file_past_4_gib() {
         // win-data is the first depot this tree pins that holds files over 4 GiB (seven at ~8 GiB), and
         // it is the first whose ordered hash and unordered download disagree. Every depot that verified
@@ -1220,9 +1585,12 @@ mod tests {
             Credential { account: "alice".into(), refresh_token: "a".into() },
             Credential { account: "zoe".into(), refresh_token: "z".into() },
         ];
-        let exhausted = |tried: Vec<String>, last: String| {
-            Box::new(SteamError::NotOwned(format!("none of {} ({last})", tried.join(", "))))
-                as Box<dyn std::error::Error>
+        let exhausted = |tried: Vec<String>, refusals: Vec<Box<dyn std::error::Error>>| {
+            Box::new(SteamError::NotOwned(format!(
+                "none of {} ({})",
+                tried.join(", "),
+                last_refusal(&refusals)
+            ))) as Box<dyn std::error::Error>
         };
 
         // The second account owns it: the first refusal must not be fatal.
@@ -1277,6 +1645,64 @@ mod tests {
         };
         assert_eq!(n, 1, "must not try the second account after a transport error");
         assert!(e.to_string().contains("connection reset"), "got: {e}");
+    }
+
+    #[test]
+    fn a_refused_login_is_remembered_for_the_process() {
+        // Seed the memo the way a refused logon would; the next session_for for that account must fail
+        // fast with the same class and NO network attempt — this test runs offline, so even reaching
+        // server discovery would fail with a different (Http) class than the one asserted here.
+        refused_logins()
+            .lock()
+            .unwrap()
+            .insert("dead-test-account".into(), "token revoked".into());
+        let auth = Auth::Account(Credential {
+            account: "dead-test-account".into(),
+            refresh_token: "x".into(),
+        });
+        let Err(err) = session_for(&auth) else {
+            panic!("a remembered refusal must fail the login");
+        };
+        assert!(matches!(err, SteamError::LoginFailed(_)), "got: {err}");
+        assert!(err.to_string().contains("already refused"), "got: {err}");
+    }
+
+    #[test]
+    fn an_exhausted_walk_keeps_the_login_failure_class() {
+        // The bug this pins: when EVERY account is turned away by a login failure (a stale token, or the
+        // rate limiter reporting throttling as "invalid credentials"), the aggregate must classify as a
+        // credential problem — NOT as a definitive "no account owns this", which would file a false
+        // not-owned issue and, in the walker aggregate, is how 19 depots were once misclassified.
+        let refusals: Vec<Box<dyn std::error::Error>> = vec![
+            Box::new(SteamError::LoginFailed("throttled".into())),
+            Box::new(SteamError::LoginFailed("throttled".into())),
+        ];
+        let agg = exhausted_steam("all logins refused".into(), &refusals);
+        assert!(
+            matches!(agg.downcast_ref::<SteamError>(), Some(SteamError::LoginFailed(_))),
+            "all-login-failed must aggregate to LoginFailed, got: {agg}"
+        );
+
+        // A single login failure mixed with a genuine refusal is still inconclusive — that throttled
+        // account might be the owner — so the class stays LoginFailed.
+        let mixed: Vec<Box<dyn std::error::Error>> = vec![
+            Box::new(SteamError::NotOwned("eresult 2".into())),
+            Box::new(SteamError::LoginFailed("throttled".into())),
+        ];
+        assert!(matches!(
+            exhausted_steam("m".into(), &mixed).downcast_ref::<SteamError>(),
+            Some(SteamError::LoginFailed(_))
+        ));
+
+        // Only when every account genuinely refused a title it could see is it truly NotOwned.
+        let owned: Vec<Box<dyn std::error::Error>> = vec![
+            Box::new(SteamError::NotOwned("eresult 2".into())),
+            Box::new(SteamError::NotOwned("eresult 2".into())),
+        ];
+        assert!(matches!(
+            exhausted_steam("o".into(), &owned).downcast_ref::<SteamError>(),
+            Some(SteamError::NotOwned(_))
+        ));
     }
 
     #[test]
@@ -1525,41 +1951,28 @@ pub fn hash_depot(
     branch: &str,
     auth: Auth,
     opts: &crate::pin::gog::HashOpts,
-) -> Result<(String, nar::Stats, Vec<FileEntry>), Box<dyn std::error::Error>> {
+) -> Result<(String, nar::Stats, Vec<FileEntry>, PinAnchors), Box<dyn std::error::Error>> {
     // Request codes are single-use and short-lived, so they are fetched together immediately before
     // use. Asking for the previous manifest's code in the same session is what makes the rollback
-    // check cost one small extra GET rather than a second login.
-    let mut wanted = vec![manifest_id];
+    // check cost one small extra GET rather than a second login. No cache anchors here on purpose:
+    // hashing is what CREATES the anchors, so it always takes the CM path (and warms the cache for the
+    // FOD that follows).
+    let mut wants = vec![Want { manifest: manifest_id, manifest_sha256: None }];
     if let Some(p) = previous.filter(|p| *p != manifest_id) {
-        wanted.push(p);
+        wants.push(Want { manifest: p, manifest_sha256: None });
     }
-    let ctl = control(app_id, depot_id, &wanted, branch, auth)?;
+    let access = acquire(app_id, depot_id, &wants, None, branch, auth)?;
     let agent = http_agent();
-    let code = |m: u64| -> Result<u64, SteamError> {
-        ctl.codes
-            .get(&m)
-            .copied()
-            .ok_or_else(|| SteamError::Parse(format!("no request code for manifest {m}")))
+    let m = access.manifest(&agent, manifest_id)?;
+    let (files, created) = (m.files, m.created);
+    let anchors = PinAnchors {
+        depot_key_sha256: access.depot_key_sha256(),
+        manifest_sha256: m.sha256,
     };
-    let (files, created) = fetch_manifest(
-        &agent,
-        &ctl.hosts,
-        depot_id,
-        manifest_id,
-        code(manifest_id)?,
-        &ctl.depot_key,
-    )?;
     // NEVER MOVE BACKWARDS. Steam manifest ids are not ordered, so the only honest comparison is the
     // creation time each manifest carries in its own metadata.
     if let Some(prev) = previous.filter(|p| *p != manifest_id) {
-        let (_, prev_created) = fetch_manifest(
-            &agent,
-            &ctl.hosts,
-            depot_id,
-            prev,
-            code(prev)?,
-            &ctl.depot_key,
-        )?;
+        let prev_created = access.manifest(&agent, prev)?.created;
         if created < prev_created {
             return Err(Box::new(SteamError::Unsupported(format!(
                 "refusing to move depot {depot_id} backwards — Steam's current public manifest \
@@ -1594,7 +2007,11 @@ pub fn hash_depot(
     }
     let items: Vec<ChunkRef> = fetch.iter().map(|&i| occ[i].clone()).collect();
     let sizes: Vec<u64> = fetch.iter().map(|&i| occ_sizes[i]).collect();
-    let src = std::sync::Arc::new(ChunkSource::new(ctl.hosts, depot_id, ctl.depot_key));
+    let src = std::sync::Arc::new(ChunkSource::new(
+        access.hosts.clone(),
+        depot_id,
+        access.depot_key,
+    ));
     let pf = crate::pin::engine::ordered(
         src,
         crate::pin::engine::Work { items, sizes },
@@ -1621,16 +2038,15 @@ pub fn hash_depot(
     if progress {
         eprintln!();
     }
-    Ok((sri, stats, files))
+    // Supersede ONCE, keeping the manifest just pinned — AFTER the hash succeeded. Earlier and a failed
+    // hash run would have already evicted the still-current pin's manifest (the rollback probe warmed the
+    // cache with `prev`), making every FOD of the unchanged pin pay a login until a successful re-pin.
+    // A supersede is deliberately last: worst case on failure is the cache briefly holding both manifests.
+    // (No-op when this run took the cache path — nothing new was written — but harmless.)
+    crate::pin::steamcache::supersede_manifests(depot_id, &[manifest_id]);
+    Ok((sri, stats, files, anchors))
 }
 
-/// `hash_depot`, but TRYING EVERY STORED ACCOUNT until one can fetch the depot — the same behaviour
-/// `fetchSteamDepot` has, so a host with several Steam accounts needs no per-game selection.
-///
-/// Advances only on an OWNERSHIP-class refusal (login rejected, depot key eresult != 1, no manifest
-/// request code); a transport or parse failure aborts immediately, because retrying it against another
-/// account would only bury it. All the ownership checks happen in `control()`, before a byte of content
-/// moves, so a wrong account costs one round trip rather than a download.
 /// Download a pinned depot to `dir` — the same pipeline as `hash_depot`, with files as the sink.
 ///
 /// This is what replaces DepotDownloader in the FOD. The tree it writes is the one `tree()` describes,
@@ -1655,20 +2071,42 @@ pub fn download_depot(
     branch: &str,
     auth: Auth,
     dir: &std::path::Path,
+    // The pin's cache trust anchors (versions.json `depotKeySha256`/`manifestSha256`), when the caller
+    // has them: with both present and the cache warm, this whole download makes NO Steam login — the
+    // control plane is skipped and chunk fetches are anonymous HTTP.
+    anchors: Option<(&str, &str)>,
+    opts: &crate::pin::gog::HashOpts,
+) -> Result<crate::pin::download::Written, Box<dyn std::error::Error>> {
+    let (key_sha, manifest_sha) = (anchors.map(|a| a.0), anchors.map(|a| a.1));
+    let access = acquire(
+        app_id,
+        depot_id,
+        &[Want { manifest: manifest_id, manifest_sha256: manifest_sha }],
+        key_sha,
+        branch,
+        auth,
+    )?;
+    write_depot(access, manifest_id, dir, opts)
+}
+
+/// Write an already-acquired depot to disk. Split out of `download_depot` so the cache-hit path can be
+/// reached WITHOUT a credential: `download_depot_any` calls `acquire_cached` (no auth, no token read)
+/// and hands the result straight here, falling back to the credentialed path only on a miss.
+pub fn write_depot(
+    access: DepotAccess,
+    manifest_id: u64,
+    dir: &std::path::Path,
     opts: &crate::pin::gog::HashOpts,
 ) -> Result<crate::pin::download::Written, Box<dyn std::error::Error>> {
     use crate::pin::download;
     use std::os::unix::fs::FileExt;
 
-    let ctl = control(app_id, depot_id, &[manifest_id], branch, auth)?;
+    let depot_id = access.depot_id;
     let agent = http_agent();
-    let code = ctl
-        .codes
-        .get(&manifest_id)
-        .copied()
-        .ok_or_else(|| SteamError::Parse(format!("no request code for manifest {manifest_id}")))?;
-    let (files, _created) =
-        fetch_manifest(&agent, &ctl.hosts, depot_id, manifest_id, code, &ctl.depot_key)?;
+    let files = access.manifest(&agent, manifest_id)?.files;
+    // A download fetches exactly this one manifest; drop any older cached manifest for the depot (e.g. the
+    // rollback-probe entry a preceding pin left behind), so the cache converges to one manifest per depot.
+    crate::pin::steamcache::supersede_manifests(depot_id, &[manifest_id]);
 
     // Built for its REFUSALS: `tree` is what rejects a malformed manifest, and download must refuse
     // exactly what hashing refuses or the two could disagree about a depot.
@@ -1760,7 +2198,11 @@ pub fn download_depot(
     // Progress counts bytes FETCHED (what crosses the wire), so neither deduplicated references nor
     // sparse ranges no chunk covers can leave the bar short of 100%.
     let fetch_total: u64 = sizes.iter().sum();
-    let src = std::sync::Arc::new(ChunkSource::new(ctl.hosts, depot_id, ctl.depot_key));
+    let src = std::sync::Arc::new(ChunkSource::new(
+        access.hosts.clone(),
+        depot_id,
+        access.depot_key,
+    ));
     let sink = std::sync::Arc::new(DepotSink { handles, placement });
     let mut progress = download::Progress::new(fetch_total.max(1), opts.progress);
     crate::pin::engine::unordered(
@@ -1788,22 +2230,41 @@ pub fn download_depot_any(
     branch: &str,
     anonymous: bool,
     dir: &std::path::Path,
+    anchors: Option<(&str, &str)>,
     opts: &crate::pin::gog::HashOpts,
 ) -> Result<crate::pin::download::Written, Box<dyn std::error::Error>> {
+    // Cache-first, BEFORE any credential: a warm anchored cache fetches with no login AND no token read
+    // at all. This is what the whole cache exists for — and it means a sandboxed FOD can fetch a depot
+    // whose credential it cannot even read (e.g. a store whose token ACL the userns builder can't use),
+    // as long as a host-side pin has warmed the cache. A miss falls straight through to the CM path.
+    if let (Some((ks, ms)), false) = (anchors, anonymous) {
+        let wants = [Want { manifest: manifest_id, manifest_sha256: Some(ms) }];
+        if let Some(access) = acquire_cached(depot_id, &wants, Some(ks)) {
+            return write_depot(access, manifest_id, dir, opts);
+        }
+    }
     if anonymous {
-        return download_depot(app_id, depot_id, manifest_id, branch, Auth::Anonymous, dir, opts);
+        return download_depot(
+            app_id, depot_id, manifest_id, branch, Auth::Anonymous, dir, anchors, opts,
+        );
     }
     let creds = credentials_from_store(&opts.credential_dir, opts.steam_account.as_deref())?;
+    // Cache missed (or unanchored): the credentialed account walk. `download_depot` still re-checks the
+    // cache per account, but that only matters on a miss, where it is one stat.
     crate::pin::try_accounts(
         &creds,
         |c| c.account.clone(),
         is_not_owned,
-        |tried, last| {
-            Box::new(SteamError::NotOwned(format!(
-                "no stored Steam account can fetch app {app_id} depot {depot_id} manifest {manifest_id} \
-                 (tried: {}). Last refusal: {last}",
-                tried.join(", ")
-            ))) as Box<dyn std::error::Error>
+        |tried, refusals| {
+            exhausted_steam(
+                format!(
+                    "no stored Steam account can fetch app {app_id} depot {depot_id} manifest \
+                     {manifest_id} (tried: {}). Last refusal: {}",
+                    tried.join(", "),
+                    last_refusal(&refusals)
+                ),
+                &refusals,
+            )
         },
         |c| {
             download_depot(
@@ -1813,12 +2274,20 @@ pub fn download_depot_any(
                 branch,
                 Auth::Account(c.clone()),
                 dir,
+                anchors,
                 opts,
             )
         },
     )
 }
 
+/// `hash_depot`, but TRYING EVERY STORED ACCOUNT until one can fetch the depot — the same behaviour
+/// `fetchSteamDepot` has, so a host with several Steam accounts needs no per-game selection.
+///
+/// Advances only on an OWNERSHIP-class refusal (login rejected, depot key eresult != 1, no manifest
+/// request code); a transport or parse failure aborts immediately, because retrying it against another
+/// account would only bury it. All the ownership checks happen in `control()`, before a byte of content
+/// moves, so a wrong account costs one round trip rather than a download.
 pub fn hash_depot_any(
     app_id: u32,
     depot_id: u32,
@@ -1826,18 +2295,22 @@ pub fn hash_depot_any(
     previous: Option<u64>,
     branch: &str,
     opts: &crate::pin::gog::HashOpts,
-) -> Result<(String, nar::Stats, Vec<FileEntry>), Box<dyn std::error::Error>> {
+) -> Result<(String, nar::Stats, Vec<FileEntry>, PinAnchors), Box<dyn std::error::Error>> {
     let creds = credentials_from_store(&opts.credential_dir, opts.steam_account.as_deref())?;
     crate::pin::try_accounts(
         &creds,
         |c| c.account.clone(),
         is_not_owned,
-        |tried, last| {
-            Box::new(SteamError::NotOwned(format!(
-                "no stored Steam account can fetch app {app_id} depot {depot_id} manifest {manifest_id} \
-                 (tried: {}). Last refusal: {last}",
-                tried.join(", ")
-            ))) as Box<dyn std::error::Error>
+        |tried, refusals| {
+            exhausted_steam(
+                format!(
+                    "no stored Steam account can fetch app {app_id} depot {depot_id} manifest \
+                     {manifest_id} (tried: {}). Last refusal: {}",
+                    tried.join(", "),
+                    last_refusal(&refusals)
+                ),
+                &refusals,
+            )
         },
         |c| {
             hash_depot(
@@ -1853,13 +2326,108 @@ pub fn hash_depot_any(
     )
 }
 
-/// Is this the kind of Steam failure another stored account might not have?
+/// Is this the kind of Steam failure another stored account might not have? A LOGIN failure counts:
+/// one dead/throttled account must not strand the others (though if ALL logons are throttled, the walk
+/// reports every account's refusal, message included).
 ///
 /// `&Box<_>` rather than `&dyn Error`: `try_accounts` is generic over its error type, which here IS
 /// `Box<dyn Error>`, so the predicate's signature has to match that exactly.
 #[allow(clippy::borrowed_box)]
 fn is_not_owned(e: &Box<dyn std::error::Error>) -> bool {
-    matches!(e.downcast_ref::<SteamError>(), Some(SteamError::NotOwned(_)))
+    matches!(
+        e.downcast_ref::<SteamError>(),
+        Some(SteamError::NotOwned(_) | SteamError::LoginFailed(_))
+    )
+}
+
+/// Aggregate an exhausted account walk into the correct CLASS, given every refusal it collected. If ANY
+/// account was turned away by a LOGIN failure the walk says nothing definitive about ownership — that
+/// account might own the title but could not log in (a stale token, or the rate limiter reporting
+/// throttling as "invalid credentials") — so the aggregate is `LoginFailed`, which classifies as "a human
+/// must add a credential or wait", never a false "no account owns this". Only when every account genuinely
+/// refused a title it could see (all `NotOwned`) is the aggregate `NotOwned`. This is the same honesty
+/// `probe_depots` applies; keeping the decision here means every walker path shares it.
+fn exhausted_steam(msg: String, refusals: &[Box<dyn std::error::Error>]) -> Box<dyn std::error::Error> {
+    let any_login = refusals
+        .iter()
+        .any(|e| matches!(e.downcast_ref::<SteamError>(), Some(SteamError::LoginFailed(_))));
+    if any_login {
+        Box::new(SteamError::LoginFailed(msg))
+    } else {
+        Box::new(SteamError::NotOwned(msg))
+    }
+}
+
+/// The "Last refusal: …" tail every Steam exhaustion message carries — the final account's own words.
+fn last_refusal(refusals: &[Box<dyn std::error::Error>]) -> String {
+    refusals.last().map(|e| e.to_string()).unwrap_or_default()
+}
+
+/// Batch ownership probe: which stored account (if any) can fetch each of `depots`? One depot-key
+/// request per (account, depot), all over the PROCESS-SHARED CM sessions — a probe costs one login per
+/// healthy stored account and one FAILED logon attempt per dead one (`refused_logins` remembers a refusal
+/// for the process lifetime, so a dead account never re-pays per depot), where probing depot-by-depot in
+/// separate invocations cost one login EACH — the ~90-login burst that Steam's rate limiter shut down
+/// mid-run. The fix for a dead account remains `propnix cred add steam`.
+///
+/// Distinguishes its three outcomes honestly: `Some(account)` = that account fetched the key;
+/// `None` = every account that could log in got a genuine refusal (eresult-class, a real "not owned");
+/// and a depot no account could both log into AND answer for ABORTS the probe rather than being recorded
+/// as unowned — a throttled/stale logon says nothing about ownership, and one probe run misclassifying 19
+/// depots as unowned is how we learned that. Crucially, ONE dead account never strands the rest: every
+/// account is tried for every depot, and only if the whole set is inconclusive is the depot fatal.
+///
+/// One residual gap: an account whose stored token is already EXPIRED is dropped by
+/// `credentials_from_store` before the walk (a deliberate defense against Steam's logon rate limiter — see
+/// there), so a depot owned ONLY by that account is recorded unowned rather than inconclusive. Refreshing
+/// the token (`propnix cred add steam`) is the fix; the rate-limit protection is judged worth this edge.
+pub fn probe_depots(
+    app_id: u32,
+    depots: &[u32],
+    branch: &str,
+    opts: &crate::pin::gog::HashOpts,
+) -> Result<Vec<(u32, Option<String>)>, Box<dyn std::error::Error>> {
+    let creds = credentials_from_store(&opts.credential_dir, opts.steam_account.as_deref())?;
+    let mut out = Vec::new();
+    for &depot in depots {
+        let mut owner: Option<String> = None;
+        // A login failure from one account says nothing about ownership — but the NEXT account might own
+        // the depot, so remember the failure and keep going rather than aborting on it. Only if no account
+        // can answer definitively (some logon never succeeded, and none owned it) is the depot's ownership
+        // genuinely unknowable. Deliberately NOT remembered across depots: a later depot re-tries every
+        // account fresh, so a transient throttle on depot N does not poison depot N+1.
+        let mut login_failure: Option<SteamError> = None;
+        for c in &creds {
+            match control(app_id, depot, &[], branch, Auth::Account(c.clone())) {
+                Ok(_) => {
+                    owner = Some(c.account.clone());
+                    break;
+                }
+                // A logged-in account that genuinely doesn't own it: definitive for this account, advance.
+                Err(SteamError::NotOwned(_)) => continue,
+                // Could not log in (stale token / throttle): inconclusive for this account, try the rest.
+                Err(e @ SteamError::LoginFailed(_)) => {
+                    login_failure = Some(e);
+                    continue;
+                }
+                // Transport/parse/etc: a real failure, not an ownership signal — abort now.
+                Err(e) => return Err(Box::new(e)),
+            }
+        }
+        match (&owner, login_failure) {
+            (Some(_), _) => out.push((depot, owner)),
+            // Every account that logged in refused it → genuinely not owned.
+            (None, None) => out.push((depot, None)),
+            // No account owned it AND at least one never logged in → cannot honestly call it unowned.
+            (None, Some(e)) => {
+                return Err(Box::new(SteamError::LoginFailed(format!(
+                    "app {app_id} depot {depot}: no stored account could both log in and answer for it \
+                     (last login failure: {e}); refusing to record it as unowned"
+                ))))
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn steam_write(
@@ -2167,12 +2735,16 @@ pub fn verify_depot_any(
         &creds,
         |c| c.account.clone(),
         is_not_owned,
-        |tried, last| {
-            Box::new(SteamError::NotOwned(format!(
-                "no stored Steam account can fetch app {app_id} depot {depot_id} manifest \
-                 {manifest_id} (tried: {}). Last refusal: {last}",
-                tried.join(", ")
-            ))) as Box<dyn std::error::Error>
+        |tried, refusals| {
+            exhausted_steam(
+                format!(
+                    "no stored Steam account can fetch app {app_id} depot {depot_id} manifest \
+                     {manifest_id} (tried: {}). Last refusal: {}",
+                    tried.join(", "),
+                    last_refusal(&refusals)
+                ),
+                &refusals,
+            )
         },
         |c| {
             verify_depot(

@@ -35,6 +35,11 @@ pub enum GogError {
     NoCredential(String),
     /// The account does not own this product / DLC. NOT a failure: the caller no-ops.
     NotOwned(String),
+    /// The stored token could not be exchanged for an access token — revoked/expired grant, or a rejected
+    /// client. Distinct from `NotOwned` because it says NOTHING about ownership: that account might well own
+    /// the title but cannot authenticate, so an exhausted walk of only these is a CREDENTIAL problem (add a
+    /// token), never a false "no account owns this". Mirrors `SteamError::LoginFailed`.
+    LoginFailed(String),
     /// A construct we refuse to guess at rather than emit a possibly-wrong hash.
     Unsupported(String),
     Http(String),
@@ -46,10 +51,28 @@ impl std::fmt::Display for GogError {
         match self {
             GogError::NoCredential(m) => write!(f, "{m}"),
             GogError::NotOwned(m) => write!(f, "not owned by this account: {m}"),
+            GogError::LoginFailed(m) => write!(f, "GOG login failed: {m}"),
             GogError::Unsupported(m) => write!(f, "refusing to hash: {m}"),
             GogError::Http(m) => write!(f, "GOG request failed: {m}"),
             GogError::Parse(m) => write!(f, "unexpected GOG response: {m}"),
         }
+    }
+}
+
+/// Does another stored account stand a chance where this one failed? Both a genuine ownership refusal and a
+/// login failure advance the walk — the latter because a rejected token says nothing about ownership.
+fn gog_is_not_owned(e: &GogError) -> bool {
+    matches!(e, GogError::NotOwned(_) | GogError::LoginFailed(_))
+}
+
+/// Aggregate an exhausted GOG account walk into the right class, given every refusal it collected. If ANY
+/// account could not authenticate, the walk is inconclusive about ownership → `LoginFailed` (a credential
+/// problem the human resolves with `cred add`), never a false `NotOwned`. Mirrors `steam::exhausted_steam`.
+fn exhausted_gog(msg: String, refusals: &[GogError]) -> GogError {
+    if refusals.iter().any(|e| matches!(e, GogError::LoginFailed(_))) {
+        GogError::LoginFailed(msg)
+    } else {
+        GogError::NotOwned(msg)
     }
 }
 
@@ -247,7 +270,9 @@ pub fn access_token(refresh_token: &str) -> R<String> {
     )
     .map_err(|f| match f.status {
         // OAuth2 answers a dead or revoked grant with 400 invalid_grant; a rejected client is 401/403.
-        Some(400 | 401 | 403) => GogError::NotOwned(
+        // This is a CREDENTIAL failure, not an ownership one — LoginFailed so an all-tokens-rejected walk
+        // reports "add a token", never a false "no account owns this".
+        Some(400 | 401 | 403) => GogError::LoginFailed(
             "the stored GOG refresh token was rejected — re-run `propnix cred add gog`".into(),
         ),
         Some(code) => GogError::Http(format!("GOG token exchange failed: HTTP {code}")),
@@ -294,26 +319,18 @@ pub fn gog_credentials(
         cred_dir.join("galaxy_tokens.json"), // older single-account layout
     ));
 
-    let mut denied: Option<String> = None;
+    let mut denied = false;
     let mut out: Vec<GogCredential> = Vec::new();
     for (account, p) in candidates {
         let text = match std::fs::read_to_string(&p) {
             Ok(t) => t,
-            // A token from before some part of the store contract (root-owned from the oldest layout, or
-            // group-only from before the builder-read ACL): converge it (one-off, sudo-escalated
-            // chown+setfacl) and retry, rather than misreporting a token we were denied as "no
-            // credential". Inside a build sandbox the repair instead returns the host-side fix verbatim.
+            // Only use a token we can READ. An unreadable one is another user's (0640, owned by them) on
+            // a shared host — never ours (we read our own via the owner bits) — so skip it and try the
+            // next; never "repair" it, which would chown a stranger's token to us. Recorded so an
+            // all-denied run reports the permission story rather than "no credential".
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                match crate::cred::store::repair_unreadable_token(cred_dir, &p)
-                    .and_then(|()| {
-                        std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))
-                    }) {
-                    Ok(t) => t,
-                    Err(msg) => {
-                        denied.get_or_insert(msg);
-                        continue;
-                    }
-                }
+                denied = true;
+                continue;
             }
             Err(_) => continue,
         };
@@ -341,14 +358,20 @@ pub fn gog_credentials(
     }
 
     if out.is_empty() {
-        // A permission problem we could not repair is the real story; "no credential" would send the
-        // user off to mint a token they already have.
-        return Err(match denied {
-            Some(m) => GogError::NotOwned(m),
-            None => GogError::NoCredential(format!(
+        // Every candidate was unreadable (all another user's) vs none present at all: distinct stories,
+        // so a host with only other users' credentials doesn't send this user off to mint one they can't
+        // see anyway.
+        return Err(if denied {
+            GogError::NoCredential(format!(
+                "the GOG credentials under {} are not readable by you — typically another user's; \
+                 add your own with `propnix cred add gog`",
+                cred_dir.display()
+            ))
+        } else {
+            GogError::NoCredential(format!(
                 "no GOG credential under {} — run `propnix cred add gog`",
                 cred_dir.display()
-            )),
+            ))
         });
     }
     Ok(out)
@@ -389,16 +412,6 @@ pub enum DepsPin {
     UseCurrent,
     /// Refuse unless the repository is at exactly this build (the regression-harness contract).
     Expect(String),
-}
-
-/// propnix's post-download prune (fetchGogGalaxyBuild). A depot file matching these would be DELETED by
-/// the fetcher, so our tree would disagree with the real one — refuse instead of silently diverging.
-fn is_pruned(basename: &str) -> bool {
-    matches!(
-        basename,
-        ".gogdl-resume" | ".gogdl-download-cache" | ".gogdl-redist-manifest" | ".gogdl-linux-manifest"
-    ) || basename.ends_with(".tmp")
-        || basename.ends_with(".delta")
 }
 
 /// A DepotFile's chunk list, STRICTLY. Every defaulted field here would have produced a plausible but
@@ -688,13 +701,14 @@ pub fn plan(
                     if flags.contains(&"support") {
                         p = format!("gog-support/{prod}/{p}");
                     }
-                    let base_name = p.rsplit('/').next().unwrap_or(&p);
-                    if is_pruned(base_name) {
-                        return Err(GogError::Unsupported(format!(
-                            "depot file {p:?} matches the fetcher's prune patterns, so the real tree \
-                             would not contain it"
-                        )));
-                    }
+                    // Every manifest-listed DepotFile is materialized VERBATIM — junk-looking names
+                    // included. There used to be an `is_pruned` refusal here mirroring the gogdl-era
+                    // fetcher's post-download prune (`.gogdl-*` state files, `*.tmp`, `*.delta`), but the
+                    // current pipeline has no prune to mirror: this plan is the SINGLE source for both the
+                    // pin hasher and `propnix download gog`, so tree and hash cannot diverge, and a
+                    // basename pattern can't distinguish downloader junk from real depot content — the
+                    // Witcher 3 Complete Edition builds (4.04a/4.04b, both current SKUs) legitimately ship
+                    // `dlc/dlc18/content/collision.cache.tmp`, which the old refusal made unpinnable.
                     let ch = chunks_of(i, &p)?;
                     let info = FileInfo {
                         size: ch.iter().map(|c| c.size).sum(),
@@ -1368,14 +1382,20 @@ pub fn download_build(
     let cdn = crate::pin::try_accounts(
         &creds,
         |c| c.account.clone(),
-        |e: &GogError| matches!(e, GogError::NotOwned(_)),
-        |tried, last| {
-            GogError::NotOwned(format!(
-                "no stored GOG account can fetch build {build_id} of {product_id}{} (tried: {}). Last \
-                 refusal: {last}",
-                dlc_id.map(|d| format!(" DLC {d}")).unwrap_or_default(),
-                tried.join(", ")
-            ))
+        gog_is_not_owned,
+        |tried, refusals: Vec<GogError>| {
+            // Preserve the class: if any account failed to authenticate, this is a credential problem, not
+            // a definitive "no account owns this" (that account might own it but could not log in).
+            let last = refusals.last().map(|e| e.to_string()).unwrap_or_default();
+            exhausted_gog(
+                format!(
+                    "no stored GOG account can fetch build {build_id} of {product_id}{} (tried: {}). \
+                     Last refusal: {last}",
+                    dlc_id.map(|d| format!(" DLC {d}")).unwrap_or_default(),
+                    tried.join(", ")
+                ),
+                &refusals,
+            )
         },
         |c| {
             let cdn = Cdn::new(Some(c.refresh_token.clone()));
@@ -1538,14 +1558,20 @@ pub fn hash_build(
     let cdn = crate::pin::try_accounts(
         &creds,
         |c| c.account.clone(),
-        |e: &GogError| matches!(e, GogError::NotOwned(_)),
-        |tried, last| {
-            GogError::NotOwned(format!(
-                "no stored GOG account can fetch build {build_id} of {product_id}{} (tried: {}). Last \
-                 refusal: {last}",
-                dlc_id.map(|d| format!(" DLC {d}")).unwrap_or_default(),
-                tried.join(", ")
-            ))
+        gog_is_not_owned,
+        |tried, refusals: Vec<GogError>| {
+            // Preserve the class: if any account failed to authenticate, this is a credential problem, not
+            // a definitive "no account owns this" (that account might own it but could not log in).
+            let last = refusals.last().map(|e| e.to_string()).unwrap_or_default();
+            exhausted_gog(
+                format!(
+                    "no stored GOG account can fetch build {build_id} of {product_id}{} (tried: {}). \
+                     Last refusal: {last}",
+                    dlc_id.map(|d| format!(" DLC {d}")).unwrap_or_default(),
+                    tried.join(", ")
+                ),
+                &refusals,
+            )
         },
         |c| {
             // The Cdn holds the REFRESH token: an access token minted now would expire long before a
@@ -1793,6 +1819,26 @@ mod tests {
         // container itself, which this planner never reads.
         assert!(chunks_of(&sfc(908), "f").is_err());
         assert!(chunks_of(&serde_json::json!({ "sfcRef": {}, "chunks": [] }), "f").is_err());
+    }
+
+    #[test]
+    fn an_exhausted_walk_keeps_the_login_failure_class() {
+        // Mirrors steam's test of the same invariant: if ANY account was turned away by a rejected token,
+        // the aggregate must classify as a credential problem — never a definitive "no account owns this".
+        let both = [
+            GogError::NotOwned("404".into()),
+            GogError::LoginFailed("token rejected".into()),
+        ];
+        assert!(matches!(exhausted_gog("m".into(), &both), GogError::LoginFailed(_)));
+        let all_login = [GogError::LoginFailed("rejected".into())];
+        assert!(matches!(exhausted_gog("m".into(), &all_login), GogError::LoginFailed(_)));
+        // Only when every account genuinely refused a title it could see is it truly NotOwned.
+        let owned = [GogError::NotOwned("404".into()), GogError::NotOwned("404".into())];
+        assert!(matches!(exhausted_gog("m".into(), &owned), GogError::NotOwned(_)));
+        // …and the walk advances on both classes.
+        assert!(gog_is_not_owned(&GogError::LoginFailed("x".into())));
+        assert!(gog_is_not_owned(&GogError::NotOwned("x".into())));
+        assert!(!gog_is_not_owned(&GogError::Http("x".into())), "transport still aborts");
     }
 
     #[test]

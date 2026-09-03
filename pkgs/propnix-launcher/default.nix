@@ -20,7 +20,6 @@ let
     "propnix-launcher"
     "propnix-mount"
     "propnix-prefetch"
-    "propnix-steam-cred" # stored-Steam-credential decoding (steamid.rs), shared with propnix-cli
   ];
   src = lib.cleanSourceWith {
     name = "propnix-rust";
@@ -52,8 +51,8 @@ rustPlatform.buildRustPackage {
     wayland # wayland-sys links libwayland-client for the ext/wlr foreign-toplevel focus path (focus.rs)
   ];
 
-  # The self-contained unit tests (steamid.rs's ini merge — the launch orchestration itself is still
-  # validated by the end-to-end game runs, §9). Everything they touch is pure fs, so this stays sandbox-safe.
+  # The self-contained unit tests (the launch orchestration itself is still validated by the end-to-end
+  # game runs, §9). Everything they touch is pure fs, so this stays sandbox-safe.
   doCheck = true;
 
   # KWin AUTHORIZATION for the focus paths (focus.rs). KDE hides `org_kde_plasma_window_management` — its

@@ -11,6 +11,7 @@
 //! collision is precisely why each half lives in its own module.
 
 pub mod gog;
+pub mod materialize;
 pub mod provider;
 pub mod steam;
 pub mod store;

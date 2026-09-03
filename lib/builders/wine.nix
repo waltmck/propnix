@@ -17,7 +17,7 @@
 {
   lib,
   stdenv,
-  runCommand,
+  runCommandLocal,
   writeText,
   wine,
   dxvk,
@@ -85,11 +85,11 @@
   # reports "no online subsystem" and runs offline. (A STATICALLY imported SDK needs the opposite — a real
   # no-op stub: `galaxyStubDlls`.)
   maskFiles ? [ ],
-  # Whether this build carries the gbe_fork offline Steam-entitlement shim (`steam.emu.enable`). Baked so
-  # the launcher knows to seat the stored Steam account's SteamID64 into the shim's global settings inside
-  # the per-launch view (launcher steamid.rs) — identity stays a RUNTIME, per-host fact, never a store
-  # path's content (see builders/steam-offline-entitlement.nix), and a GOG game's launch never touches the
-  # credential store.
+  # Whether this build carries the gbe_fork offline Steam-entitlement shim (`steam.emu.enable`). Baked as
+  # informational metadata: the shim manages its own identity, and the launcher no longer seats a stored
+  # SteamID64 into it (that seeding read the credential store as the launching human — not permitted by the
+  # group-ownership contract on declarative/shared hosts — and never delivered the stable identity it was
+  # added for; see builders/steam-offline-entitlement.nix for the no-baked-identity rationale).
   steamEmu ? false,
   # The baked GL/Vulkan fallback stack (builders/gl-fallback.nix — field contract and rationale there) —
   # activated by the launcher when `/run/opengl-driver` is absent (non-NixOS) or `forced` (the `mesa` knob).
@@ -312,7 +312,7 @@ let
   # so the writable upper (<state>/wine/prefix) only ever holds user.reg + wine's HKCU writes, never a
   # mountpoint stub. The game-agnostic base user.reg is SEEDED in on first launch, then the three-way
   # merge layers the propnix overrides on top.
-  userRegDir = runCommand "${appid}-userreg" { } ''
+  userRegDir = runCommandLocal "${appid}-userreg" { } ''
     mkdir -p "$out"
     cp ${baseUserReg} "$out/user.reg"
   '';
@@ -397,7 +397,7 @@ let
       # Optional DYNAMIC HKCU overrides: an executable whose JSON stdout is applied this launch
       # (runtime-derived → overrides static userReg). Non-zero/bad-JSON ABORTS.
       userRegScript = flat.userRegScript;
-      # gbe_fork present → the launcher seats the stored Steam account's identity (see the param above).
+      # gbe_fork present (informational — see the param above).
       steamEmu = steamEmu;
       inherit fallbackGl;
       # The complete WINEPREFIX mount table (see finalMounts above). The launcher joins each target to the

@@ -79,7 +79,7 @@ lib.throwIfNot (lib.hasSuffix "-linux" cfg.emulatedPlatform)
     # settings). Enabled DLC is NOT here — it goes into `payloads` above, where it gets its own exec-bit
     # fix layer and keeps its place in the union.
     extraLowers = (b.extraLowers or [ ]) ++ (map (d: "${d}") cfg.extraLowers);
-    # gbe_fork wired in (modules/steam-emu.nix) → the launcher seats the stored account's SteamID64.
+    # gbe_fork wired in (modules/steam-emu.nix); informational for the launcher.
     steamEmu = cfg.steam.emu.enable;
     # The GL/Vulkan userspace of last resort (host-native arch; the guest reaches GL through the
     # emulator's native bridge). See builders/gl-fallback.nix for the rationale and field contract.

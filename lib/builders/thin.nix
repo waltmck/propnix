@@ -9,7 +9,7 @@
 {
   lib,
   writeText,
-  runCommand,
+  runCommandLocal,
   gnutar,
   sealing,
   mkLauncherPackage,
@@ -72,11 +72,11 @@
     systems = [ ];
     reason = null;
   },
-  # Whether this build carries the gbe_fork offline Steam-entitlement shim (`steam.emu.enable`). Baked so
-  # the launcher knows to seat the stored Steam account's SteamID64 into the shim's global settings inside
-  # the per-launch view (launcher steamid.rs) — identity stays a RUNTIME, per-host fact, never a store
-  # path's content (see builders/steam-offline-entitlement.nix), and a GOG game's launch never touches the
-  # credential store.
+  # Whether this build carries the gbe_fork offline Steam-entitlement shim (`steam.emu.enable`). Baked as
+  # informational metadata: the shim manages its own identity, and the launcher no longer seats a stored
+  # SteamID64 into it (that seeding read the credential store as the launching human — not permitted by the
+  # group-ownership contract on declarative/shared hosts — and never delivered the stable identity it was
+  # added for; see builders/steam-offline-entitlement.nix for the no-baked-identity rationale).
   steamEmu ? false,
   # ── the per-emulator LAUNCH BLOCK (from a backend registry entry, via mk-thin-build) ──
   backend, # informational: "box64" | "fex" | "native" (the launcher does not branch on it)
@@ -127,7 +127,7 @@ let
   # leaf omitted) that every skeleton then skips — build green, launcher execve's a directory, bare EACCES
   # at launch. Before the per-tree split this was a hard build error, and it stays one.
   executablesPresent =
-    runCommand "${appid}-executables-present" { } ''
+    runCommandLocal "${appid}-executables-present" { } ''
       ${lib.concatMapStrings (e: ''
         found=
         for tree in ${lib.escapeShellArgs (map (p: "${p}") payloads)}; do
@@ -195,7 +195,7 @@ let
         tar = "${gnutar}/bin/tar";
         mangohud = mangohud;
         inherit fallbackGl;
-        # gbe_fork present → the launcher seats the stored Steam account's identity (see the param above).
+        # gbe_fork present (informational — see the param above).
         steamEmu = steamEmu;
       }
       // gameModeFix

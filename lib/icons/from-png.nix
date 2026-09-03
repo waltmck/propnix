@@ -5,14 +5,14 @@
 #
 # iconName is the reverse-DNS id (org.propnix.<appid>) so `Icon=<iconName>` in the .desktop resolves.
 {
-  runCommand,
+  runCommandLocal,
   imagemagick,
 }:
 {
   src, # a raster image path (PNG etc.), usually "${payload}/…/icon.png"
   iconName, # freedesktop icon name, e.g. "org.propnix.factorio"
 }:
-runCommand "propnix-icon-${iconName}"
+runCommandLocal "propnix-icon-${iconName}"
   {
     nativeBuildInputs = [ imagemagick ];
     meta.description = "freedesktop hicolor icon theme + splash png, autocropped & recentred from a raster source";

@@ -23,6 +23,15 @@ mkApp (
     # Full-color icon auto-extracted from the exe's PE resources (icon.auto default). Symbolic vendored (CC BY-SA 4.0).
     icon.symbolic = ./no-mans-sky-symbolic.svg;
 
+    # HDR. NMS renders through winevulkan directly, but like most Windows titles it asks DXGI whether the
+    # display is HDR-capable — and wine never reports HDR (winewayland writes no EDID into the registry, so
+    # DXVK's dxgi has nothing to auto-detect from). DXVK_HDR=1 is DXVK-dxgi's stand-in for the Windows
+    # "HDR on" toggle (d3d=dxvk installs its dxgi on this backend even though the renderer is Vulkan);
+    # with it set, NMS offers/enables HDR and creates an HDR10 Vulkan swapchain via mesa's Wayland color
+    # management. VERIFIED on x86_64 (Hyprland HDR session): this alone makes HDR work. Safe on SDR
+    # sessions: the Vulkan surface offers no HDR10 colorspace there, so the game stays SDR.
+    env.DXVK_HDR = "1";
+
     # PLAYS on aarch64 (title screen, load-in, walking around), with ONE outstanding rendering defect that
     # belongs to the GPU driver, not to this package or the emulation stack.
     #

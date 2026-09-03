@@ -20,7 +20,7 @@
 # reading a payload at eval (IFD), which would turn every eval gate into a credentialed multi-GB fetch.
 {
   lib,
-  runCommand,
+  runCommandLocal,
   patchelf,
 }:
 {
@@ -39,7 +39,7 @@ let
 in
 lib.throwIf (paths == [ ]) "propnix mkPatchedExes (${name}): no game trees given" (
   lib.throwIf (exes == [ ]) "propnix mkPatchedExes (${name}): no executables given" (
-    runCommand "propnix-exes-${name}" { nativeBuildInputs = [ patchelf ]; } ''
+    runCommandLocal "propnix-exes-${name}" { nativeBuildInputs = [ patchelf ]; } ''
       ${lib.concatMapStringsSep "\n" (e: ''
         src=
         for tree in ${lib.escapeShellArgs paths}; do

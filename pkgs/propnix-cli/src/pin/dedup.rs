@@ -186,6 +186,57 @@ mod tests {
         (out, pulls.get())
     }
 
+    /// Drive a plan whose keys are u32 (so a stress case can have thousands of distinct chunks) and
+    /// assert EVERY occurrence emits its own key's bytes — the invariant the real pin relies on. Returns
+    /// the emitted keys so a caller can also compare two budgets.
+    fn run_u32(keys: &[u32], sizes: &[u64], budget: u64) -> Vec<u32> {
+        let (mut dd, fetch) = plan(keys, sizes, budget);
+        let mut fetch_iter = fetch.iter();
+        let mut emitted = Vec::with_capacity(keys.len());
+        for i in 0..keys.len() {
+            // Engine delivers the block for the next planned fetch: content is the FETCHED key, tagged.
+            let v = dd
+                .next(|| {
+                    let p = *fetch_iter.next().expect("plan pulled more than it planned");
+                    Ok(keys[p].to_le_bytes().to_vec())
+                })
+                .unwrap();
+            let got = u32::from_le_bytes(v[..4].try_into().unwrap());
+            assert_eq!(got, keys[i], "occurrence {i}: emitted chunk {got}, expected {}", keys[i]);
+            emitted.push(got);
+        }
+        assert!(fetch_iter.next().is_none(), "every planned fetch consumed");
+        emitted
+    }
+
+    #[test]
+    fn heavy_dedup_churn_emits_correct_bytes_at_every_occurrence_and_is_window_independent() {
+        // A large, churn-heavy sequence like a real base depot: thousands of occurrences, a limited pool
+        // of distinct chunks so most repeat, and duplicates spread far apart so residency intervals
+        // overlap and evict under a tight budget. Deterministic LCG — no rand dep, and Math.random is
+        // unavailable in this environment anyway.
+        let mut state: u64 = 0x9e3779b97f4a7c15;
+        let mut nxt = |m: u64| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) % m
+        };
+        let distinct = 400u32;
+        let n = 12_000usize;
+        let keys: Vec<u32> = (0..n).map(|_| nxt(distinct as u64) as u32).collect();
+        // Sizes vary 1..=8 KiB so the byte budget, not a count, decides residency (as in a real depot).
+        let sizes: Vec<u64> = keys.iter().map(|_| 1024 * (1 + nxt(8))).collect();
+
+        // The invariant: the emitted stream is byte-identical regardless of the cache budget — the window
+        // is a MEMORY bound, never a correctness input. Tight budget forces heavy churn/eviction; a huge
+        // budget caches everything; zero disables the cache. All must agree.
+        let total: u64 = sizes.iter().sum();
+        let reference = run_u32(&keys, &sizes, 0); // no cache: each occurrence fetched independently
+        for budget in [1u64, 64 * 1024, 512 * 1024, 4 * 1024 * 1024, total, total * 2] {
+            let got = run_u32(&keys, &sizes, budget);
+            assert_eq!(got, reference, "budget {budget}: stream differs from the cache-free reference");
+        }
+    }
+
     #[test]
     fn duplicates_are_served_from_memory_exactly_once_fetched() {
         // Chunk 7 appears three times; it must be pulled once and emitted three times, byte-identical.

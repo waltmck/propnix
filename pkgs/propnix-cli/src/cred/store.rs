@@ -5,50 +5,66 @@
 //!   <root>/<type>/<username>/<token_filename>      # e.g. gog/alice/galaxy_tokens.json
 //!
 //! `<root>` is bound into the Nix build sandbox at `/propnix`, so the fetcher reads `/propnix/credentials.toml`
-//! and `/propnix/gog/*/galaxy_tokens.json`. Token files are OWNED BY THE USER WHO CREATED THEM and
-//! group-owned by `$PROPNIX_BUILD_GROUP` (`propnix-fetch` under the NixOS module; default `nixbld`), mode
-//! 0640, PLUS — when that group is not the sandbox build group itself — a POSIX ACL granting the sandbox
-//! build group (`$PROPNIX_SANDBOX_GROUP`, default `nixbld`) read; see `grant_build_read` for why group
-//! membership alone stopped reaching builders. The owner reads without any privilege — which is what lets
-//! `propnix pin` refresh a hash without sudo. Leaving tokens root-owned would have meant every re-pin needed
-//! root just to read a token it had already been granted. Dirs are 0755 (their names aren't secret), and a
-//! dir this store creates carries the matching DEFAULT ACL, so a token rewritten by any code path inherits
-//! builder read instead of silently regressing.
-//! (An older propnix DID write tokens root-owned; the first read that fails on one converges it back onto
-//! this contract automatically — see `repair_unreadable_token` — instead of asking for a manual chown.)
+//! and `/propnix/gog/*/galaxy_tokens.json`. A token has EXACTLY TWO readers, and its permissions name them
+//! both: `owner = the human who created it` (reads via the owner bits — which is what lets `propnix pin`
+//! refresh a hash without sudo) and `group = the build-users group` (`$PROPNIX_BUILD_GROUP`, default
+//! `nixbld` — reads via the group bits), mode 0640, never world-readable.
+//!
+//! Why group-OWNERSHIP and not a POSIX ACL: a sandboxed Nix build runs in a user namespace that keeps only
+//! its single primary gid (`nixbld`) and drops every supplementary group, and — decisively on ZFS — the
+//! kernel honors that primary gid through plain group-ownership bits but IGNORES a POSIX ACL group entry for
+//! such a build. So the token must be group-owned by `nixbld`, not merely ACL-granted to it. (An earlier
+//! iteration used an ACL; it silently failed to grant reads on ZFS.)
+//!
+//! Why that is possible unprivileged: a human is not a member of `nixbld` (and must not be — nix would pick
+//! them to run builds as), so cannot `chgrp` a token into it. Instead the type directories (`steam/`,
+//! `gog/`) are setgid `nixbld` and world-writable + sticky (the `/tmp` model), so any human creates their
+//! account dir with no privilege and the account dir + token inherit the group for free. Not world-READABLE
+//! despite the world-writable type dir: the account dir is 0750 (`other` cannot traverse in) and the token
+//! is 0640. See `put` / `ensure_type_dir` / `ensure_account_dir`.
 //!
 //! Writes/removes touch a system dir, so they sudo-escalate when the invoking user can't write the store —
-//! while the interactive login itself runs unprivileged (the browser). A GROUP-MANAGED store needs no
-//! escalation at all: the NixOS module makes the store dirs setgid + group-writable by a humans-only group
-//! (`propnix`) while the tokens carry a wider group that also contains the build users (`propnix-fetch`), so
-//! a member can add and remove credentials while a build can still only read them. `make_dir` detects that
-//! layout from the parent's setgid bit and leaves existing dirs untouched, which is what keeps the
-//! unprivileged path from tripping over a root-owned store root.
+//! while the interactive login itself runs unprivileged (the browser). A store whose type dirs already exist
+//! (the NixOS module pre-creates them, or a prior `cred add` did) needs no escalation: the type dir is
+//! world-writable, so creating an account dir and a token beneath it is an ordinary unprivileged write.
+//! `ensure_*` leave an existing dir untouched, which keeps the unprivileged path from tripping over the
+//! root-owned store root.
 
 use std::ffi::CString;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub struct CredStore {
     root: PathBuf,
-    /// The group asked for by `$PROPNIX_BUILD_GROUP` (or the `nixbld` default) — kept for diagnostics.
+    /// The group asked for by `$PROPNIX_BUILD_GROUP` (or the `nixbld` default) — kept for diagnostics. It
+    /// is the BUILD-USERS group: the one a sandboxed builder runs as, and so the one that must own a token
+    /// for the build to read it (see `put`).
     build_group: String,
     /// …that name resolved against the host's groups, so a store write can never fail on an `install -g` for
     /// a group nobody created. `None` = no suitable group exists (a single-user Nix has no `nixbld`), in
-    /// which case token files simply keep the creator's primary group.
+    /// which case token files simply keep the creator's primary group (which the builder — the same user —
+    /// then reads as the owner).
     file_group: Option<String>,
-    /// The group a SANDBOXED builder actually runs as — its PRIMARY gid, nix's build-users-group
-    /// (`$PROPNIX_SANDBOX_GROUP`, which the NixOS module sets from `nix.settings.build-users-group`;
-    /// default `nixbld`), resolved against the host's groups. `None` = single-user Nix, builds run as the
-    /// invoking user and need no grant. See `grant_build_read` for why this is distinct from `file_group`.
-    sandbox_group: Option<String>,
 }
 
 /// One account type's stored accounts, for `cred list`.
 pub struct TypeListing {
     pub type_name: String,
     pub usernames: Vec<String>,
+}
+
+/// Who may rewrite a stored account without sudo — the multi-user store's per-human isolation, reported
+/// by `cred list`.
+pub enum AccountAccess {
+    /// The invoking user owns the account dir: writable (`cred rm`/refresh) without privilege.
+    Mine,
+    /// Someone else owns the account dir. Still READ by any build (group `nixbld`), not writable by you.
+    /// `user` is their login name, or their raw uid when the host has no name for it (à la `ls -l`); the
+    /// numeric `uid` is kept so the caller can special-case root (a sudo-created or module store), which
+    /// should not read as "another user".
+    Other { user: String, uid: u32 },
+    /// No account directory to stat — ownership indeterminate (a flat legacy token, or a race).
+    Unknown,
 }
 
 impl CredStore {
@@ -58,17 +74,13 @@ impl CredStore {
             .unwrap_or_else(|| PathBuf::from("/var/lib/propnix"));
         let build_group =
             std::env::var("PROPNIX_BUILD_GROUP").unwrap_or_else(|_| "nixbld".to_string());
-        // Resolve now: the NixOS module points this at `propnix-fetch`, but the variable outlives the module
-        // in an already-open login session, and a host may have no `nixbld` either.
+        // Resolve now: the variable outlives the module in an already-open login session, and a host may
+        // have no `nixbld` either.
         let file_group = resolve_file_group(&build_group);
-        let sandbox_group = resolve_file_group(
-            &std::env::var("PROPNIX_SANDBOX_GROUP").unwrap_or_else(|_| "nixbld".to_string()),
-        );
         CredStore {
             root,
             build_group,
             file_group,
-            sandbox_group,
         }
     }
 
@@ -83,7 +95,12 @@ impl CredStore {
         let Ok(types) = std::fs::read_dir(&self.root) else {
             return out;
         };
-        let mut types: Vec<_> = types.flatten().filter(|e| e.path().is_dir()).collect();
+        // `cache/` is the reserved artifact-cache sibling (pin/steamcache.rs), not an account type —
+        // without this filter it shows up in `cred list` as a bogus "cache" type holding a "steam" account.
+        let mut types: Vec<_> = types
+            .flatten()
+            .filter(|e| e.path().is_dir() && e.file_name() != "cache")
+            .collect();
         types.sort_by_key(|e| e.file_name());
         for t in types {
             let mut usernames: Vec<String> = std::fs::read_dir(t.path())
@@ -102,6 +119,25 @@ impl CredStore {
         out
     }
 
+    /// Who owns an account's directory — i.e. who may `cred rm`/refresh it WITHOUT sudo. This is the
+    /// isolation a multi-user store gives each human: an account dir is 0750, owned by its creator, so on
+    /// a shared host every user adds and manages their own while every user's tokens are still readable by
+    /// the build sandbox (group `nixbld`) and by no other human. `cred list` surfaces the distinction.
+    pub fn account_access(&self, type_name: &str, username: &str) -> AccountAccess {
+        use std::os::unix::fs::MetadataExt;
+        let dir = self.root.join(type_name).join(username);
+        match std::fs::metadata(&dir) {
+            Ok(m) if m.uid() == invoking_uid_num() => AccountAccess::Mine,
+            Ok(m) => AccountAccess::Other {
+                user: username_of(m.uid()),
+                uid: m.uid(),
+            },
+            // No account directory (a flat legacy token, a race, or a store we cannot stat) — leave the
+            // caller to say nothing rather than guess.
+            Err(_) => AccountAccess::Unknown,
+        }
+    }
+
     /// Is this account DECLARED in the host's configuration rather than added with `cred add`?
     ///
     /// The NixOS module records what it manages in a manifest beside the store (`<root>-declarative-\
@@ -110,13 +146,19 @@ impl CredStore {
     /// proxy. No manifest (a store nothing declares, or a non-NixOS host) means nothing is declarative.
     pub fn is_declarative(&self, type_name: &str, username: &str) -> bool {
         let prefix = format!("{type_name}/{username}/");
-        let manifest = PathBuf::from(format!(
-            "{}-declarative-credentials",
-            self.root.to_string_lossy().trim_end_matches('/')
-        ));
-        std::fs::read_to_string(manifest)
+        std::fs::read_to_string(self.manifest_path())
             .map(|s| s.lines().any(|l| l.starts_with(&prefix)))
             .unwrap_or(false)
+    }
+
+    /// The declarative-credentials manifest the NixOS module's materializer keeps BESIDE the store — the
+    /// record `is_declarative` reads, and the file to delete when a host stops running the module (nothing
+    /// maintains it then, and its stale entries would keep refusing `cred add`/`cred rm` forever).
+    fn manifest_path(&self) -> PathBuf {
+        PathBuf::from(format!(
+            "{}-declarative-credentials",
+            self.root.to_string_lossy().trim_end_matches('/')
+        ))
     }
 
     /// Find the (type, dir) of a stored account by username. `type_filter` (from `--type`) restricts the
@@ -152,9 +194,21 @@ impl CredStore {
         }
     }
 
-    /// Persist a minted credential at `<root>/<type>/<username>/<filename>` (token 0640, owner = the
-    /// invoking user, group = build group), creating whatever dirs are missing on the way. Escalates via
-    /// sudo when needed — but the result is owned by the user, not by root.
+    /// Persist a minted credential at `<root>/<type>/<username>/<filename>`. The token ends up
+    /// `owner = the invoking human`, `group = the build-users group` (`$PROPNIX_BUILD_GROUP`, default
+    /// `nixbld`), mode 0640 — the exact two readers a token is allowed: its OWNER (via the owner bits, so
+    /// `propnix pin` reads it) and a SANDBOXED Nix builder (via the group bits). The group leg is what a
+    /// user-namespaced build reliably reads: a build keeps only its primary gid (`nixbld`), no
+    /// supplementary groups, and — crucially on ZFS — the kernel honors that primary gid through plain
+    /// group-ownership bits but NOT through a POSIX ACL group entry, so the token is group-OWNED by the
+    /// build group rather than ACL-granted to it.
+    ///
+    /// The token's group is set by SETGID INHERITANCE, never a chgrp: a human is not (and must not be — nix
+    /// would pick them to run builds as) a member of `nixbld`, so cannot chgrp a file into it. Instead the
+    /// type directories (`steam/`, `gog/`) are setgid `nixbld` and world-writable + sticky (the /tmp model),
+    /// so any human creates their account dir there with no privilege, and the account dir + token beneath
+    /// inherit the group for free. Not world-READABLE despite the world-writable type dir: the account dir
+    /// is 0750 (`other` cannot even traverse into it) and the token is 0640.
     pub fn put(
         &self,
         type_name: &str,
@@ -163,109 +217,294 @@ impl CredStore {
         token: &[u8],
     ) -> Result<(), String> {
         self.note_group_fallback();
-        // Stage the token to a private user temp first, then install it into the store.
-        let tmp = self.stage_temp(token)?;
+        // Every field is exactly ONE path level of `<root>/<type>/<username>/<file>` — and the USERNAME is
+        // not always operator-typed: the GOG provider takes it from the API's userData response, so it must
+        // be validated like any external input or a hostile value walks the write (and its sudo escalation)
+        // out of the layout. Same check the materializer applies to declared credentials.
+        crate::cred::materialize::check_component("account type", type_name)?;
+        crate::cred::materialize::check_component("username", username)?;
+        crate::cred::materialize::check_component("token filename", filename)?;
+        if type_name == "cache" {
+            return Err("'cache' is the artifact cache, not a credential type".to_string());
+        }
+        // A declaratively-managed account belongs to the host configuration: writing a token here would
+        // be clobbered back at the next activation (the materializer owns the account dir root-owned and
+        // re-copies the declared secret), so the "success" would be a lie. Refuse and name the config,
+        // exactly as `remove` does — and BEFORE touching the store, so nothing is half-written. (Only the
+        // module writes the declarative manifest, so this can never misfire on an imperative account.)
+        if self.is_declarative(type_name, username) {
+            return Err(format!(
+                "{type_name} credential '{username}' is managed declaratively — it is materialized from \
+                 your NixOS configuration, so a token added here would be overwritten at the next \
+                 activation.\n  Change it in services.propnix.credentials.{type_name}.{username} (and the \
+                 secret it points at, e.g. sops.secrets) and rebuild.\n  (If this host no longer runs the \
+                 propnix NixOS module, nothing maintains that record any more — delete \
+                 {} to release the account.)",
+                self.manifest_path().display()
+            ));
+        }
         let acct_dir = self.root.join(type_name).join(username);
         let dest = acct_dir.join(filename);
 
         let owner = self.owner_uid();
-        self.make_dir(&self.root)?;
-        self.make_dir(&self.root.join(type_name))?;
-        self.make_dir(&acct_dir)?;
+        // Settle the directories BEFORE staging the token: every refusal here (declined sudo, an account
+        // path someone else created) then exits without a token copy ever having touched a shared temp dir.
+        self.ensure_root()?;
+        self.ensure_type_dir(&self.root.join(type_name))?;
+        self.ensure_account_dir(&acct_dir)?;
+        // …and bring the account dir onto the contract whatever layout created it: group = build group,
+        // mode 0750-equivalent. Doing this only when the token would need an explicit `-g` is not enough:
+        // a dir can carry the right group yet deny group traversal (2700 — the token becomes unreachable
+        // however correct its own bits), or GRANT group write (an older 2775 layout — chgrp'ing that to
+        // the build group would hand every build user replace rights over the token).
+        self.converge_account_dir(&acct_dir)?;
+        // Stage the token to a private user temp, then install it into the store.
+        let tmp = self.stage_temp(token)?;
+        // NB: the artifact cache (`cache/steam`) is deliberately NOT set up here. It must be readable and
+        // writable with NO privilege — a sandboxed FOD warms and reads it and cannot sudo — so it cannot
+        // depend on a root-created setgid dir. Instead steamcache.rs manages it entirely unprivileged:
+        // each writer stores entries under its own uid/group (a build user's group IS nixbld, so builds
+        // share; a host-side pin's are its own), 0640 not world-readable, and a reader simply skips any
+        // entry it cannot read. See pin/steamcache.rs.
         let tmp_s = tmp.to_string_lossy();
         let dest_s = dest.to_string_lossy();
+        // ATOMIC placement: install to a sibling temp IN THE ACCOUNT DIR, then rename onto the final name.
+        // GNU `install` writes straight to its dest (unlink-then-create, not temp+rename), so installing
+        // directly onto the token path would — if interrupted (disk full, ^C) — unlink the good token and
+        // leave a PARTIAL one at the real path, and a truncated token then fails to parse and strands every
+        // fetch for this account. The rename makes the final name appear all-or-nothing and never disturbs
+        // an existing good token until it succeeds. The temp is a sibling so the rename stays within one
+        // filesystem (a cross-fs `mv` would silently degrade to copy+unlink, reintroducing the gap).
+        let dest_tmp = acct_dir.join(format!(".{filename}.{}.tmp", std::process::id()));
+        let dest_tmp_s = dest_tmp.to_string_lossy();
+        // Install WITHOUT -g only when the token will RELIABLY inherit the build group — i.e. the account
+        // dir is setgid AND its group already IS the build group. Then a plain unprivileged `install`
+        // produces a group-`nixbld` token with no sudo. Otherwise (dir not setgid, or setgid with some
+        // OTHER group — which happens on a 1777-fallback type dir where the account dir inherited the
+        // human's primary group and setgid stuck because it matched) pass an explicit `-g`, which names the
+        // build group and rides the sudo escalation. Testing the actual gid, not just the setgid bit, is
+        // what makes this correct on every filesystem — an is_setgid-only check would wrongly omit -g for a
+        // setgid-but-wrong-group dir and leave the token unreadable by builds.
+        let inherits_build_group = is_setgid(&acct_dir)
+            && self
+                .file_group
+                .as_deref()
+                .and_then(gid_of_group)
+                .is_some_and(|want| gid_of(&acct_dir) == Some(want));
         let mut args: Vec<&str> = vec!["-m", "0640", "-o", &owner];
-        args.extend(self.group_args());
+        if !inherits_build_group {
+            args.extend(self.group_args());
+        }
         args.push(&tmp_s);
-        args.push(&dest_s);
-        self.priv_run("install", &args)?;
+        args.push(&dest_tmp_s);
+        let install_res = self.run_escalating("install", &args);
+        // Always remove the staging temp (it holds the token) even when the install failed — sudo declined,
+        // ^C at the prompt, disk full — so a failed `cred add` never leaves a secret behind in /tmp.
         let _ = std::fs::remove_file(&tmp);
-        self.grant_build_read(&dest)?;
+        if let Err(e) = install_res {
+            // `install` writes its dest directly, so a failure can still have left a (possibly partial)
+            // token copy at the sibling temp name — and as a dotfile nothing else would ever reclaim it.
+            // A plain unlink suffices on every path here: even a sudo-made temp sits in a dir the invoker
+            // owns and may unlink from.
+            let _ = std::fs::remove_file(&dest_tmp);
+            return Err(e);
+        }
+        // `-T`: the dest must be REPLACED, never descended into — without it, a directory sitting at the
+        // token's final path would make `mv` silently move the temp INSIDE it and report success, leaving
+        // no token at the path every fetch reads.
+        if let Err(e) = self.run_escalating("mv", &["-fT", &dest_tmp_s, &dest_s]) {
+            let _ = self.run_escalating("rm", &["-f", "--", &dest_tmp_s]);
+            return Err(e);
+        }
         self.ensure_pointer()?;
         Ok(())
     }
 
-    /// The third leg of the store contract: a POSIX ACL granting the SANDBOX build group read on a token.
-    ///
-    /// Group ownership alone no longer covers the builder: the modern Nix sandbox (2.34-era) runs builders
-    /// inside a user namespace that maps exactly one uid and one gid — the build user's own — and drops
-    /// every supplementary group, so membership of the token's file group (`propnix-fetch`) never reaches a
-    /// build. What DOES survive is the builder's PRIMARY gid (`nixbld`), and an ACL naming that group is
-    /// checked against it. An ACL rather than `chgrp nixbld` because the file GROUP must stay one humans
-    /// may be members of: an unprivileged owner can `setfacl` any group in, but can only `chgrp` into a
-    /// group they belong to, and a human must never join `nixbld` (nix would pick them to run builds as).
-    ///
-    /// Skipped when the two groups coincide — the plain non-module layout already carries group `nixbld`,
-    /// which the primary gid reads through the ordinary 0640 group bits — and when there is no build group
-    /// at all (single-user Nix: builds run as the invoking user).
-    fn grant_build_read(&self, file: &Path) -> Result<(), String> {
-        let Some(g) = self.acl_group() else {
-            return Ok(());
-        };
-        let entry = format!("g:{g}:r");
-        self.priv_run("setfacl", &["-m", &entry, &file.to_string_lossy()])
-            .map_err(|e| acl_failure_context(&e, g))
-    }
-
-    /// The DEFAULT-ACL counterpart of `grant_build_read`, for a directory this store creates: every file
-    /// later created inside it — a token refresh, a re-`cred add` — inherits the builder-read entry, so the
-    /// contract cannot silently regress on a rewrite that bypasses `put`.
-    fn grant_build_read_default(&self, dir: &str) -> Result<(), String> {
-        let Some(g) = self.acl_group() else {
-            return Ok(());
-        };
-        let entry = format!("g:{g}:r");
-        self.priv_run("setfacl", &["-d", "-m", &entry, dir])
-            .map_err(|e| acl_failure_context(&e, g))
-    }
-
-    /// The group the builder-read ACL should name, or `None` when no ACL is needed: no sandbox build group
-    /// exists (single-user Nix), or the token file group IS the sandbox group (the plain `nixbld` layout,
-    /// already readable through the group bits).
-    fn acl_group(&self) -> Option<&str> {
-        match (&self.sandbox_group, &self.file_group) {
-            (Some(s), Some(f)) if s == f => None,
-            (Some(s), _) => Some(s.as_str()),
-            (None, _) => None,
+    /// Run a store write UNPRIVILEGED FIRST, retrying once under sudo only when that fails (and we are not
+    /// already root). This is what keeps the two setups honest at once: on a module-managed store every
+    /// normal write lands in a world-writable type dir or the human's own account dir, so the first attempt
+    /// succeeds and NO PROMPT ever appears; on a plain store exactly the operations that genuinely need
+    /// root (creating the root, naming the build group on a type dir) fall through to one sudo prompt each.
+    /// The old shape — deciding sudo up front from the store root's writability — got both cases wrong:
+    /// it prompted for writes the world-writable layout permits, and it ran `install -g nixbld`
+    /// unprivileged where only root may name that group.
+    fn run_escalating(&self, program: &str, args: &[&str]) -> Result<(), String> {
+        let plain = run_command(program, args);
+        if plain.is_ok() || is_root() {
+            return plain;
         }
+        let mut v = vec![program];
+        v.extend_from_slice(args);
+        run_command("sudo", &v).map_err(|sudo_err| {
+            format!("{sudo_err} (unprivileged attempt: {})", plain.unwrap_err())
+        })
     }
 
-    /// Create one store directory IF IT IS MISSING, and otherwise leave it exactly as it is. Never adjusting
-    /// an existing directory is what lets the whole `cred add` run unprivileged: the NixOS module owns the
-    /// store root (root-owned, group-writable), and chowning that as a plain user is EPERM even though
-    /// writing *inside* it is allowed.
-    ///
-    /// A new dir inherits the parent's setgid group when the parent has one — that is how it picks up the
-    /// module's dir group, which is deliberately NOT the group the tokens carry (a build user is in the
-    /// latter, so group-writing anything to it would hand builds the store). Under a setgid parent the dir is
-    /// group-writable too, so any member of that group can later `cred rm` the account; without one, the
-    /// historical 0755 owner-only layout is kept.
-    fn make_dir(&self, dir: &Path) -> Result<(), String> {
-        if dir.is_dir() {
+    /// The store root, created only if missing (the NixOS module owns it — root-owned; adjusting it as a
+    /// plain user is EPERM even though writing *inside* it is allowed, so an existing root is left alone).
+    fn ensure_root(&self) -> Result<(), String> {
+        if self.root.is_dir() {
             return Ok(());
         }
         let owner = self.owner_uid();
-        let path = dir.to_string_lossy();
+        self.run_escalating(
+            "install",
+            &["-d", "-m", "0755", "-o", &owner, &self.root.to_string_lossy()],
+        )
+    }
 
-        // A plain store: the historical owner-only layout, group set explicitly.
-        if !dir.parent().is_some_and(is_setgid) {
-            let mut args: Vec<&str> = vec!["-d", "-m", "0755", "-o", &owner];
+    /// A type directory (`steam/`, `gog/`), created only if missing. The load-bearing dir of the whole
+    /// contract: setgid `nixbld` (so tokens beneath inherit the build group), world-writable + sticky (so
+    /// any human creates an account dir here without being in that group, `/tmp`-style — the sticky bit
+    /// stops one user removing another's). The NixOS module pre-creates these identically, so on a managed
+    /// store this is a no-op; a plain store creates it via the sudo retry (naming the build group is a
+    /// root-only act for a human outside it). No secret lives at this level — only account-dir names.
+    fn ensure_type_dir(&self, dir: &Path) -> Result<(), String> {
+        match std::fs::symlink_metadata(dir) {
+            Ok(m) if !m.is_dir() => {
+                return Err(format!(
+                    "{} exists but is not a real directory — remove it and retry",
+                    dir.display()
+                ));
+            }
+            Ok(_) => {
+                // An existing type dir is trusted as-is (the module owns it) — EXCEPT the one shape that
+                // voids `ensure_account_dir`'s validation: world-writable WITHOUT sticky, where any user
+                // can rename a just-validated account entry away and substitute another between our lstat
+                // and the write. Both layouts this code creates (3777, 1777) are sticky; only a manual
+                // chmod produces the broken shape, so name the repair rather than work around it.
+                if mode_of(dir).is_some_and(|m| m & 0o002 != 0 && m & 0o1000 == 0) {
+                    return Err(format!(
+                        "type dir {} is world-writable but not sticky, so account entries in it can be \
+                         swapped out from under their owners — chmod +t it (the contract layout is 3777)",
+                        dir.display()
+                    ));
+                }
+                return Ok(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("stat {}: {e}", dir.display())),
+        }
+        let path = dir.to_string_lossy();
+        // 3777 = setgid + sticky + rwx for all. Some environments refuse the setgid chmod outright even
+        // for root's own dir (a user namespace over ZFS EPERMs instead of dropping the bit) — fall back
+        // to 1777 there: the layout loses group inheritance, and `put` notices the missing setgid bit
+        // and names the group explicitly instead.
+        let install_d = |mode: &str| {
+            let mut args: Vec<&str> = vec!["-d", "-m", mode];
             args.extend(self.group_args());
             args.push(&path);
-            self.priv_run("install", &args)?;
-            return self.grant_build_read_default(&path);
-        }
-
-        // A group-managed store. mkdir inherits the parent's group either way; the mode we ask for is only
-        // about who may manage the account LATER, so carrying the setgid bit down is a nicety, not the point
-        // — and setting it is a privileged operation on some filesystems (ZFS returns EPERM for an
-        // unprivileged setgid chmod inside a user namespace instead of dropping the bit). Fall back to plain
-        // group-write rather than failing the whole `cred add` over it.
-        let install_d = |mode: &str| {
-            self.priv_run("install", &["-d", "-m", mode, "-o", &owner, &path])
+            self.run_escalating("install", &args)
         };
-        install_d("2775").or_else(|_| install_d("0775"))?;
-        self.grant_build_read_default(&path)
+        let res = install_d("3777").or_else(|_| install_d("1777"));
+        if res.is_err() {
+            // A failed `install -d` can still have CREATED the dir (the mkdir succeeded; applying the
+            // mode/group did not). Leaving it would wedge every later run — the dir would exist, be
+            // trusted above, and carry none of the contract. Remove only what this call just made:
+            // rmdir refuses a non-empty or foreign (symlink/file) path, so it cannot take anything else.
+            let _ = std::fs::remove_dir(dir);
+        }
+        res
+    }
+
+    /// The per-account directory (`<type>/<username>/`): owned by the human, `2750`, group `nixbld`. The
+    /// setgid bit is what lets the token inside inherit `nixbld` with NO privilege, and getting it there is
+    /// the subtle part, because a human is not a member of `nixbld`:
+    ///
+    ///   * Unprivileged (the common path): a RAW `mkdir`, and afterwards neither `chmod` nor `chown`. The
+    ///     account dir INHERITS its group and the setgid bit from the setgid type dir at creation time
+    ///     (`inode_init_owner` forces `S_ISGID` onto a directory made under a setgid parent — generic VFS,
+    ///     every filesystem), and BOTH follow-up syscalls can silently destroy that bit for this caller: a
+    ///     `chmod` requesting 2750 by a non-member of `nixbld` without `CAP_FSETID` comes back rc=0 but
+    ///     stores 0750 (measured on ZFS and ext4 — generic kernel behavior), and a `chown` clears a dir's
+    ///     setgid on SOME filesystems (measured: ZFS clears it even chowning to self — the pre-fix
+    ///     `install -o` layout bug — while ext4 retains it; either is permitted). (GNU `install -d -m`
+    ///     happens to survive — strace shows it is `mkdir(path, mode)` with no chmod — but that is an
+    ///     implementation accident, and its `-o` form chowns.) A raw mkdir needs neither syscall: the
+    ///     creator already owns it, and umask 0027 makes it land 0750, raised to 2750 by the inherited
+    ///     setgid.
+    ///   * As root (`sudo propnix cred add`): `install` names owner + group + setgid directly. Root holds
+    ///     `CAP_FSETID`, so its setgid chmod is NOT stripped; and we must NOT raw-mkdir-then-chown here, as
+    ///     `chown` also clears a directory's setgid bit.
+    ///
+    /// If the type dir itself is not setgid (a filesystem that refused even root's setgid — the 1777
+    /// fallback in `ensure_type_dir`), the raw mkdir won't inherit setgid, and `put`'s group check installs
+    /// the token with an explicit `-g` instead.
+    fn ensure_account_dir(&self, dir: &Path) -> Result<(), String> {
+        // A pre-existing entry at the account path is only usable if it is what this function would have
+        // created: a REAL directory owned by the invoking human (or root — a module-declared account).
+        // The type dir above is world-writable, so the path may instead hold something another user made
+        // — a symlink, a plain file, a directory of theirs — and writing a token through such an entry
+        // would land it at a path (symlink) or under an owner (foreign dir) the contract does not
+        // describe: `is_dir()` follows symlinks, so it cannot make this distinction. lstat and check.
+        // (Once validated, a sticky type dir also keeps the entry from being swapped out from under us —
+        // the same guarantee /tmp gives the staging temp.)
+        match std::fs::symlink_metadata(dir) {
+            Ok(m) if !m.is_dir() => {
+                return Err(format!(
+                    "{} already exists but is not a real directory (a symlink or file someone created \
+                     there) — remove it and retry",
+                    dir.display()
+                ));
+            }
+            Ok(m) => {
+                use std::os::unix::fs::MetadataExt;
+                if m.uid() != invoking_uid_num() && m.uid() != 0 {
+                    return Err(format!(
+                        "account dir {} belongs to {} — a token stored there would be managed by them, \
+                         not you; have them remove it or pick a different username",
+                        dir.display(),
+                        username_of(m.uid())
+                    ));
+                }
+                return Ok(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("stat {}: {e}", dir.display())),
+        }
+        if is_root() {
+            let owner = self.owner_uid();
+            let path = dir.to_string_lossy();
+            let mut args: Vec<&str> = vec!["-d", "-m", "2750", "-o", &owner];
+            args.extend(self.group_args());
+            args.push(&path);
+            return self.run_escalating("install", &args);
+        }
+        // Unprivileged: raw mkdir, umask-limited, so the inherited setgid survives (see above).
+        let old = unsafe { libc::umask(0o027) };
+        let res = std::fs::DirBuilder::new().create(dir);
+        unsafe {
+            libc::umask(old);
+        }
+        match res {
+            // A concurrent creator (a second `cred add`, the module's activation materializing the same
+            // account) is not an error — whatever appeared gets exactly the validation a pre-existing
+            // entry would have received. Erroring here would fail the add AFTER the interactive login.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => self.ensure_account_dir(dir),
+            other => other.map_err(|e| format!("create account dir {}: {e}", dir.display())),
+        }
+    }
+
+    /// Bring an account dir onto the contract whatever layout created it: group = the build group, and the
+    /// permission bits exactly 0750 — owner rwx; group rx (build users must TRAVERSE to the token but never
+    /// write: group-write would let a build replace the token); other nothing. Piecewise no-ops on a
+    /// compliant dir, so the common layouts never prompt; where a chgrp is genuinely needed it rides the
+    /// same sudo escalation the token's `install -g` does. Setgid/sticky: the symbolic mode names neither
+    /// and GNU chmod carries a directory's existing bits through — though the kernel silently drops a
+    /// dir's setgid when a non-member without CAP_FSETID chmods it (see ensure_account_dir's notes). That
+    /// is fine: `put` computes the inheritance check AFTER this and reads the dir fresh, so a dropped
+    /// setgid just routes the token through the explicit `-g` leg instead.
+    fn converge_account_dir(&self, dir: &Path) -> Result<(), String> {
+        let dir_s = dir.to_string_lossy();
+        if let Some(group) = self.file_group.as_deref() {
+            if gid_of_group(group).is_some_and(|want| gid_of(dir) != Some(want)) {
+                self.run_escalating("chgrp", &[group, &dir_s])?;
+            }
+        }
+        if mode_of(dir).is_some_and(|m| m & 0o777 != 0o750) {
+            self.run_escalating("chmod", &["u=rwx,g=rx,o=", &dir_s])?;
+        }
+        Ok(())
     }
 
     /// `["-g", <group>]` for an `install` call, or nothing when no configured group exists on this host —
@@ -310,19 +549,37 @@ impl CredStore {
                 "{type_name} credential '{username}' is declarative — it is materialized from your NixOS \
                  configuration, so removing it here would come back at the next activation.\n  \
                  Remove it from services.propnix.credentials.{type_name}.{username} (and the secret it \
-                 points at, e.g. sops.secrets) and rebuild."
+                 points at, e.g. sops.secrets) and rebuild.\n  (If this host no longer runs the propnix \
+                 NixOS module, nothing maintains that record any more — delete {} to release the account.)",
+                self.manifest_path().display()
             ));
         }
-        // Not declared, but still not ours to delete: a store the module manages is group-writable, so `rm`
-        // needs no sudo — say what is wrong rather than leaking `rm: Permission denied`.
-        if !self.needs_sudo() && !is_root() && !writable(&dir) {
-            return Err(format!(
-                "{type_name} credential '{username}' is not writable by you ({}).\n  \
-                 Retry as its owner, or with: sudo propnix cred rm --type {type_name} {username}",
-                dir.display()
-            ));
+        // Ownership gate: another human's account is deletable only DELIBERATELY as root — an admin must be
+        // able to clean up (`sudo propnix cred rm` always works), but an unprivileged run must not stumble
+        // through rm's sticky-bit stderr into a surprise sudo prompt that deletes a colleague's credential.
+        // `Mine` and `Unknown` proceed as before; a ROOT-owned yet non-declarative account is a partial-
+        // activation leftover that cleanup must be able to remove, so it proceeds too (via the sudo retry).
+        match self.account_access(&type_name, username) {
+            AccountAccess::Other { user, uid } if uid != 0 => {
+                if is_root() {
+                    eprintln!(
+                        "propnix: removing {type_name} account '{username}' owned by {user} (running as \
+                         root)"
+                    );
+                } else {
+                    return Err(format!(
+                        "{type_name} account '{username}' belongs to {user} — only they (or root) may \
+                         remove it. As an administrator: sudo propnix cred rm -t {type_name} {username}"
+                    ));
+                }
+            }
+            _ => {}
         }
-        self.priv_run("rm", &["-rf", "--", &dir.to_string_lossy()])?;
+        // An account dir is owned by the human who added it (in a world-writable + sticky type dir), so a
+        // plain `rm` removes your own with no prompt; a root-owned leftover is sticky-protected, so the
+        // escalating run falls through to one sudo prompt — which `cred rm` is an explicit-enough act to
+        // justify.
+        self.run_escalating("rm", &["-rf", "--", &dir.to_string_lossy()])?;
         Ok(type_name)
     }
 
@@ -339,13 +596,13 @@ impl CredStore {
         let owner = self.owner_uid();
         let tmp_s = tmp.to_string_lossy();
         let ptr_s = ptr.to_string_lossy();
-        let mut args: Vec<&str> = vec!["-m", "0644", "-o", &owner];
-        args.extend(self.group_args());
-        args.push(&tmp_s);
-        args.push(&ptr_s);
-        self.priv_run("install", &args)?;
-        let _ = std::fs::remove_file(&tmp);
-        Ok(())
+        // No group: the pointer holds no secret (it names `/propnix`) and is world-readable 0644, so its
+        // group is irrelevant — and NOT passing `-g` is what lets the human write it into a root they own
+        // (a plain store) without an `install -g nixbld` that only root could run.
+        let args: Vec<&str> = vec!["-m", "0644", "-o", &owner, &tmp_s, &ptr_s];
+        let res = self.run_escalating("install", &args);
+        let _ = std::fs::remove_file(&tmp); // clean the staging temp even on failure
+        res
     }
 
     /// Write bytes to a fresh 0600 temp file owned by the invoking user (never world/group readable while it
@@ -398,32 +655,6 @@ fn stage_temp_in(base: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
 }
 
 impl CredStore {
-
-    /// Run a filesystem command, prefixing `sudo` when the store isn't writable by the current user (so the
-    /// interactive login stays unprivileged and only the /var/lib write escalates).
-    fn priv_run(&self, program: &str, args: &[&str]) -> Result<(), String> {
-        let (prog, full_args): (&str, Vec<&str>) = if self.needs_sudo() {
-            let mut v = vec![program];
-            v.extend_from_slice(args);
-            ("sudo", v)
-        } else {
-            (program, args.to_vec())
-        };
-        let status = Command::new(prog)
-            .args(&full_args)
-            .status()
-            .map_err(|e| format!("running {prog}: {e}"))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!("`{prog} {}` failed ({status})", args.join(" ")))
-        }
-    }
-
-    fn needs_sudo(&self) -> bool {
-        !is_root() && !writable(&self.root)
-    }
-
     /// The uid that should own the store: the human running the command, even when the write itself is
     /// escalated. Under `sudo propnix …` our own uid is 0, so honour SUDO_UID; otherwise we are already
     /// the user and sudo is only spawned for the individual `install` calls.
@@ -434,159 +665,45 @@ impl CredStore {
 
 /// The human running the command, even under `sudo propnix …` (honour SUDO_UID).
 fn invoking_uid() -> String {
+    invoking_uid_num().to_string()
+}
+
+fn invoking_uid_num() -> u32 {
     std::env::var("SUDO_UID")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or_else(|| unsafe { libc::getuid() })
-        .to_string()
 }
 
-/// Make a token file the current user was DENIED reading readable again, by converging it onto the store
-/// contract: owner = the invoking user, group = the resolved file group, mode 0640, plus the builder-read
-/// ACL (`grant_build_read`). This is the one-off repair for stores written before some part of the
-/// contract existed — root-owned tokens from the oldest layout, or `propnix-fetch` tokens from before the
-/// ACL leg. Escalates with sudo exactly like store writes do.
-///
-/// A DECLARATIVE token is refused: the NixOS module keeps those root-owned on purpose (humans read them
-/// via the `propnix-fetch` group), so a denied read there means missing group membership, and a chown
-/// would only be undone by the next activation.
-///
-/// INSIDE A NIX BUILD it refuses with host-side instructions instead: the sandbox has no sudo (and no way
-/// to prompt), so the old behaviour — exec'ing sudo anyway — could only ever die with a baffling
-/// "No such file or directory". The denied read is real, but the repair belongs on the host.
-pub fn repair_unreadable_token(root: &Path, token: &Path) -> Result<(), String> {
-    if declared_token(root, token) {
-        return Err(format!(
-            "{} is declarative and readable only via the `propnix-fetch` group — add yourself to \
-             services.propnix.allowedUsers (or users.users.<you>.extraGroups = [ \"propnix\" ]), rebuild, \
-             and re-log-in so the membership takes effect",
-            token.display()
-        ));
+/// The login name of a uid, or its number as a string when the host has no name for it. Single-threaded
+/// on every path that calls this, so plain `getpwuid` is fine.
+fn username_of(uid: u32) -> String {
+    let pw = unsafe { libc::getpwuid(uid) };
+    if pw.is_null() {
+        return uid.to_string();
     }
-    let sandbox_group = resolve_file_group(
-        &std::env::var("PROPNIX_SANDBOX_GROUP").unwrap_or_else(|_| "nixbld".to_string()),
-    );
-    if std::env::var_os("NIX_BUILD_TOP").is_some() {
-        return Err(in_sandbox_instructions(root, token, sandbox_group.as_deref()));
+    let name = unsafe { (*pw).pw_name };
+    if name.is_null() {
+        return uid.to_string();
     }
-    let uid = invoking_uid();
-    let file_group = resolve_file_group(
-        &std::env::var("PROPNIX_BUILD_GROUP").unwrap_or_else(|_| "nixbld".to_string()),
-    );
-    let spec = match &file_group {
-        Some(g) => format!("{uid}:{g}"),
-        None => uid,
-    };
-    let path = token.to_string_lossy();
-    eprintln!(
-        "propnix: {path} is not readable by you — converging it onto the store contract with a one-off \
-         `chown {spec}` (+ builder-read ACL; this may ask for your sudo password)"
-    );
-    let run = |program: &str, args: &[&str]| -> Result<(), String> {
-        let (prog, full): (&str, Vec<&str>) = if is_root() {
-            (program, args.to_vec())
-        } else {
-            let mut v = vec![program];
-            v.extend_from_slice(args);
-            ("sudo", v)
-        };
-        match Command::new(prog).args(&full).status() {
-            Ok(s) if s.success() => Ok(()),
-            Ok(s) => Err(format!("`{prog} {}` failed ({s})", full.join(" "))),
-            Err(e) => Err(format!("running {prog}: {e}")),
-        }
-    };
-    run("chown", &[&spec, &path])?;
-    // The contract mode, best-effort: an old token is normally 0640 already, and owner-readability —
-    // checked below — is what actually matters.
-    let _ = run("chmod", &["0640", &path]);
-    // The builder-read ACL, for the same reasons as in `grant_build_read` — skipped when the file group IS
-    // the sandbox group (plain layout: group bits already grant the read).
-    if let Some(g) = sandbox_group.filter(|g| Some(g.as_str()) != file_group.as_deref()) {
-        run("setfacl", &["-m", &format!("g:{g}:r"), &path])
-            .map_err(|e| acl_failure_context(&e, &g))?;
-    }
-    if !readable(token) {
-        return Err(format!(
-            "{path} is still not readable after the repair; fix it by hand with: \
-             sudo chown {spec} {path} && sudo chmod 0640 {path}"
-        ));
-    }
-    Ok(())
-}
-
-/// The refusal a DENIED READ inside the build sandbox gets: the exact host-side commands, with the
-/// in-sandbox path translated to the conventional host store root. The builder cannot repair anything
-/// itself — no sudo exists here — and the fix is one command on the host (or simply re-running
-/// `propnix cred add`, whose store write applies the full contract including the ACL).
-fn in_sandbox_instructions(root: &Path, token: &Path, sandbox_group: Option<&str>) -> String {
-    let group = sandbox_group.unwrap_or("nixbld");
-    // /propnix/gog/alice/galaxy_tokens.json → gog/alice/galaxy_tokens.json, under the default host root.
-    // A non-default services.propnix.credentialsPath can't be seen from in here — say so.
-    let rel = token.strip_prefix(root).unwrap_or(token).to_string_lossy().into_owned();
-    format!(
-        "the token is not readable by the sandboxed builder (builds carry only their primary group \
-         `{group}`; supplementary groups like `propnix-fetch` never reach a sandbox). Fix it ON THE HOST \
-         with:\n  sudo setfacl -m g:{group}:r /var/lib/propnix/{rel}\n(adjust the path if \
-         services.propnix.credentialsPath is not the default), or re-run `propnix cred add` with a \
-         current propnix, which applies the builder-read ACL itself."
-    )
-}
-
-/// Context for a failed `setfacl`: it is load-bearing (without it sandboxed fetches are denied), and the
-/// two realistic causes are the tool missing from PATH and a filesystem without POSIX ACL support.
-fn acl_failure_context(err: &str, group: &str) -> String {
-    format!(
-        "{err}\n  propnix: could not grant the nix build group '{group}' read via a POSIX ACL — sandboxed \
-         fetches would be denied the token. This needs the `setfacl` tool and POSIX-ACL support on the \
-         filesystem holding the credential store."
-    )
-}
-
-/// Is this exact token path one the NixOS module declares — a line of the manifest beside the store?
-/// (`CredStore::is_declarative` answers the same question per ACCOUNT; this is the per-file form the
-/// repair path needs.)
-fn declared_token(root: &Path, token: &Path) -> bool {
-    let Ok(rel) = token.strip_prefix(root) else {
-        return false;
-    };
-    let rel = rel.to_string_lossy();
-    let manifest = PathBuf::from(format!(
-        "{}-declarative-credentials",
-        root.to_string_lossy().trim_end_matches('/')
-    ));
-    std::fs::read_to_string(manifest)
-        .map(|s| s.lines().any(|l| l == rel))
-        .unwrap_or(false)
-}
-
-/// Can the current user read `path`?
-fn readable(path: &Path) -> bool {
-    let Ok(c) = CString::new(path.as_os_str().as_bytes()) else {
-        return false;
-    };
-    unsafe { libc::access(c.as_ptr(), libc::R_OK) == 0 }
+    unsafe { std::ffi::CStr::from_ptr(name) }
+        .to_str()
+        .map(str::to_string)
+        .unwrap_or_else(|_| uid.to_string())
 }
 
 fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-/// Is the nearest existing ancestor of `path` writable by the current user? (Determines whether store writes
-/// need sudo — creating `/var/lib/propnix` probes `/var/lib`.)
-fn writable(path: &Path) -> bool {
-    let mut p = path;
-    loop {
-        if p.exists() {
-            let Ok(c) = CString::new(p.as_os_str().as_bytes()) else {
-                return false;
-            };
-            return unsafe { libc::access(c.as_ptr(), libc::W_OK) } == 0;
-        }
-        match p.parent() {
-            Some(par) if par != p => p = par,
-            _ => return false,
-        }
+/// Run one filesystem command, mapping a non-zero exit or a spawn failure to a legible error. `sudo` is
+/// applied by the caller (`run_escalating`) only as a retry, never speculatively — so the common,
+/// permitted write runs bare and prompts for nothing.
+fn run_command(program: &str, args: &[&str]) -> Result<(), String> {
+    match Command::new(program).args(args).status() {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!("`{program} {}` failed ({s})", args.join(" "))),
+        Err(e) => Err(format!("running {program}: {e}")),
     }
 }
 
@@ -596,14 +713,13 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     fn store_at(root: &Path) -> CredStore {
-        // A numeric gid is always a valid `install -g`, and our own is always one we may chown to.
-        // `sandbox_group: None` = the single-user-Nix shape, so layout tests exercise no ACL machinery.
+        // A numeric gid is always a valid `install -g`, and our own is the one group we can hand to
+        // setgid dirs unprivileged — it stands in for the build group in these layout tests.
         let gid = unsafe { libc::getgid() }.to_string();
         CredStore {
             root: root.to_path_buf(),
             build_group: gid.clone(),
             file_group: Some(gid),
-            sandbox_group: None,
         }
     }
 
@@ -620,15 +736,6 @@ mod tests {
         d
     }
 
-    /// Make `path` look like the NixOS module's store root, reporting whether the environment allowed it: an
-    /// unprivileged setgid chmod is refused on some filesystems (ZFS inside the Nix build sandbox's user
-    /// namespace EPERMs instead of dropping the bit), and with no setgid parent there is no group-managed
-    /// store to exercise. Tests that need one skip rather than fail there.
-    fn make_group_managed(path: &Path) -> bool {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o2775)).is_ok()
-            && is_setgid(path)
-    }
-
     fn mode_of(p: &Path) -> u32 {
         use std::os::unix::fs::MetadataExt;
         std::fs::metadata(p).unwrap().mode() & 0o7777
@@ -640,43 +747,34 @@ mod tests {
     }
 
     #[test]
-    fn make_dir_creates_owner_only_dirs_by_default() {
-        let root = tmp_root("plain");
+    fn the_layout_names_exactly_two_readers() {
+        // The whole point of the contract: a token is readable by its OWNER (owner bits) and by the
+        // BUILD GROUP (group bits, inherited from the setgid type dir) — and by nobody else, because
+        // the account dir refuses `other` traversal even though the type dir above is world-writable.
+        let root = tmp_root("two-readers");
         let store = store_at(&root);
-        let d = root.join("gog");
-        store.make_dir(&d).unwrap();
-        assert_eq!(mode_of(&d), 0o755, "a plain store keeps the owner-only layout");
-    }
-
-    #[test]
-    fn make_dir_inherits_group_management_from_a_setgid_parent() {
-        // What the NixOS module's store root looks like: setgid, group-writable.
-        let root = tmp_root("setgid");
-        if !make_group_managed(&root) {
-            eprintln!("skipped: this filesystem/namespace won't take an unprivileged setgid dir");
-            return;
-        }
-        let store = store_at(&root);
+        store.put("gog", "alice", "galaxy_tokens.json", b"{}").unwrap();
 
         let type_dir = root.join("gog");
-        store.make_dir(&type_dir).unwrap();
-        assert_eq!(
-            mode_of(&type_dir),
-            0o2775,
-            "a child of a setgid store dir must stay group-writable + setgid, so the next member \
-             of the group can add or remove an account without sudo"
-        );
-        assert_eq!(
-            gid_of(&type_dir),
-            gid_of(&root),
-            "the group must be INHERITED from the parent, never set to the token group"
-        );
-
-        // …and the inheritance carries down another level (type dir → account dir).
         let acct = type_dir.join("alice");
-        store.make_dir(&acct).unwrap();
-        assert_eq!(mode_of(&acct), 0o2775);
-        assert_eq!(gid_of(&acct), gid_of(&root));
+        let token = acct.join("galaxy_tokens.json");
+        let gid: u32 = unsafe { libc::getgid() };
+
+        // Type dir: the /tmp model — setgid (group inheritance) + sticky + world-writable, so any
+        // human can create their account dir here without being a member of the build group.
+        if is_setgid(&type_dir) {
+            assert_eq!(mode_of(&type_dir), 0o3777, "type dir is the setgid+sticky /tmp model");
+            assert_eq!(gid_of(&type_dir), gid, "type dir carries the build group");
+            // Account dir: owned by the human, group inherited from the setgid parent, no `other` bits.
+            assert_eq!(mode_of(&acct) & 0o0777, 0o750, "account dir must refuse `other` traversal");
+            assert_eq!(gid_of(&acct), gid, "account dir inherits the build group");
+        } else {
+            eprintln!("setgid did not stick on this filesystem; group falls back to explicit -g");
+        }
+        // The token itself: 0640, group = the build group — HOWEVER it got there (inheritance on a
+        // setgid layout, explicit -g on the fallback).
+        assert_eq!(mode_of(&token), 0o640, "token is owner rw, group r, other NOTHING");
+        assert_eq!(gid_of(&token), gid, "token must be group-owned by the build group");
     }
 
     #[test]
@@ -702,7 +800,8 @@ mod tests {
 
     #[test]
     fn put_writes_the_plain_layout_when_no_module_manages_the_store() {
-        // A store with no setgid root — i.e. no NixOS module: dirs 0755, token 0640, everything ours.
+        // A store with no NixOS module: `put` bootstraps the type dir itself (same /tmp-model layout
+        // the module would pre-create) and the token still lands 0640 with the right bytes.
         let root = tmp_root("plain-put");
         let store = store_at(&root);
         store
@@ -710,8 +809,6 @@ mod tests {
             .unwrap();
 
         let acct = root.join("gog").join("alice");
-        assert_eq!(mode_of(&root.join("gog")), 0o755);
-        assert_eq!(mode_of(&acct), 0o755);
         assert_eq!(mode_of(&acct.join("galaxy_tokens.json")), 0o640);
         assert_eq!(
             std::fs::read_to_string(acct.join("galaxy_tokens.json")).unwrap(),
@@ -755,6 +852,33 @@ mod tests {
     }
 
     #[test]
+    fn adding_over_a_declarative_credential_is_refused_before_touching_the_store() {
+        let root = tmp_root("add-declarative");
+        let store = store_at(&root);
+        std::fs::write(
+            PathBuf::from(format!("{}-declarative-credentials", root.display())),
+            "gog/alice/galaxy_tokens.json\n",
+        )
+        .unwrap();
+        let err = store.put("gog", "alice", "galaxy_tokens.json", b"{}").unwrap_err();
+        assert!(err.contains("managed declaratively"), "got: {err}");
+        assert!(
+            err.contains("services.propnix.credentials.gog.alice"),
+            "the error must name the option to edit; got: {err}"
+        );
+        assert!(
+            err.contains("-declarative-credentials"),
+            "the error must name the manifest to delete when the module is gone; got: {err}"
+        );
+        assert!(
+            !root.join("gog").join("alice").exists(),
+            "the refusal must not have created anything in the store"
+        );
+        // An imperative account of the SAME type is unaffected.
+        store.put("gog", "bob", "galaxy_tokens.json", b"{}").unwrap();
+    }
+
+    #[test]
     fn removing_a_declarative_credential_names_the_config_option() {
         let root = tmp_root("rm-declarative");
         let store = store_at(&root);
@@ -777,37 +901,6 @@ mod tests {
             acct.join("galaxy_tokens.json").exists(),
             "the refusal must not have deleted anything"
         );
-    }
-
-    #[test]
-    fn declared_token_matches_exact_manifest_lines() {
-        let root = tmp_root("declared-token");
-        std::fs::write(
-            PathBuf::from(format!("{}-declarative-credentials", root.display())),
-            "gog/alice/galaxy_tokens.json\n",
-        )
-        .unwrap();
-        assert!(declared_token(&root, &root.join("gog/alice/galaxy_tokens.json")));
-        // The match is the whole line, not a prefix, and only for paths under this root.
-        assert!(!declared_token(&root, &root.join("gog/alice/galaxy_tokens.json.bak")));
-        assert!(!declared_token(&root, &root.join("gog/alice")));
-        assert!(!declared_token(&root, Path::new("/elsewhere/gog/alice/galaxy_tokens.json")));
-    }
-
-    #[test]
-    fn repair_refuses_a_declarative_token_and_names_the_fix() {
-        // A declared token is root-owned ON PURPOSE (read via the propnix-fetch group), so the repair
-        // must refuse — before spawning any command — and point at group membership instead.
-        let root = tmp_root("repair-declarative");
-        let token = root.join("gog/alice/galaxy_tokens.json");
-        std::fs::write(
-            PathBuf::from(format!("{}-declarative-credentials", root.display())),
-            "gog/alice/galaxy_tokens.json\n",
-        )
-        .unwrap();
-        let err = repair_unreadable_token(&root, &token).unwrap_err();
-        assert!(err.contains("declarative"), "got: {err}");
-        assert!(err.contains("allowedUsers"), "must name the option to edit; got: {err}");
     }
 
     #[test]
@@ -837,84 +930,145 @@ mod tests {
     }
 
     #[test]
-    fn put_grants_the_sandbox_build_group_read_via_an_acl() {
-        // The contract's third leg: with a sandbox group DISTINCT from the file group, the token must
-        // carry a named-group ACL entry (the userns sandbox only keeps the builder's primary gid, so the
-        // file group can't reach it). Skips where the environment can't exercise it: no `nixbld` group
-        // (non-Nix CI), no setfacl, or a filesystem without POSIX ACLs.
-        if !group_exists("nixbld") {
-            eprintln!("skipped: no nixbld group on this host");
-            return;
-        }
-        let root = tmp_root("acl-put");
-        let gid = unsafe { libc::getgid() }.to_string();
-        let store = CredStore {
-            root: root.to_path_buf(),
-            build_group: gid.clone(),
-            file_group: Some(gid),
-            sandbox_group: Some("nixbld".to_string()),
-        };
-        if let Err(e) = store.put("gog", "alice", "galaxy_tokens.json", b"{}") {
-            let acl_unsupported = e.contains("setfacl");
-            assert!(acl_unsupported, "put failed for a non-ACL reason: {e}");
-            eprintln!("skipped: {e}");
-            return;
-        }
-        let token = root.join("gog/alice/galaxy_tokens.json");
-        let out = Command::new("getfacl")
-            .args(["-c", "--", &token.to_string_lossy()])
-            .output()
-            .expect("getfacl must run where setfacl just did");
-        let text = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(
-            text.lines().any(|l| l.starts_with("group:nixbld:r")),
-            "the token must carry a builder-read ACL entry; getfacl said:\n{text}"
-        );
-        // …and the account dir carries the DEFAULT entry, so a rewrite outside `put` inherits the grant.
-        let out = Command::new("getfacl")
-            .args(["-c", "--", &root.join("gog/alice").to_string_lossy()])
-            .output()
-            .unwrap();
-        let text = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(
-            text.lines().any(|l| l.starts_with("default:group:nixbld:r")),
-            "the account dir must carry the default builder-read entry; getfacl said:\n{text}"
-        );
-    }
-
-    #[test]
-    fn the_in_sandbox_refusal_names_the_host_side_fix() {
-        // Inside a build there is no sudo to exec and nothing to repair with — the refusal must hand the
-        // user the host-side command with the store-relative path translated out of the sandbox mount.
-        let msg = in_sandbox_instructions(
-            Path::new("/propnix"),
-            Path::new("/propnix/gog/alice/galaxy_tokens.json"),
-            Some("nixbld"),
-        );
-        assert!(
-            msg.contains("sudo setfacl -m g:nixbld:r /var/lib/propnix/gog/alice/galaxy_tokens.json"),
-            "got: {msg}"
-        );
-        assert!(msg.contains("propnix cred add"), "must offer the CLI route too; got: {msg}");
-        assert!(!msg.contains("sudo: "), "must not look like a failed sudo exec; got: {msg}");
-    }
-
-    #[test]
-    fn make_dir_leaves_an_existing_dir_alone() {
-        // The module owns the store root (root-owned, group-writable); adjusting it as a plain user would be
-        // EPERM, so an existing dir must never be touched.
+    fn ensure_dirs_leave_an_existing_dir_alone() {
+        // The module owns the store root and pre-creates the type dirs; adjusting either as a plain user
+        // would be EPERM, so an existing dir must never be touched.
         let root = tmp_root("existing");
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o0705)).unwrap();
         let store = store_at(&root);
-        store.make_dir(&root).unwrap();
-        assert_eq!(mode_of(&root), 0o0705, "an existing dir keeps its mode");
+        store.ensure_root().unwrap();
+        assert_eq!(mode_of(&root), 0o0705, "an existing root keeps its mode");
+        let t = root.join("gog");
+        std::fs::create_dir(&t).unwrap();
+        std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o0700)).unwrap();
+        store.ensure_type_dir(&t).unwrap();
+        assert_eq!(mode_of(&t), 0o0700, "an existing type dir keeps its mode");
+    }
+
+    #[test]
+    fn put_refuses_an_account_path_that_is_not_a_real_directory() {
+        // The type dir is world-writable, so the account path can hold an entry somebody else created.
+        // A symlink there would have the token installed at whatever it points to; a plain file is junk
+        // `install` would fail against confusingly. Both must be refused up front, touching nothing.
+        let root = tmp_root("squat");
+        let store = store_at(&root);
+        store.put("gog", "alice", "t.json", b"{}").unwrap(); // seeds the layout
+
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join("gog").join("bob")).unwrap();
+        let err = store.put("gog", "bob", "t.json", b"{}").unwrap_err();
+        assert!(err.contains("not a real directory"), "got: {err}");
+        assert!(
+            std::fs::read_dir(&elsewhere).unwrap().next().is_none(),
+            "nothing may be written through the symlink"
+        );
+
+        std::fs::write(root.join("gog").join("carol"), b"junk").unwrap();
+        let err = store.put("gog", "carol", "t.json", b"{}").unwrap_err();
+        assert!(err.contains("not a real directory"), "got: {err}");
+        assert_eq!(
+            std::fs::read(root.join("gog").join("carol")).unwrap(),
+            b"junk",
+            "the pre-existing entry must be left alone"
+        );
+    }
+
+    #[test]
+    fn a_fallback_layout_converges_the_account_dirs_group_alongside_the_token() {
+        // On the layouts where the token needs an explicit `-g` (no setgid inheritance), the account DIR
+        // must get the build group too: a 0750 dir left with the creator's group is untraversable by the
+        // build user, so the correctly-grouped token inside would still be unreadable by every build.
+        // Exercised with a supplementary group standing in for the build group (the one other group we
+        // can chgrp to unprivileged); hosts where the test user has no second group skip.
+        let me = unsafe { libc::getgid() };
+        let mut groups = [0 as libc::gid_t; 128];
+        let n = unsafe { libc::getgroups(groups.len() as libc::c_int, groups.as_mut_ptr()) };
+        let Some(other) = (n > 0)
+            .then(|| groups[..n as usize].iter().map(|&g| g as u32).find(|&g| g != me))
+            .flatten()
+        else {
+            eprintln!("no supplementary group on this host — skipping the dir-group convergence check");
+            return;
+        };
+
+        let root = tmp_root("dir-group");
+        let store = CredStore {
+            root: root.clone(),
+            build_group: other.to_string(),
+            file_group: Some(other.to_string()),
+        };
+        // A pre-existing NON-setgid type dir — what ensure_type_dir's 1777 fallback leaves on a
+        // filesystem that refuses setgid — so the account dir cannot inherit the build group.
+        let type_dir = root.join("gog");
+        std::fs::create_dir(&type_dir).unwrap();
+        std::fs::set_permissions(&type_dir, std::fs::Permissions::from_mode(0o1777)).unwrap();
+
+        store.put("gog", "alice", "t.json", b"{}").unwrap();
+        let acct = type_dir.join("alice");
+        assert_eq!(
+            gid_of(&acct),
+            other,
+            "the account dir must carry the build group, or the group can never reach the token"
+        );
+        assert_eq!(
+            mode_of(&acct) & 0o777,
+            0o750,
+            "the account dir must be exactly 0750: group traversal, no group write, no other bits"
+        );
+        assert_eq!(gid_of(&acct.join("t.json")), other, "the token carries the build group");
+        assert_eq!(mode_of(&acct.join("t.json")), 0o640);
+    }
+
+    #[test]
+    fn put_converges_a_noncompliant_account_dir_it_adopts() {
+        // Two pre-existing shapes the convergence must repair even though `put` did not create the dir:
+        // one that already carries the right group but denies group traversal (2700 — the token would
+        // inherit the right group, so the no-`-g` path is taken, yet the build group could never REACH
+        // it), and one that grants group/other write (0777 — left as-is, the build group could REPLACE
+        // the token). After put, both must sit at exactly 0750.
+        let root = tmp_root("adopt");
+        let store = store_at(&root);
+        let type_dir = root.join("gog");
+        std::fs::create_dir(&type_dir).unwrap();
+
+        let tight = type_dir.join("alice");
+        std::fs::create_dir(&tight).unwrap();
+        std::fs::set_permissions(&tight, std::fs::Permissions::from_mode(0o0700)).unwrap();
+        store.put("gog", "alice", "t.json", b"{}").unwrap();
+        assert_eq!(mode_of(&tight) & 0o777, 0o750, "group regains traversal, others stay shut out");
+        assert_eq!(mode_of(&tight.join("t.json")), 0o640);
+
+        let loose = type_dir.join("bob");
+        std::fs::create_dir(&loose).unwrap();
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o777)).unwrap();
+        store.put("gog", "bob", "t.json", b"{}").unwrap();
+        assert_eq!(mode_of(&loose) & 0o777, 0o750, "group/other write must be stripped");
+    }
+
+    #[test]
+    fn a_world_writable_but_nonsticky_type_dir_is_refused() {
+        // The one pre-existing type-dir shape `put` must not build on: world-writable without sticky,
+        // where any user can swap a just-validated account entry between the lstat check and the write.
+        // Both layouts this code creates (3777, 1777) are sticky; only a manual chmod produces this.
+        let root = tmp_root("nonsticky");
+        let store = store_at(&root);
+        let type_dir = root.join("gog");
+        std::fs::create_dir(&type_dir).unwrap();
+        std::fs::set_permissions(&type_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let err = store.put("gog", "alice", "t.json", b"{}").unwrap_err();
+        assert!(err.contains("not sticky"), "got: {err}");
+        assert!(
+            !type_dir.join("alice").exists(),
+            "nothing may be created under the refused type dir"
+        );
     }
 }
 
 /// The group token files should carry: the requested one if it exists, else nix's own default build group,
-/// else none at all. That fallback chain is what keeps `cred add` working on a host where the NixOS module
-/// (and so the `propnix-fetch` group) was never installed or has since been removed — there it lands back on
-/// the historical `nixbld` layout.
+/// else none at all. That fallback chain is what keeps `cred add` working on a host whose configured group
+/// name is stale (a login session from an older generation), while a single-user Nix — no `nixbld` at all,
+/// builds run as the human — needs no group leg in the first place.
 fn resolve_file_group(requested: &str) -> Option<String> {
     [requested, "nixbld"]
         .into_iter()
@@ -926,22 +1080,51 @@ fn resolve_file_group(requested: &str) -> Option<String> {
 /// checked before it is used — the store must still be writable on a host that never had the NixOS module
 /// (or, for `nixbld`, on a single-user Nix that has no build users at all).
 fn group_exists(name: &str) -> bool {
-    let Ok(c) = CString::new(name) else {
-        return false;
-    };
-    // getgrnam() yields NULL for an unknown group; we are single-threaded on this path.
-    !unsafe { libc::getgrnam(c.as_ptr()) }.is_null()
+    gid_of_group(name).is_some()
 }
 
-/// Does `path` carry the setgid bit? On a store directory that is the marker that the store is under GROUP
-/// management (the NixOS module's layout): a child created inside it inherits the dir group — which is the
-/// humans-only group, not the wider group the tokens carry — and stays group-writable, so any member can
-/// later add or remove an account without sudo.
+/// The numeric gid of a group name — used to compare a dir's actual group against the one the contract
+/// wants, and (via `group_exists`) to decide whether a configured group name is usable at all. A numeric
+/// string is accepted (the tests' numeric `file_group`), but only if a group with that gid actually
+/// exists: blindly trusting any number would let a stale numeric `PROPNIX_BUILD_GROUP` skip the `nixbld`
+/// fallback and group-own tokens by a gid nobody has — unreadable by every build, and every unprivileged
+/// `install -g`/`chgrp` failing into sudo prompts. `None` for an unknown group. Single-threaded on every
+/// path that calls this, so plain getgrnam/getgrgid are fine.
+fn gid_of_group(name: &str) -> Option<u32> {
+    if let Ok(n) = name.parse::<u32>() {
+        let gr = unsafe { libc::getgrgid(n) };
+        return if gr.is_null() { None } else { Some(n) };
+    }
+    let c = CString::new(name).ok()?;
+    let gr = unsafe { libc::getgrnam(c.as_ptr()) };
+    if gr.is_null() {
+        None
+    } else {
+        Some(unsafe { (*gr).gr_gid })
+    }
+}
+
+/// Does `path` carry the setgid bit? Used on the ACCOUNT dir in `put` to decide whether a plain
+/// unprivileged `install` will inherit the build group from the dir (the setgid-inheritance leg of the
+/// contract) or whether the token needs an explicit `-g` riding the sudo escalation instead.
 fn is_setgid(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path)
         .map(|m| m.mode() & 0o2000 != 0)
         .unwrap_or(false)
+}
+
+/// The gid owning `path`, or `None` if it can't be stat'd. Used to decide whether a token installed into
+/// an account dir will inherit the build group (see `put`).
+fn gid_of(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| m.gid())
+}
+
+/// The permission bits of `path`, or `None` if it can't be stat'd.
+fn mode_of(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| m.mode() & 0o7777)
 }
 
 /// Create a file readable+writable only by the owner (0600), failing if the path already exists in ANY

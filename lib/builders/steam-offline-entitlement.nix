@@ -39,11 +39,12 @@
 # No local identity (account_name.txt / user_steam_id.txt) is written: entitlement does not key on it,
 # and a package shipped to other people must not carry a baked-in account name or SteamID — it would be
 # one identity shared by every install, and a plausible-looking SteamID64 in the source invites the reader
-# to assume it belongs to someone. Identity is instead a RUNTIME, per-host fact: the launcher (steamid.rs,
-# gated by the baked `steamEmu` flag) reads the SteamID64 out of the host's stored Steam credential and
-# seats it in gbe_fork's GLOBAL settings inside the per-launch view — the local tree here deliberately
-# leaves `[user::general]` unset so that global value is what the shim resolves. No credential → upstream
-# makes an identity up per launch, exactly as before.
+# to assume it belongs to someone. Identity is left entirely to gbe_fork: it generates one and saves it in
+# its GLOBAL settings — persistent on wine (the users overlay), per-launch on thin (the ephemeral view).
+# The local tree here deliberately leaves `[user::general]` unset so that global value is what the shim
+# resolves. (The launcher used to seat the stored Steam account's SteamID64 there; that seeding was
+# removed — it read the credential store as the launching human, which the group-ownership contract does
+# not permit on declarative/shared hosts, and it never delivered the stable identity it was added for.)
 {
   lib,
   runCommandLocal,

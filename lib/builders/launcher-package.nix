@@ -7,7 +7,7 @@
 {
   lib,
   stdenv,
-  runCommand,
+  runCommandLocal,
   makeWrapper,
   symlinkJoin,
   propnix-launcher,
@@ -36,7 +36,7 @@
   extraChecks ? [ ],
 }:
 let
-  wrapper = runCommand "${pname}-launcher-wrapper" { nativeBuildInputs = [ makeWrapper ]; } ''
+  wrapper = runCommandLocal "${pname}-launcher-wrapper" { nativeBuildInputs = [ makeWrapper ]; } ''
     mkdir -p "$out/bin"
     makeWrapper ${propnix-launcher}/bin/propnix-launcher "$out/bin/${pname}" \
       --add-flags "--config ${configFile}"
@@ -49,7 +49,7 @@ let
   # two entries (each authorizing its own binary) instead of colliding in the merged profile, while games
   # sharing one build dedupe to identical links.
   launcherHash = lib.substring 0 8 (lib.removePrefix "/nix/store/" "${propnix-launcher}");
-  kwinGrant = runCommand "${pname}-kwin-grant" { } ''
+  kwinGrant = runCommandLocal "${pname}-kwin-grant" { } ''
     mkdir -p "$out/share/applications"
     ln -s ${propnix-launcher}/share/applications/org.propnix.launcher.desktop \
       "$out/share/applications/org.propnix.launcher-${launcherHash}.desktop"

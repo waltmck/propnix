@@ -1134,6 +1134,69 @@ mod tests {
     }
 
     #[test]
+    fn unordered_delivers_every_block_exactly_once_under_failures_and_concurrency() {
+        // The download engine's completion test is `delivered >= items.len()`, and it rests on each block
+        // being accepted EXACTLY once. A double-accept would double-count `delivered`, tripping completion
+        // while some other block is still unwritten — leaving a `set_len` zero hole, i.e. the intermittent
+        // "wrong content" a real FOD hit (its per-chunk sha1 all pass; only a MISSING chunk corrupts).
+        // Heavy requeue churn (≈1 in 7 requests fails) + many workers + a tight window, run many times to
+        // shake out interleavings a single run misses.
+        struct CountSink {
+            accepts: Vec<AtomicUsize>,
+            bad_body: AtomicUsize,
+        }
+        impl Sink for CountSink {
+            fn accept(&self, index: usize, d: Vec<u8>) -> Result<(), String> {
+                if d != body(index) {
+                    self.bad_body.fetch_add(1, Ordering::Relaxed);
+                }
+                self.accepts[index].fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+        let n = 200usize; // < 256 so body(i) is distinct per block
+        for iter in 0..40 {
+            let fc = Arc::new(AtomicUsize::new(iter * 13)); // shift the failure phase each iteration
+            let f2 = Arc::clone(&fc);
+            let base = serve(move |p| {
+                let i = idx_of(p);
+                let k = f2.fetch_add(1, Ordering::Relaxed);
+                // Fail ~1/7 of ALL requests (retries included). A block's retries draw different k, so
+                // nothing fails forever, but requeue churn is heavy and its interleaving varies per run.
+                if k % 7 == 3 {
+                    Reply::Status(503)
+                } else {
+                    Reply::Body(body(i))
+                }
+            });
+            let (io, _) = io_for(base);
+            let sink = Arc::new(CountSink {
+                accepts: (0..n).map(|_| AtomicUsize::new(0)).collect(),
+                bad_body: AtomicUsize::new(0),
+            });
+            unordered(
+                io,
+                work(n),
+                16,
+                (LEN * 3) as u64,
+                Arc::clone(&sink) as Arc<dyn Sink>,
+                fast(),
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(
+                sink.bad_body.load(Ordering::Relaxed),
+                0,
+                "iter {iter}: a block was written with the wrong body"
+            );
+            for i in 0..n {
+                let c = sink.accepts[i].load(Ordering::Relaxed);
+                assert_eq!(c, 1, "iter {iter}: block {i} was accepted {c} times, want exactly 1");
+            }
+        }
+    }
+
+    #[test]
     fn endpoint_outcomes_are_reported_for_scoring() {
         // The engine must feed the host scorer both successes and failures, or the weights never move.
         let base = serve(|p| {

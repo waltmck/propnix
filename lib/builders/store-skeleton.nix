@@ -15,7 +15,7 @@
 # the store layer through the redirect. Sparse keeps the stub (and the tar) free of real data.
 {
   lib,
-  runCommand,
+  runCommandLocal,
   gnutar,
   coreutils,
   findutils,
@@ -37,7 +37,7 @@
   # executable exists in at least ONE tree, so a typo is still a build failure rather than a 0444 exec.
   executables ? [ ],
 }:
-runCommand "${name}-overlay-skeleton.tar"
+runCommandLocal "${name}-overlay-skeleton.tar"
   {
     nativeBuildInputs = [
       gnutar

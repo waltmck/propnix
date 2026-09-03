@@ -9,7 +9,7 @@
 # path — so the common case is free and games that share a config share one build (content-addressed).
 {
   lib,
-  runCommand,
+  runCommandLocal,
   wine,
   coreutils,
   gnused,
@@ -25,7 +25,7 @@
 if overrides == [ ] then
   "${prefixLower}/${regName}"
 else
-  runCommand "${name}-${regName}"
+  runCommandLocal "${name}-${regName}"
     {
       nativeBuildInputs = [
         wine

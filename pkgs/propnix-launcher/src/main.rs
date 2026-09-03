@@ -17,7 +17,6 @@ mod run;
 mod settings;
 mod signals;
 mod splash;
-mod steamid;
 mod thin;
 mod userreg;
 mod util;

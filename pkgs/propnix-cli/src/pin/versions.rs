@@ -372,9 +372,13 @@ impl VersionsFile {
 
 }
 
-/// Keys the tool may INSERT (not just update): each is part of the fetchers' closed signatures, so
-/// adding it can never break evaluation. Everything else stays update-only.
-const INSERTABLE: &[&str] = &["depsBuildId"];
+/// Keys the tool may INSERT (not just update): each is declared (with a null default) in ITS OWN store's
+/// fetcher signature — `depsBuildId` in fetchGogGalaxyBuild's, the two sha fields (the Steam cache trust
+/// anchors, pin/steamcache.rs) in fetchSteamDepot's — so inserting each onto rows of its store can never
+/// break evaluation. The per-store pairing is enforced by construction in `emit`, not here: anchors are
+/// staged only for Steam rows (`hashed.anchors`), depsBuildId only for GOG ones. Everything else stays
+/// update-only.
+const INSERTABLE: &[&str] = &["depsBuildId", "depotKeySha256", "manifestSha256"];
 
 /// A payload row's store, from its `fetchInfo` key. The key is what decides which fetcher the row is
 /// handed to at eval time, so duck-typing the fields instead would let a row disagree with the fetcher

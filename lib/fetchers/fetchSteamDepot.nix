@@ -58,6 +58,14 @@
   # so the ceiling only needs to be comfortably above any plausible knee. A build-time constant that
   # cannot affect the content-addressed output.
   workers ? 128,
+  # Cache trust anchors, from the pin's row (`propnix pin` records them; older rows lack them and that
+  # is fine — the download simply keeps its login). With BOTH present and `<credential store>/cache`
+  # warm, the fetch makes NO Steam login: the depot key and manifest come from the cache (verified
+  # against these hashes — the cache is writable by every sandboxed build, so nothing in it is believed
+  # otherwise; see pin/steamcache.rs), and chunk downloads are anonymous HTTP. Steam rate-limits logons
+  # hard enough that per-FOD logins broke real bulk runs, which is the whole reason this exists.
+  depotKeySha256 ? null,
+  manifestSha256 ? null,
 }:
 runCommand (lib.strings.sanitizeDerivationName "${pname}")
   {
@@ -103,30 +111,40 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}")
     # EXDEV), so a `mv` silently degrades to copy+unlink. Measured in a real builder: 2 GiB took 322 ms to
     # move $TMPDIR→$out versus 2 ms to rename WITHIN /build. Writing into $out from the start keeps peak
     # disk at 1x the depot. (Nix's own publish step is a true rename, so 1x holds end to end.)
+    source ${./cred-lib.sh}
+    # Resolve the credential root even on the anonymous path when the bind is present: the artifact
+    # CACHE lives beside the credential dirs (<root>/cache — pin/steamcache.rs), and reading it needs
+    # no credential, only the bind. Absent bind → the CLI's default root, whose cache simply misses.
+    if [ -r /propnix/credentials.toml ]; then
+      export PROPNIX_CRED_DIR="$(propnix_creddir)"
+    fi
+    ${
+      # The anchor flags ride inline (NB: interpolated INLINE, never on a continued line — an empty
+      # optionalString after a trailing backslash continues onto a blank line, ending the command).
+      lib.optionalString (depotKeySha256 != null && manifestSha256 != null) ''
+        anchors=(--depot-key-sha256 ${lib.escapeShellArg depotKeySha256} --manifest-sha256 ${lib.escapeShellArg manifestSha256})
+      ''
+    }
     ${
       if anonymous then
         ''
           # Anonymous account — free/anonymous depots only, so no credential store is consulted.
           propnix download steam \
             --app "$appId" --depot "$depotId" --manifest "$manifestId" \
-            --branch "$branch" --anonymous --workers "$workers" --dir "$out"
+            "''${anchors[@]}" --branch "$branch" --anonymous --workers "$workers" --dir "$out"
         ''
       else
         ''
           # Shared credential prologue: verifies /propnix/credentials.toml is readable inside the sandbox
           # and prints the actionable message when it is not (missing account, or a build that forgot
-          # `--extra-sandbox-paths /propnix=/var/lib/propnix`).
-          source ${./cred-lib.sh}
+          # `--extra-sandbox-paths /propnix=/var/lib/propnix`). Required even though an anchored, warm
+          # cache never logs in: a COLD cache falls back to the login path, which needs the store.
           propnix_require_credentials steam \
             "  A Steam account is required for $title."
-          # Point the CLI's credential store at the in-sandbox root. It walks the accounts itself, so there
-          # is no per-account loop here: a not-owned depot is refused at the depot-key request, and only
-          # when EVERY stored account has refused does it fail — with all of them named.
-          export PROPNIX_CRED_DIR="$(propnix_creddir)"
 
           propnix download steam \
             --app "$appId" --depot "$depotId" --manifest "$manifestId" \
-            --branch "$branch" --workers "$workers" --dir "$out"
+            "''${anchors[@]}" --branch "$branch" --workers "$workers" --dir "$out"
         ''
     }
   ''

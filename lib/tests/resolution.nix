@@ -26,6 +26,7 @@ let
   expected = {
     baby-steps = "gog/x86_64-windows/${wineB}";
     baldurs-gate-3 = "gog/x86_64-windows/${wineB}";
+    casualties-unknown-demo = "steam/x86_64-windows/${wineB}";
     dont-starve = "gog/i386-windows/${wineB}";
     # The only HOST-DEPENDENT platform in the matrix: factorio ranks Wube's native ARM64 Linux build first,
     # and `strategy.runnable` drops it on x86_64 (no ARM-on-x86 emulator here), so the resolver walks on

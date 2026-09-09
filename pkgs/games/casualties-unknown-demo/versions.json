@@ -1,0 +1,19 @@
+{
+  "fetchInfo": {
+    "steam": {
+      "x86_64-windows": [
+        {
+          "pname": "casualties-unknown-demo-win-steam",
+          "appId": 4576510,
+          "depotId": 4576511,
+          "manifestId": "419854421620503848",
+          "version": "24774057",
+          "outputHash": "sha256-a9Pxc1vTgIjpq7a5HT74QQ4kshSkFe0zpgf4P74QIFc=",
+          "depotKeySha256": "c4e084c73e2a546b6517afa764bde15049e2d3844ae5491e038ef23d16943e8a",
+          "manifestSha256": "d057485f37bf0e4a89e50ebf07370fc929c2b9e0204f4ffa4110a836dc23be56",
+          "title": "Casualties: Unknown Demo (windows, Steam)"
+        }
+      ]
+    }
+  }
+}

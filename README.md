@@ -47,6 +47,7 @@ that work there.
 |---|---|---|
 | `baby-steps` | **x86_64-windows** | **x86_64-windows** |
 | `baldurs-gate-3` | **x86_64-windows** | **x86_64-windows** |
+| `casualties-unknown-demo` | **x86_64-windows** | **x86_64-windows** |
 | `dont-starve` | **i386-windows** | **i386-windows** |
 | `factorio` | **aarch64-linux**, x86_64-linux, x86_64-windows | **x86_64-linux**, x86_64-windows |
 | `fallout-nv` | **i386-windows** | **i386-windows** |
@@ -74,6 +75,7 @@ game with entries under only one column can only be built by someone who owns it
 |---|---|---|
 | `baby-steps` | x86_64-windows | — |
 | `baldurs-gate-3` | x86_64-windows | — |
+| `casualties-unknown-demo` | — | x86_64-windows |
 | `dont-starve` | i386-windows | — |
 | `factorio` | x86_64-windows | aarch64-linux, x86_64-linux, x86_64-windows |
 | `fallout-nv` | i386-windows | — |

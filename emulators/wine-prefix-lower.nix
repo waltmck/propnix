@@ -4,7 +4,8 @@
 #
 # A fully-initialized, read-only wine "system" prefix: `wineboot -u` output (system32/syswow64, the
 # default registry hives, DLL registration) + the FEX emulator DLLs dropped into system32 + the Wow64
-# registry keys that point wine at them. The launcher bind-mounts THIS store path's contents (read-only)
+# registry keys that point wine at them + the .NET CLR (Wine Mono) at C:\windows\mono\mono-2.0, which is
+# what lets a MANAGED (pure .NET) exe start at all. The launcher bind-mounts THIS store path's contents (read-only)
 # into each per-app prefix view — the store is read-only, exactly what the bind-mounted prefix wants for
 # the immutable system tree, and its store-path hash keys a wine/FEX bump (new path → the next launch rebinds).
 #
@@ -49,6 +50,11 @@
   gnused,
   wine,
   fexdlls ? null, # aarch64: the FEX emulator DLLs to install as the WoW64 backends. x86_64: null (native).
+  # The .NET CLR (emulators/wine-mono.nix), symlinked in at C:\windows\mono\mono-2.0 — see the "MANAGED
+  # .NET" step below. `null` = ship NO CLR, which is what this tree did before and is the one-line global
+  # opt-out (`prefixLower.override { wineMono = null; }`) if the ~219 MiB is ever unwanted; every MANAGED
+  # title then dies at process start, before its first instruction.
+  wineMono ? null,
 }:
 let
   wineUser = "propnix"; # FIXED — not an option; game tuning hardcodes drive_c/users/propnix/…
@@ -159,6 +165,147 @@ runCommand "wine-prefix-lower"
       done
     fi
 
+    ${lib.optionalString (wineMono != null) ''
+      # ── MANAGED .NET: install the CLR (Wine Mono) at C:\windows\mono\mono-2.0 ────────────────────────
+      # A pure MANAGED exe has a CLR header and — for a modern C# build — no import table at all, so there
+      # is no machine code for wine's loader to enter; it hands the image to `mscoree.dll`, which must find
+      # a runtime to host. Without one the process dies at start with no window and no frame. Verified on
+      # the pre-change realisation of THIS derivation: `drive_c/windows/mono` did not exist, and
+      # `${wine}/share/wine/` holds only fonts/nls/wine.inf/winmd — no `mono` — so nothing anywhere in the
+      # tree supplied a CLR. (Unity *Mono* titles — KSP, Iron Lung, Hollow Knight — carry their own runtime
+      # in the payload and are unaffected either way.)
+      #
+      # WHERE. `dlls/mscoree/metahost.c: get_mono_path()` tries, in order: `C:\windows\mono\mono-2.0`
+      # (get_mono_path_local) → `HKCU\Software\Wine\Mono\RuntimePath` (get_mono_path_registry) → the wine
+      # datadir/`INSTALL_DATADIR/wine/mono`/`/usr/share/wine/mono`/`/opt/wine/mono`, each of those last four
+      # looking for a `wine-mono-<WINE_MONO_VERSION>` SUBDIR. The FIRST is the only one that needs neither a
+      # registry value nor a path inside the wine package, so that is the one we populate — and being first,
+      # it also wins outright, so nothing later can shadow it. `mscoree` then derives mono's own roots from
+      # whatever path it found (`mono_lib_path = <path>\lib`, `mono_etc_path = <path>\etc`, fed to
+      # `mono_set_dirs`), which is why `$out` of wine-mono must BE the runtime root, symlinked verbatim.
+      #
+      # SYMLINK, NOT COPY, and that is load-bearing twice over:
+      #   * the store path stays a SEPARATE closure entry, so this tree's own NAR does not grow by 219 MiB
+      #     and a mono bump does not re-push the whole prefix;
+      #   * propnix-prefetch "never recurses THROUGH a symlink" (pkgs/propnix-prefetch/src/prefetch.rs), and
+      #     a symlink whose target is a DIRECTORY is neither warmed nor descended — so the launcher's
+      #     start-up walk (`warm(&[view], &["dll","drv","exe"])`, run for EVERY wine title) does not gain
+      #     mono's 2 676 managed .dll/.exe files. Copying here would nearly TRIPLE that walk (1 557 PE
+      #     modules in this tree today) for titles that will never load a byte of it. Same reasoning as the
+      #     syswow64 symlinks above: it resolves inside the launcher's private mount ns, where /nix is
+      #     visible, and it points at a fixed store path so this build stays bit-reproducible.
+      mkdir -p "$WINEPREFIX/drive_c/windows/mono"
+      ln -s ${wineMono} "$WINEPREFIX/drive_c/windows/mono/mono-2.0"
+
+      # Prove the drop landed where mscoree looks, HERE rather than at launch: `find_mono_dll()` probes
+      # `<path>\bin\libmono-2.0-<arch>.dll` and picks <arch> from the arch mscoree ITSELF was built for —
+      # `-x86` for i386, `-x86_64` for x86_64 AND for ARM64EC (wine's own `include/winnt.h:8076`,
+      # `#if defined(__x86_64__) && !defined(__arm64ec__)`, establishes that an arm64ec compile defines
+      # `__x86_64__`; an x86_64 guest on aarch64 IS arm64ec). Both are the same two files on both hosts.
+      for _core in libmono-2.0-x86.dll libmono-2.0-x86_64.dll; do
+        [ -f "$WINEPREFIX/drive_c/windows/mono/mono-2.0/bin/$_core" ] \
+          || { echo "propnix: CLR drop failed — mono-2.0/bin/$_core is not readable in the prefix"; exit 1; }
+      done
+
+      # WHY THIS RUNS *AFTER* `wineboot -u`, DELIBERATELY. `wine.inf`'s RegisterDlls step registers
+      # `mscoree.dll`, and `mscoree_main.c: DllRegisterServer` → `install_wine_mono()` will, if it finds a
+      # runtime, go on to `MsiInstallProductW(<mono>\support\winemono-support.msi)` — the package that adds
+      # the .NET "fake dlls" and the NDP registry tree. Letting that fire would be wrong here on two counts:
+      #   * ARCH ASYMMETRY. wineboot is NATIVE (x86_64 on an x86_64 host, arm64 on aarch64), and the arm64
+      #     mscoree asks `find_mono_dll` for `libmono-2.0-arm64.dll`, which wine-mono 11.2.0 does not ship
+      #     in any form (the release directory has only -x86.msi/-x86.tar.xz/-src/-dbgsym/-tests). So the
+      #     support package would install on x86_64 and NOT on aarch64 — two different system trees from one
+      #     expression, which is exactly what this file exists to prevent.
+      #   * The support MSI's INSTALLFAKEDLLS custom actions shell out to `installinf-x86.exe` /
+      #     `installinf-x86_64.exe`, i.e. x86 PEs. On aarch64 that is FEX JIT work inside the Nix sandbox —
+      #     the thing this build's header specifically notes it avoids — and it drags MSI install state
+      #     (a wall-clock `InstallDate`, an `C:\windows\Installer\` package cache) into a tree whose
+      #     bit-reproducibility is a promised property.
+      # Placing mono after wineboot means `install_wine_mono()` runs exactly as it did before this change
+      # (no runtime found → `invoke_appwiz()`, already proven harmless in this sandbox), and the registry
+      # facts the support package would have written are instead declared below — deterministically,
+      # identically on both arches, with no emulation.
+
+      # The .NET Framework 4.x VERSION-DETECTION keys, transcribed from the Registry table of the support
+      # package we are deliberately not running (`msiinfo export winemono-support.msi Registry`; the rows
+      # named NDP4*/DotNetFrameworkPolicy40, which are byte-identical between its 32- and 64-bit
+      # components). These are what a `.NETFramework,Version=v4.x` target probes to decide the framework is
+      # present — Release >= 394254 is the documented ".NET 4.6.1 or later" test, and 533320 clears it.
+      # NOT the CLR discovery path: `get_mono_path_local` above needs no registry at all, so nothing here is
+      # required to START a managed exe; this is purely so a title that ASKS gets upstream's own answer.
+      # Written into BOTH registry views because HKLM\Software is WoW64-redirected — a 32-bit (i386) process
+      # reads Wow6432Node, the same 64-bit-only-wineboot gap the mmdevapi CLSID mirror above exists for.
+      # Deliberately scoped to v4: the support package also claims v1.1/v2.0/v3.0/v3.5, but no title in the
+      # suite targets those, and every value here is a claim we should be able to point at a title for. Add
+      # them from the same table if one ever needs the probe to succeed.
+      # NOT written: `Software\Microsoft\.NETFramework\InstallRoot`. Upstream points it at
+      # `C:\windows\Microsoft.NET\Framework{,64}\`, a tree only the support package's cab populates, and
+      # `mscoree_main.c: LoadLibraryShim()` shows why setting it to an EMPTY tree would be actively worse
+      # than omitting it: with a root it loads `<root>\<version>\<dll>` and nothing else (an empty dir =
+      # guaranteed E_HANDLE), while WITHOUT one it falls back to a bare `LoadLibraryW(<dll>)` down the
+      # normal search path. Measured: leaving it unset costs one cosmetic
+      # `err:mscoree:LoadLibraryShim error reading registry key for installroot` and Roslyn's csc.exe
+      # still runs to completion under this prefix.
+      #
+      # ONE `reg import` rather than 28 `reg add`s: the same effect for one wine invocation instead of
+      # twenty-eight (each of which costs a process round-trip against wineserver).
+      #
+      # The heredoc below reaches the shell UNINDENTED — Nix strips the common leading indentation of an
+      # indented-string block, and 6 spaces is the minimum in this one — which is what both the `.reg`
+      # parser (key lines must start at column 0) and the `EOF` terminator need. Should a future edit ever
+      # put a line here at a SHALLOWER indent, the stripping shrinks and the terminator stops matching:
+      # that is a hard "unexpected EOF" build failure, not a silent misparse.
+      cat > "$WINEPREFIX/drive_c/dotnet-ndp.reg" <<'EOF'
+      Windows Registry Editor Version 5.00
+
+      [HKEY_LOCAL_MACHINE\Software\Microsoft\.NETFramework\policy\v4.0]
+      "30319"="30319-30319"
+
+      [HKEY_LOCAL_MACHINE\Software\Microsoft\NET Framework Setup\NDP\v4\Client]
+      "Install"=dword:00000001
+      "Release"=dword:00082348
+      "Version"="4.7.03190"
+      "TargetVersion"="4.0.0"
+      "Servicing"=dword:00000000
+
+      [HKEY_LOCAL_MACHINE\Software\Microsoft\NET Framework Setup\NDP\v4\Full]
+      "Install"=dword:00000001
+      "Release"=dword:00082348
+      "Version"="4.7.03190"
+      "TargetVersion"="4.0.0"
+      "Servicing"=dword:00000000
+
+      [HKEY_LOCAL_MACHINE\Software\Microsoft\NET Framework Setup\NDP\v4\Full\1033]
+      "Install"=dword:00000001
+      "Release"=dword:00082348
+      "Servicing"=dword:00000000
+
+      [HKEY_LOCAL_MACHINE\Software\Wow6432Node\Microsoft\.NETFramework\policy\v4.0]
+      "30319"="30319-30319"
+
+      [HKEY_LOCAL_MACHINE\Software\Wow6432Node\Microsoft\NET Framework Setup\NDP\v4\Client]
+      "Install"=dword:00000001
+      "Release"=dword:00082348
+      "Version"="4.7.03190"
+      "TargetVersion"="4.0.0"
+      "Servicing"=dword:00000000
+
+      [HKEY_LOCAL_MACHINE\Software\Wow6432Node\Microsoft\NET Framework Setup\NDP\v4\Full]
+      "Install"=dword:00000001
+      "Release"=dword:00082348
+      "Version"="4.7.03190"
+      "TargetVersion"="4.0.0"
+      "Servicing"=dword:00000000
+
+      [HKEY_LOCAL_MACHINE\Software\Wow6432Node\Microsoft\NET Framework Setup\NDP\v4\Full\1033]
+      "Install"=dword:00000001
+      "Release"=dword:00082348
+      "Servicing"=dword:00000000
+      EOF
+      wine reg import 'C:\dotnet-ndp.reg'
+      rm -f "$WINEPREFIX/drive_c/dotnet-ndp.reg"
+    ''}
+
     # Reproducibility (1/2): pin the values wineboot RANDOMIZES, so two builds are byte-identical
     # (nix-store --realise --check). MachineGuid/MachineId are UUIDs seeded from /dev/urandom;
     # PendingFileRenameOperations is a leftover queue of random dll*.tmp temp names from the DLL install
@@ -208,10 +355,18 @@ runCommand "wine-prefix-lower"
         s/("ContainerId"=")[^"]*"/\1{a0000000-0000-4000-8000-000000000003}"/
       ' "$WINEPREFIX/$_h"
     done
-    # Remove wineboot's leftover DLL-install temp files (dll*.tmp in system32). Their PendingFileRename
-    # queue is deleted above and wineboot never runs at runtime (.update-timestamp=disable), so they are
-    # dead cruft that was always unused — and their random names are the last reproducibility drift.
-    find "$WINEPREFIX/drive_c/windows/system32" -maxdepth 1 -name 'dll*.tmp' -delete
+    # Remove wineboot's leftover DLL-install temp files (dll*.tmp). Their PendingFileRename queue is deleted
+    # above and wineboot never runs at runtime (.update-timestamp=disable), so they are dead cruft that was
+    # always unused — and their random names are the last reproducibility drift.
+    #
+    # PRE-EXISTING BUG, fixed here: this used to be `system32 -maxdepth 1`, which is not where wineboot
+    # actually leaves them. Measured on the UNMODIFIED tree (`nix-store --realise --check` on the
+    # pre-change derivation): 33 surviving `dll*.tmp` under `drive_c/windows/syswow64` plus one under
+    # `drive_c/windows/resources/themes/aero`, with fresh random names each run — so the header's
+    # "`nix-store --realise --check` passes" had silently stopped being true. Sweep the WHOLE windows tree
+    # instead. `find` does not follow symlinks by default, so the mono runtime symlinked in above is a leaf
+    # here and its 2 790 files are never walked.
+    find "$WINEPREFIX/drive_c/windows" -name 'dll*.tmp' -delete
 
     # Publish the finished prefix as the store output — its contents are symlinked verbatim into each
     # per-app prefix as the read-only system tree.

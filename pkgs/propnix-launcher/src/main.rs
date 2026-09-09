@@ -256,12 +256,18 @@ fn run_outer(
     // Per-game SETUP SCRIPT — the escape hatch for game-specific prefix setup (e.g. Skyrim seeding
     // SkyrimPrefs.ini `iSize` + a quality preset). Runs here in the OUTER, AFTER resolve_table (so
     // PROPNIX_SAVE_DIR/APPID are set and the save dir exists) and BEFORE the prefix is assembled/launched,
-    // with the runtime env + `PROPNIX_PAYLOAD` (the game tree, for reading shipped assets). A NON-ZERO exit
-    // ABORTS the launch: a setup failure is a packaging bug or a would-be-corrupted prefix, and must surface
-    // rather than launch into a broken state.
+    // with the runtime env + `PROPNIX_PAYLOAD` (the primary game tree) and `PROPNIX_PAYLOADS` (ALL of them,
+    // ':'-joined in mount-priority order — a multi-depot build routinely ships the asset a setup script wants
+    // outside the head tree; see `config::payload_search_path`). A NON-ZERO exit ABORTS the launch: a setup
+    // failure is a packaging bug or a would-be-corrupted prefix, and must surface rather than launch into a
+    // broken state.
     if let Some(script) = &cfg.setup_script {
         let mut cmd = Command::new(script);
         cmd.env("PROPNIX_PAYLOAD", &cfg.payload);
+        cmd.env(
+            "PROPNIX_PAYLOADS",
+            config::payload_search_path(&cfg.payload, &cfg.payloads),
+        );
         match cmd.status() {
             Ok(s) if s.success() => {}
             Ok(s) => {

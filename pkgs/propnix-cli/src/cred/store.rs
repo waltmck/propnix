@@ -164,16 +164,21 @@ impl CredStore {
     /// Find the (type, dir) of a stored account by username. `type_filter` (from `--type`) restricts the
     /// search to one account type — needed to disambiguate the SAME username under multiple backends (e.g. a
     /// GOG `alice` and a Steam `alice`). Err if none match, or if >1 match (only possible without a filter).
-    pub fn find(&self, username: &str, type_filter: Option<&str>) -> Result<(String, PathBuf), String> {
+    pub fn find(
+        &self,
+        username: &str,
+        type_filter: Option<&str>,
+    ) -> Result<(String, PathBuf), String> {
         let matches: Vec<(String, PathBuf)> = self
             .list()
             .into_iter()
             .filter(|t| type_filter.is_none_or(|tf| t.type_name == tf))
             .flat_map(|t| {
                 let ty = t.type_name.clone();
-                t.usernames.into_iter().filter(|u| u == username).map(move |u| {
-                    (ty.clone(), self.root.join(&ty).join(&u))
-                })
+                t.usernames
+                    .into_iter()
+                    .filter(|u| u == username)
+                    .map(move |u| (ty.clone(), self.root.join(&ty).join(&u)))
             })
             .collect();
         match matches.len() {
@@ -349,7 +354,14 @@ impl CredStore {
         let owner = self.owner_uid();
         self.run_escalating(
             "install",
-            &["-d", "-m", "0755", "-o", &owner, &self.root.to_string_lossy()],
+            &[
+                "-d",
+                "-m",
+                "0755",
+                "-o",
+                &owner,
+                &self.root.to_string_lossy(),
+            ],
         )
     }
 
@@ -753,7 +765,9 @@ mod tests {
         // the account dir refuses `other` traversal even though the type dir above is world-writable.
         let root = tmp_root("two-readers");
         let store = store_at(&root);
-        store.put("gog", "alice", "galaxy_tokens.json", b"{}").unwrap();
+        store
+            .put("gog", "alice", "galaxy_tokens.json", b"{}")
+            .unwrap();
 
         let type_dir = root.join("gog");
         let acct = type_dir.join("alice");
@@ -763,18 +777,34 @@ mod tests {
         // Type dir: the /tmp model — setgid (group inheritance) + sticky + world-writable, so any
         // human can create their account dir here without being a member of the build group.
         if is_setgid(&type_dir) {
-            assert_eq!(mode_of(&type_dir), 0o3777, "type dir is the setgid+sticky /tmp model");
+            assert_eq!(
+                mode_of(&type_dir),
+                0o3777,
+                "type dir is the setgid+sticky /tmp model"
+            );
             assert_eq!(gid_of(&type_dir), gid, "type dir carries the build group");
             // Account dir: owned by the human, group inherited from the setgid parent, no `other` bits.
-            assert_eq!(mode_of(&acct) & 0o0777, 0o750, "account dir must refuse `other` traversal");
+            assert_eq!(
+                mode_of(&acct) & 0o0777,
+                0o750,
+                "account dir must refuse `other` traversal"
+            );
             assert_eq!(gid_of(&acct), gid, "account dir inherits the build group");
         } else {
             eprintln!("setgid did not stick on this filesystem; group falls back to explicit -g");
         }
         // The token itself: 0640, group = the build group — HOWEVER it got there (inheritance on a
         // setgid layout, explicit -g on the fallback).
-        assert_eq!(mode_of(&token), 0o640, "token is owner rw, group r, other NOTHING");
-        assert_eq!(gid_of(&token), gid, "token must be group-owned by the build group");
+        assert_eq!(
+            mode_of(&token),
+            0o640,
+            "token is owner rw, group r, other NOTHING"
+        );
+        assert_eq!(
+            gid_of(&token),
+            gid,
+            "token must be group-owned by the build group"
+        );
     }
 
     #[test]
@@ -783,7 +813,11 @@ mod tests {
         // generation that still had the module) must never reach it.
         let bogus = "propnix-fetch-does-not-exist-here";
         let got = resolve_file_group(bogus);
-        assert_ne!(got.as_deref(), Some(bogus), "must not use a nonexistent group");
+        assert_ne!(
+            got.as_deref(),
+            Some(bogus),
+            "must not use a nonexistent group"
+        );
         assert!(
             got.as_deref().is_none_or(group_exists),
             "whatever it resolves to must actually exist, got {got:?}"
@@ -805,7 +839,12 @@ mod tests {
         let root = tmp_root("plain-put");
         let store = store_at(&root);
         store
-            .put("gog", "alice", "galaxy_tokens.json", b"{\"access_token\":\"x\"}")
+            .put(
+                "gog",
+                "alice",
+                "galaxy_tokens.json",
+                b"{\"access_token\":\"x\"}",
+            )
             .unwrap();
 
         let acct = root.join("gog").join("alice");
@@ -816,11 +855,9 @@ mod tests {
         );
         // …and the fetcher pointer is written alongside it.
         assert_eq!(mode_of(&root.join("credentials.toml")), 0o644);
-        assert!(
-            std::fs::read_to_string(root.join("credentials.toml"))
-                .unwrap()
-                .contains("credentialDir = \"/propnix\""),
-        );
+        assert!(std::fs::read_to_string(root.join("credentials.toml"))
+            .unwrap()
+            .contains("credentialDir = \"/propnix\""),);
     }
 
     #[test]
@@ -848,7 +885,10 @@ mod tests {
             !store.is_declarative("gog", "ali"),
             "the match is on the whole <type>/<username>/ path, not a name prefix"
         );
-        assert!(!store.is_declarative("steam", "alice"), "type must match too");
+        assert!(
+            !store.is_declarative("steam", "alice"),
+            "type must match too"
+        );
     }
 
     #[test]
@@ -860,7 +900,9 @@ mod tests {
             "gog/alice/galaxy_tokens.json\n",
         )
         .unwrap();
-        let err = store.put("gog", "alice", "galaxy_tokens.json", b"{}").unwrap_err();
+        let err = store
+            .put("gog", "alice", "galaxy_tokens.json", b"{}")
+            .unwrap_err();
         assert!(err.contains("managed declaratively"), "got: {err}");
         assert!(
             err.contains("services.propnix.credentials.gog.alice"),
@@ -875,7 +917,9 @@ mod tests {
             "the refusal must not have created anything in the store"
         );
         // An imperative account of the SAME type is unaffected.
-        store.put("gog", "bob", "galaxy_tokens.json", b"{}").unwrap();
+        store
+            .put("gog", "bob", "galaxy_tokens.json", b"{}")
+            .unwrap();
     }
 
     #[test]
@@ -916,8 +960,16 @@ mod tests {
         let link = root.join("link");
         std::os::unix::fs::symlink(&victim, &link).unwrap();
         let err = open_private(&link).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists, "a symlink must not be followed");
-        assert_eq!(std::fs::read(&victim).unwrap(), b"", "the target must be untouched");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::AlreadyExists,
+            "a symlink must not be followed"
+        );
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"",
+            "the target must be untouched"
+        );
 
         // …and the happy path still produces a 0600 file with the bytes in it, twice in a row without
         // colliding with itself.
@@ -985,10 +1037,17 @@ mod tests {
         let mut groups = [0 as libc::gid_t; 128];
         let n = unsafe { libc::getgroups(groups.len() as libc::c_int, groups.as_mut_ptr()) };
         let Some(other) = (n > 0)
-            .then(|| groups[..n as usize].iter().map(|&g| g as u32).find(|&g| g != me))
+            .then(|| {
+                groups[..n as usize]
+                    .iter()
+                    .map(|&g| g as u32)
+                    .find(|&g| g != me)
+            })
             .flatten()
         else {
-            eprintln!("no supplementary group on this host — skipping the dir-group convergence check");
+            eprintln!(
+                "no supplementary group on this host — skipping the dir-group convergence check"
+            );
             return;
         };
 
@@ -1016,7 +1075,11 @@ mod tests {
             0o750,
             "the account dir must be exactly 0750: group traversal, no group write, no other bits"
         );
-        assert_eq!(gid_of(&acct.join("t.json")), other, "the token carries the build group");
+        assert_eq!(
+            gid_of(&acct.join("t.json")),
+            other,
+            "the token carries the build group"
+        );
         assert_eq!(mode_of(&acct.join("t.json")), 0o640);
     }
 
@@ -1036,14 +1099,22 @@ mod tests {
         std::fs::create_dir(&tight).unwrap();
         std::fs::set_permissions(&tight, std::fs::Permissions::from_mode(0o0700)).unwrap();
         store.put("gog", "alice", "t.json", b"{}").unwrap();
-        assert_eq!(mode_of(&tight) & 0o777, 0o750, "group regains traversal, others stay shut out");
+        assert_eq!(
+            mode_of(&tight) & 0o777,
+            0o750,
+            "group regains traversal, others stay shut out"
+        );
         assert_eq!(mode_of(&tight.join("t.json")), 0o640);
 
         let loose = type_dir.join("bob");
         std::fs::create_dir(&loose).unwrap();
         std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o777)).unwrap();
         store.put("gog", "bob", "t.json", b"{}").unwrap();
-        assert_eq!(mode_of(&loose) & 0o777, 0o750, "group/other write must be stripped");
+        assert_eq!(
+            mode_of(&loose) & 0o777,
+            0o750,
+            "group/other write must be stripped"
+        );
     }
 
     #[test]

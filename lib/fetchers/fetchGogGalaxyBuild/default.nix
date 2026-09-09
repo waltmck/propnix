@@ -167,7 +167,7 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}-${version}")
         ${
           lib.optionalString (dlcId != null) "--dlc-id ${lib.escapeShellArg dlcId} "
           + lib.optionalString (depsBuildId != null) "--deps-build-id ${lib.escapeShellArg depsBuildId} "
-        }--workers "$workers" --dir "$out"
+        }--workers "$workers" --dir "$out" --nix-progress
     fi
 
     # ── common post-processing (both rungs) ──────────────────────────────────────────────────────────

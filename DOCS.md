@@ -117,12 +117,12 @@ triple + the guard semantics.
 | `lib/modules/` | `app-options.nix` (the typed top-level option schema, incl. the generated `fetchInfo.<fetcher>.<platform>` fetch matrix) + `types.nix` (the `knob`/`lastWins`/`dedupList` custom leaf types) |
 | `lib/strategy.nix` | `resolveStrategy` — the pure backend-selection function (the `backend` option default) |
 | `lib/backends/<name>/` | one self-contained backend registry entry each (`{ modules; build; }`): `wine/` (options + the platform-aware base tuning layer `defaults.nix`), `box64/` (also serves `native`), `fex/` (research; `meta.broken` on 16K), plus `mk-thin-build.nix` (the shared thin dispatch-arm assembler + launch-block contract) |
-| `lib/builders/` | `wine.nix` (`mkWineApp` — resolved config → PREFIX-mode package), `thin.nix` (`mkThinApp` — THIN mode), `launcher-package.nix` (the shared packaging tail: wrapper + `.desktop` + meta), `store-skeleton.nix`, `wine-reg.nix`, `desktop-item.nix`, `setup-script.nix` (+ the shared `ini-lib.sh`) |
+| `lib/builders/` | `wine.nix` (`mkWineApp` — resolved config → PREFIX-mode package), `thin.nix` (`mkThinApp` — THIN mode), `launcher-package.nix` (the shared packaging tail: wrapper + `.desktop` + meta), `store-skeleton.nix`, `wine-reg.nix`, `desktop-item.nix`, `setup-script.nix` (+ the always-supplied `payload-lib.sh` and the opt-in `ini-lib.sh`) |
 | `lib/icons/` | three icon sources over one shared pipeline: `from-png.nix` (game-data raster, preferred), `from-pe.nix` (exe PE resources), `from-unity.nix` (UnityPlayer.png) → hicolor theme + splash |
 | `lib/sealing.nix` | pure-lib data model: the tuning flatten (reason-strip) + the env-seal record + `defaultScrub` |
 | `lib/presets/` | reusable tuning fragments (`unity.framePacing`, `unity.fullscreen`) + `mergeTuning` (collision-throwing compose) |
 | `lib/fetchers/` | `fetchGogGalaxyBuild/` (`propnix download gog` FOD, buildId-pinned), `fetchGogLinuxInstaller.nix` (lgogdownloader, latest-only), `fetchSteamDepot.nix` (`propnix download steam` FOD, manifest-pinned) + the shared `cred-lib.sh` prologue |
-| `emulators/` | `wine-hangover` (same source both arches), `fex-dlls` + `galaxy-stub` + `llvm-mingw` + `box64` (aarch64), `dxvk-arm64ec`/`dxvk-x86_64`, `vkd3d-proton-arm64ec`/`vkd3d-proton-x86_64`, `wine-prefix-lower` (the read-only system tree) |
+| `emulators/` | `wine-hangover` (same source both arches), `fex-dlls` + `galaxy-stub` + `llvm-mingw` + `box64` (aarch64), `dxvk-arm64ec`/`dxvk-x86_64`, `vkd3d-proton-arm64ec`/`vkd3d-proton-x86_64`, `wine-mono` (the .NET CLR every MANAGED title needs, pinned to wine's own `WINE_MONO_VERSION`), `wine-prefix-lower` (the read-only system tree — installs the CLR at `C:\windows\mono\mono-2.0`) |
 | `pkgs/propnix-launcher/` | the Rust launcher (GTK4 splash + single-instance + env-seal + mount-table orchestration, PREFIX + THIN modes); links `pkgs/propnix-mount/` (the userns bind/overlay layer) and `pkgs/propnix-prefetch/` (the `posix_fadvise` page-cache warmer — run by the wine INNER over the assembled prefix, PE modules only: `.dll`/`.drv`/`.exe`) as library crates — they are not separate packages |
 | `pkgs/games/<name>/` | one game per directory — `default.nix` (the `mkApp` module) + pinned `versions.json` (the `fetchInfo` fetch matrix) + optional `wine-tuning.nix`/`box64-tuning.nix`/`setup.sh`; auto-discovered into the scope + a flake package/app |
 | `nixos/propnix.nix` | host module: binds the credential dir into the build sandbox, loads `ntsync`, trusts `propnix.cachix.org`, installs the `propnix` CLI, materializes declared credentials (sops-nix/agenix) |
@@ -184,6 +184,18 @@ Drop a directory under `pkgs/games/<name>/` — it's auto-discovered into the sc
   preload; enabling the emu there with no `.dll` declared is an eval error). One wall: a game built
   against a newer Steamworks SDK than the gbe_fork pin (currently 1.64) needs the pin bumped first —
   triage with `nm -D` on the game's genuine lib (modules/steam-emu.nix documents the method).
+
+  One further knob, needed only by titles that block on logon state: `steam.emu.offline` (default `true`)
+  decides whether the shim reports the Steam client as sitting in offline mode. It is a statement about
+  LOGON STATE and nothing else — in the pinned gbe_fork it reaches exactly `ISteamUser::BLoggedOn()`,
+  `BConnected()` and `GetLogonState()`, while what the shim does on the wire stays governed by the
+  untouched `disable_networking` / `disable_lan_only` keys. `true` is the honest answer wherever there is
+  an offline path to take; set it `false` only where a run shows the game waiting forever on a "Steam
+  client is coming back" that never does (`pkgs/games/victoria-3` is the worked example: flipping it alone
+  turns "no log at all" into the engine's full log set and a D3D11 device — and note that the game there
+  has a first-class single-player mode, so "is it online-only?" is NOT the test; a run is). Do not reach
+  for it just because a title stops at its Steam step: `pkgs/games/rust` stops INSIDE `SteamAPI_Init`,
+  before this key is ever consulted, and flipping it there changes nothing.
 
   Afterwards, `propnix pin <name>` moves a game to the newest build on the branch it already sits on,
   rewriting `versions.json` **in place** (temp file + same-directory rename, so an interrupted run can

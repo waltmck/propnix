@@ -131,7 +131,7 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}")
           # Anonymous account — free/anonymous depots only, so no credential store is consulted.
           propnix download steam \
             --app "$appId" --depot "$depotId" --manifest "$manifestId" \
-            "''${anchors[@]}" --branch "$branch" --anonymous --workers "$workers" --dir "$out"
+            "''${anchors[@]}" --branch "$branch" --anonymous --workers "$workers" --dir "$out" --nix-progress
         ''
       else
         ''
@@ -144,7 +144,7 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}")
 
           propnix download steam \
             --app "$appId" --depot "$depotId" --manifest "$manifestId" \
-            "''${anchors[@]}" --branch "$branch" --workers "$workers" --dir "$out"
+            "''${anchors[@]}" --branch "$branch" --workers "$workers" --dir "$out" --nix-progress
         ''
     }
   ''

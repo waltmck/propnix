@@ -47,6 +47,7 @@ that work there.
 |---|---|---|
 | `baby-steps` | **x86_64-windows** | **x86_64-windows** |
 | `baldurs-gate-3` | **x86_64-windows** | **x86_64-windows** |
+| `cyberpunk-2077` | **x86_64-windows** | **x86_64-windows** |
 | `dont-starve` | **i386-windows** | **i386-windows** |
 | `factorio` | **aarch64-linux**, x86_64-linux, x86_64-windows | **x86_64-linux**, x86_64-windows |
 | `fallout-nv` | **i386-windows** | **i386-windows** |
@@ -61,8 +62,11 @@ that work there.
 | `outlast-2` | **x86_64-windows** | **x86_64-windows** |
 | `papers-please` | **x86_64-windows** | **x86_64-windows** |
 | `prison-architect` | **x86_64-windows** | **x86_64-windows** |
+| `rust` | **x86_64-windows** | **x86_64-windows** |
+| `shadow-of-mordor` | **x86_64-windows** | **x86_64-windows** |
 | `skyrim-se` | **x86_64-windows** | **x86_64-windows** |
 | `stellaris` | **x86_64-linux** | **x86_64-linux** |
+| `witcher-3` | **x86_64-windows** | **x86_64-windows** |
 
 ### Table 2 (by store): which fetcher provides a given game build?
 
@@ -73,7 +77,8 @@ game with entries under only one column can only be built by someone who owns it
 | game | `gog` | `steam` |
 |---|---|---|
 | `baby-steps` | x86_64-windows | — |
-| `baldurs-gate-3` | x86_64-windows | — |
+| `baldurs-gate-3` | x86_64-windows | x86_64-windows |
+| `cyberpunk-2077` | x86_64-windows | — |
 | `dont-starve` | i386-windows | — |
 | `factorio` | x86_64-windows | aarch64-linux, x86_64-linux, x86_64-windows |
 | `fallout-nv` | i386-windows | — |
@@ -88,8 +93,11 @@ game with entries under only one column can only be built by someone who owns it
 | `outlast-2` | x86_64-windows | — |
 | `papers-please` | x86_64-windows | — |
 | `prison-architect` | x86_64-windows | — |
-| `skyrim-se` | x86_64-windows | — |
+| `rust` | — | x86_64-windows |
+| `shadow-of-mordor` | x86_64-windows | x86_64-windows |
+| `skyrim-se` | x86_64-windows | x86_64-windows |
 | `stellaris` | — | x86_64-linux |
+| `witcher-3` | x86_64-windows | — |
 
 When a game is pinned from both stores, the default fetcher follows your `preferredFetchers` config
 (every registered fetcher in registry order, unless you narrow it) — so a gog-only setup automatically

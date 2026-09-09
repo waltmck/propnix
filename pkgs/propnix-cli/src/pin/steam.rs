@@ -172,14 +172,20 @@ pub fn credentials_from_store(
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => continue,
             Err(e) => {
-                eprintln!("propnix: skipping unreadable Steam credential {}: {e}", t.display());
+                eprintln!(
+                    "propnix: skipping unreadable Steam credential {}: {e}",
+                    t.display()
+                );
                 continue;
             }
         };
         match propnix_steam_cred::login_tokens_in_tar(f) {
             Ok(tokens) => all.extend(tokens),
             Err(e) => {
-                eprintln!("propnix: skipping malformed Steam credential {}: {e}", t.display());
+                eprintln!(
+                    "propnix: skipping malformed Steam credential {}: {e}",
+                    t.display()
+                );
                 continue;
             }
         }
@@ -278,7 +284,13 @@ pub struct Control {
 /// Retried as a WHOLE on a transport failure: the session is not resumable, so a dropped socket part way
 /// through means logging in again from scratch. A refusal (bad credentials, no depot key, no request
 /// code) is Steam's considered answer and is returned at once.
-pub fn control(app_id: u32, depot_id: u32, manifest_ids: &[u64], branch: &str, auth: Auth) -> R<Control> {
+pub fn control(
+    app_id: u32,
+    depot_id: u32,
+    manifest_ids: &[u64],
+    branch: &str,
+    auth: Auth,
+) -> R<Control> {
     crate::pin::retry::with_retry(
         &format!("Steam control plane for app {app_id} depot {depot_id}"),
         &crate::pin::retry::METADATA,
@@ -308,7 +320,8 @@ fn session_key(auth: &Auth) -> String {
     }
 }
 
-fn sessions() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<CmSession>>> {
+fn sessions(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<CmSession>>> {
     static SESSIONS: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<CmSession>>>,
     > = std::sync::OnceLock::new();
@@ -328,8 +341,9 @@ fn sessions() -> &'static std::sync::Mutex<std::collections::HashMap<String, std
 /// — because a throttle mistaken for a dead token costs only the remainder of one run, and the cross-run
 /// cost of no persistence is a single failed logon per invocation, which the limiter tolerates.
 fn refused_logins() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
-    static REFUSED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
-        std::sync::OnceLock::new();
+    static REFUSED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, String>>,
+    > = std::sync::OnceLock::new();
     REFUSED.get_or_init(Default::default)
 }
 
@@ -338,7 +352,11 @@ fn refused_logins() -> &'static std::sync::Mutex<std::collections::HashMap<Strin
 fn session_for(auth: &Auth) -> R<std::sync::Arc<CmSession>> {
     use steam_vent::{Connection, ServerList};
     let key = session_key(auth);
-    if let Some(s) = sessions().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
+    if let Some(s) = sessions()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+    {
         return Ok(s.clone());
     }
     // An account this process already saw refused fails fast — same class, no fresh logon attempt.
@@ -405,14 +423,22 @@ fn session_for(auth: &Auth) -> R<std::sync::Arc<CmSession>> {
         }
     };
     let s = std::sync::Arc::new(CmSession { rt, conn });
-    Ok(sessions().lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(key).or_insert(s).clone())
+    Ok(sessions()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(key)
+        .or_insert(s)
+        .clone())
 }
 
 /// Forget a (presumably stale) session so the next `session_for` logs in afresh. Called on TRANSPORT
 /// failures of a control-plane request; `control()`'s retry-on-Http then re-enters with a new login,
 /// which is how a connection Steam dropped between depots self-heals without a retry ladder here.
 fn drop_session(auth: &Auth) {
-    sessions().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&session_key(auth));
+    sessions()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&session_key(auth));
 }
 
 fn control_once(
@@ -549,7 +575,8 @@ pub fn acquire_cached(
     let key = crate::pin::steamcache::read_key(depot_id, depot_key_sha256?)?;
     let mut cached = BTreeMap::new();
     for w in wants {
-        let bytes = crate::pin::steamcache::read_manifest(depot_id, w.manifest, w.manifest_sha256?)?;
+        let bytes =
+            crate::pin::steamcache::read_manifest(depot_id, w.manifest, w.manifest_sha256?)?;
         cached.insert(w.manifest, bytes);
     }
     // Cell 0 = the global content-server directory. The session's cell id would give marginally better
@@ -600,8 +627,7 @@ impl DepotAccess {
                 let code = self.codes.get(&manifest_id).copied().ok_or_else(|| {
                     SteamError::Parse(format!("no request code for manifest {manifest_id}"))
                 })?;
-                let raw =
-                    fetch_manifest_raw(agent, &self.hosts, self.depot_id, manifest_id, code)?;
+                let raw = fetch_manifest_raw(agent, &self.hosts, self.depot_id, manifest_id, code)?;
                 crate::pin::steamcache::write_manifest(self.depot_id, manifest_id, &raw);
                 raw
             }
@@ -732,8 +758,9 @@ pub fn fetch_manifest_raw(
         || {
             let mut last = String::new();
             for host in hosts.iter().take(6) {
-                let url =
-                    format!("https://{host}/depot/{depot_id}/manifest/{manifest_id}/5/{request_code}");
+                let url = format!(
+                    "https://{host}/depot/{depot_id}/manifest/{manifest_id}/5/{request_code}"
+                );
                 match agent.get(&url).call() {
                     Ok(resp) => {
                         let mut body = Vec::new();
@@ -765,7 +792,9 @@ fn decode_manifest(zip: &[u8], depot_key: &[u8; 32]) -> R<(Vec<FileEntry>, u32)>
             break; // the terminator carries NO length field
         }
         if i + 4 > raw.len() {
-            return Err(SteamError::Parse("manifest section header is truncated".into()));
+            return Err(SteamError::Parse(
+                "manifest section header is truncated".into(),
+            ));
         }
         let len = u32::from_le_bytes(raw[i..i + 4].try_into().unwrap()) as usize;
         i += 4;
@@ -785,12 +814,15 @@ fn decode_manifest(zip: &[u8], depot_key: &[u8; 32]) -> R<(Vec<FileEntry>, u32)>
         }
         i = end;
     }
-    let payload = payload.ok_or_else(|| SteamError::Parse("manifest has no payload section".into()))?;
+    let payload =
+        payload.ok_or_else(|| SteamError::Parse("manifest has no payload section".into()))?;
     let metadata =
         metadata.ok_or_else(|| SteamError::Parse("manifest has no metadata section".into()))?;
 
     use protobuf::Message;
-    use steam_vent_proto_steam::content_manifest::{ContentManifestMetadata, ContentManifestPayload};
+    use steam_vent_proto_steam::content_manifest::{
+        ContentManifestMetadata, ContentManifestPayload,
+    };
     let payload = ContentManifestPayload::parse_from_bytes(&payload)
         .map_err(|e| SteamError::Parse(format!("manifest payload: {e}")))?;
     let metadata = ContentManifestMetadata::parse_from_bytes(&metadata)
@@ -944,11 +976,9 @@ fn decrypt_filename(b64: &str, key: &[u8; 32]) -> R<String> {
             ct.len()
         )));
     }
-    let plain = steam_vent_crypto::symmetric_decrypt_without_hmac(
-        bytes::BytesMut::from(&ct[..]),
-        key,
-    )
-    .map_err(|e| SteamError::Parse(format!("filename decryption: {e}")))?;
+    let plain =
+        steam_vent_crypto::symmetric_decrypt_without_hmac(bytes::BytesMut::from(&ct[..]), key)
+            .map_err(|e| SteamError::Parse(format!("filename decryption: {e}")))?;
     let s = plain.strip_suffix(&[0u8]).unwrap_or(&plain[..]);
     String::from_utf8(s.to_vec()).map_err(|e| SteamError::Parse(format!("filename utf8: {e}")))
 }
@@ -1108,10 +1138,14 @@ mod sdk_lzma {
             )
         };
         if res != SZ_OK as i32 {
-            return Err(format!("lzma: SDK decode failed (SRes {res}, status {status:?})"));
+            return Err(format!(
+                "lzma: SDK decode failed (SRes {res}, status {status:?})"
+            ));
         }
         if dest_len != expect {
-            return Err(format!("lzma: SDK produced {dest_len} bytes, manifest says {expect}"));
+            return Err(format!(
+                "lzma: SDK produced {dest_len} bytes, manifest says {expect}"
+            ));
         }
         Ok(out)
     }
@@ -1122,12 +1156,15 @@ fn decompress_chunk(raw: &[u8], expect: usize) -> Result<Vec<u8>, String> {
     let out = if raw.len() >= 8 && &raw[0..4] == b"VSZa" {
         // Current format: 'VSZa' + CRC, a raw zstd frame at offset 8, then a footer ending in 'zsv'.
         if !raw.ends_with(b"zsv") {
-            return Err(format!("VSZa footer is {:?}", &raw[raw.len().saturating_sub(3)..]));
+            return Err(format!(
+                "VSZa footer is {:?}",
+                &raw[raw.len().saturating_sub(3)..]
+            ));
         }
         // Read EXACTLY the declared size rather than to end-of-input: the zstd frame is followed by
         // a footer (<crc><original size><reserved> then "zsv"), which decode_all would trip over.
-        let mut dec = zstd::stream::read::Decoder::new(&raw[8..])
-            .map_err(|e| format!("zstd init: {e}"))?;
+        let mut dec =
+            zstd::stream::read::Decoder::new(&raw[8..]).map_err(|e| format!("zstd init: {e}"))?;
         let mut o = vec![0u8; expect];
         dec.read_exact(&mut o).map_err(|e| format!("zstd: {e}"))?;
         o
@@ -1227,24 +1264,45 @@ mod tests {
         // A pool of chunk seeds reused across files, plus holes (gaps between chunk end and next offset)
         // and tails (file size beyond the last chunk).
         let files = vec![
-            FileEntry { path: "dir".into(), size: u64::MAX, executable: false, chunks: vec![] },
-            FileEntry { path: "dir/empty_sub".into(), size: u64::MAX, executable: false, chunks: vec![] },
+            FileEntry {
+                path: "dir".into(),
+                size: u64::MAX,
+                executable: false,
+                chunks: vec![],
+            },
+            FileEntry {
+                path: "dir/empty_sub".into(),
+                size: u64::MAX,
+                executable: false,
+                chunks: vec![],
+            },
             // leading hole (first chunk at offset 8), interior hole, shared seeds 1 & 2
             FileEntry {
-                path: "dir/a.dat".into(), size: 4096, executable: false,
+                path: "dir/a.dat".into(),
+                size: 4096,
+                executable: false,
                 chunks: vec![ch(1, 8, 100), ch(2, 2000, 100)],
             },
             // seed 1 again (cross-file dup), plus a trailing hole (size 900 > 300+100)
             FileEntry {
-                path: "dir/b.dat".into(), size: 900, executable: true,
+                path: "dir/b.dat".into(),
+                size: 900,
+                executable: true,
                 chunks: vec![ch(3, 0, 100), ch(1, 300, 100)],
             },
             // same seed 2 twice within one file (intra-file dup) at different offsets
             FileEntry {
-                path: "c.dat".into(), size: 500, executable: false,
+                path: "c.dat".into(),
+                size: 500,
+                executable: false,
                 chunks: vec![ch(2, 0, 100), ch(2, 200, 100), ch(3, 400, 100)],
             },
-            FileEntry { path: "z_empty.dat".into(), size: 0, executable: false, chunks: vec![] },
+            FileEntry {
+                path: "z_empty.dat".into(),
+                size: 0,
+                executable: false,
+                chunks: vec![],
+            },
         ];
 
         // ORDERED (pin): nar_hash over the manifest tree, each file streamed in offset order by write_file.
@@ -1254,7 +1312,8 @@ mod tests {
             let mut cs: Vec<&ChunkRef> = f.chunks.iter().collect();
             cs.sort_by_key(|c| c.offset);
             let mut it = cs.into_iter();
-            write_file(f, || Ok(content(it.next().expect("chunk"))), w).map_err(nar::NarError::Fetch)
+            write_file(f, || Ok(content(it.next().expect("chunk"))), w)
+                .map_err(nar::NarError::Fetch)
         })
         .unwrap();
 
@@ -1270,9 +1329,12 @@ mod tests {
             }
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             let h = std::fs::OpenOptions::new()
-                .write(true).create(true).truncate(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
                 .mode(if f.executable { 0o755 } else { 0o644 })
-                .open(&p).unwrap();
+                .open(&p)
+                .unwrap();
             h.set_len(f.size).unwrap();
             for c in &f.chunks {
                 h.write_all_at(&content(c), c.offset).unwrap();
@@ -1280,7 +1342,8 @@ mod tests {
         }
         let local = nar::local_tree(&dir).unwrap();
         let (fetch_hash, _) = nar::nar_hash(&local, |p: &std::path::PathBuf, w| {
-            let mut file = std::fs::File::open(p).map_err(|e| nar::NarError::Fetch(e.to_string()))?;
+            let mut file =
+                std::fs::File::open(p).map_err(|e| nar::NarError::Fetch(e.to_string()))?;
             std::io::copy(&mut file, w).map_err(|e| nar::NarError::Fetch(e.to_string()))?;
             Ok(())
         })
@@ -1313,10 +1376,26 @@ mod tests {
             size: 5 * G,
             executable: false,
             chunks: vec![
-                ChunkRef { sha: [1u8; 20], offset: 0, cb_original: CH },
-                ChunkRef { sha: [2u8; 20], offset: 4 * G - CH as u64, cb_original: CH },
-                ChunkRef { sha: [3u8; 20], offset: 4 * G, cb_original: CH },
-                ChunkRef { sha: [4u8; 20], offset: 5 * G - CH as u64, cb_original: CH },
+                ChunkRef {
+                    sha: [1u8; 20],
+                    offset: 0,
+                    cb_original: CH,
+                },
+                ChunkRef {
+                    sha: [2u8; 20],
+                    offset: 4 * G - CH as u64,
+                    cb_original: CH,
+                },
+                ChunkRef {
+                    sha: [3u8; 20],
+                    offset: 4 * G,
+                    cb_original: CH,
+                },
+                ChunkRef {
+                    sha: [4u8; 20],
+                    offset: 5 * G - CH as u64,
+                    cb_original: CH,
+                },
             ],
         };
         let payload = |n: u8| vec![n; CH as usize];
@@ -1329,11 +1408,22 @@ mod tests {
                 self.0.update(b);
                 Ok(b.len())
             }
-            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
         }
         let mut seq = 1u8;
         let mut d = Digest(<sha2::Sha256 as sha2::Digest>::new());
-        write_file(&f, || { let v = payload(seq); seq += 1; Ok(v) }, &mut d).unwrap();
+        write_file(
+            &f,
+            || {
+                let v = payload(seq);
+                seq += 1;
+                Ok(v)
+            },
+            &mut d,
+        )
+        .unwrap();
         let ordered_digest = {
             use sha2::Digest as _;
             d.0.finalize().to_vec()
@@ -1358,7 +1448,9 @@ mod tests {
             let mut buf = vec![0u8; 1 << 20];
             loop {
                 let n = std::io::Read::read(&mut file, &mut buf).unwrap();
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 h.update(&buf[..n]);
             }
             h.finalize().to_vec()
@@ -1394,7 +1486,10 @@ mod tests {
         // DepotDownloader joins the manifest path to -dir with NO traversal guard, so any of these
         // would put bytes somewhere our planned tree does not model.
         assert!(check_path("Game/Data/x.dat").is_ok());
-        assert!(check_path("/rooted").is_err(), ".NET Path.Combine discards -dir for a rooted path");
+        assert!(
+            check_path("/rooted").is_err(),
+            ".NET Path.Combine discards -dir for a rooted path"
+        );
         assert!(check_path("a//b").is_err());
         assert!(check_path("../escape").is_err());
         assert!(check_path("a/./b").is_err());
@@ -1402,7 +1497,10 @@ mod tests {
         // The fetcher deletes this dir before publishing, so a depot entry inside it can never match.
         assert!(check_path(".DepotDownloader").is_err());
         assert!(check_path(".DepotDownloader/depot.config").is_err());
-        assert!(check_path(".DepotDownloaderish/ok").is_ok(), "prefix match only, not substring");
+        assert!(
+            check_path(".DepotDownloaderish/ok").is_ok(),
+            "prefix match only, not substring"
+        );
     }
 
     #[test]
@@ -1468,7 +1566,7 @@ mod tests {
             entry.push(k.len() as u8);
             entry.extend_from_slice(k.as_bytes());
             entry.push(0x12); // field 2, len-delimited
-            // A token is longer than 127 bytes, so its length is a two-byte varint.
+                              // A token is longer than 127 bytes, so its length is a two-byte varint.
             let n = v.len();
             assert!(n < 1 << 14);
             if n < 128 {
@@ -1543,7 +1641,10 @@ mod tests {
         assert!(matches!(e, SteamError::NoCredential(_)), "got {e:?}");
         let msg = e.to_string();
         assert!(msg.contains("alice") && msg.contains("zoe"), "got: {msg}");
-        assert!(msg.contains("--steam-account"), "must name the flag that exists: {msg}");
+        assert!(
+            msg.contains("--steam-account"),
+            "must name the flag that exists: {msg}"
+        );
 
         // An EXPIRED token is skipped rather than failing the run — another account may still be good.
         let mixed = root.join("mixed");
@@ -1556,7 +1657,13 @@ mod tests {
             &[("good", &live)],
         );
         let usable = credentials_from_store(&mixed, None).unwrap();
-        assert_eq!(usable.iter().map(|c| c.account.as_str()).collect::<Vec<_>>(), vec!["good"]);
+        assert_eq!(
+            usable
+                .iter()
+                .map(|c| c.account.as_str())
+                .collect::<Vec<_>>(),
+            vec!["good"]
+        );
 
         // …but if every token has expired, say so instead of reporting "no credential".
         let allstale = root.join("allstale");
@@ -1582,8 +1689,14 @@ mod tests {
     #[test]
     fn try_all_advances_past_an_account_that_does_not_own_it() {
         let creds = vec![
-            Credential { account: "alice".into(), refresh_token: "a".into() },
-            Credential { account: "zoe".into(), refresh_token: "z".into() },
+            Credential {
+                account: "alice".into(),
+                refresh_token: "a".into(),
+            },
+            Credential {
+                account: "zoe".into(),
+                refresh_token: "z".into(),
+            },
         ];
         let exhausted = |tried: Vec<String>, refusals: Vec<Box<dyn std::error::Error>>| {
             Box::new(SteamError::NotOwned(format!(
@@ -1603,7 +1716,8 @@ mod tests {
             |c| {
                 seen.push(c.account.clone());
                 if c.account == "alice" {
-                    Err(Box::new(SteamError::NotOwned("eresult 2".into())) as Box<dyn std::error::Error>)
+                    Err(Box::new(SteamError::NotOwned("eresult 2".into()))
+                        as Box<dyn std::error::Error>)
                 } else {
                     Ok(42)
                 }
@@ -1611,7 +1725,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(got, 42);
-        assert_eq!(seen, vec!["alice", "zoe"], "in stored order, and no further");
+        assert_eq!(
+            seen,
+            vec!["alice", "zoe"],
+            "in stored order, and no further"
+        );
 
         // Nobody owns it: the error names every account tried.
         let none: Result<u32, Box<dyn std::error::Error>> = crate::pin::try_accounts(
@@ -1619,7 +1737,10 @@ mod tests {
             |c| c.account.clone(),
             is_not_owned,
             exhausted,
-            |_| Err(Box::new(SteamError::NotOwned("eresult 2".into())) as Box<dyn std::error::Error>),
+            |_| {
+                Err(Box::new(SteamError::NotOwned("eresult 2".into()))
+                    as Box<dyn std::error::Error>)
+            },
         );
         let Err(e) = none else {
             panic!("must fail when no account owns it");
@@ -1637,13 +1758,17 @@ mod tests {
             exhausted,
             |_| {
                 n += 1;
-                Err(Box::new(SteamError::Http("connection reset".into())) as Box<dyn std::error::Error>)
+                Err(Box::new(SteamError::Http("connection reset".into()))
+                    as Box<dyn std::error::Error>)
             },
         );
         let Err(e) = transport else {
             panic!("a transport failure must not be swallowed");
         };
-        assert_eq!(n, 1, "must not try the second account after a transport error");
+        assert_eq!(
+            n, 1,
+            "must not try the second account after a transport error"
+        );
         assert!(e.to_string().contains("connection reset"), "got: {e}");
     }
 
@@ -1679,7 +1804,10 @@ mod tests {
         ];
         let agg = exhausted_steam("all logins refused".into(), &refusals);
         assert!(
-            matches!(agg.downcast_ref::<SteamError>(), Some(SteamError::LoginFailed(_))),
+            matches!(
+                agg.downcast_ref::<SteamError>(),
+                Some(SteamError::LoginFailed(_))
+            ),
             "all-login-failed must aggregate to LoginFailed, got: {agg}"
         );
 
@@ -1732,7 +1860,9 @@ mod tests {
     #[test]
     fn a_vz_container_round_trips_through_the_lzma_decoder() {
         // Compressible, but not so uniform that a bug could coincidentally produce it.
-        let original: Vec<u8> = (0..64_000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let original: Vec<u8> = (0..64_000u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
 
         // Encode to the `.lzma` alone format, whose first 13 bytes are <5 props><8 size>.
         let opts = liblzma::stream::LzmaOptions::new_preset(6).unwrap();
@@ -1754,7 +1884,8 @@ mod tests {
         vz.extend_from_slice(&[0u8; 8]);
         vz.extend_from_slice(b"zv");
 
-        let got = decompress_chunk(&vz, original.len()).expect("a well-formed VZ chunk must decode");
+        let got =
+            decompress_chunk(&vz, original.len()).expect("a well-formed VZ chunk must decode");
         assert_eq!(got, original, "VZ round-trip must be byte-identical");
 
         // A wrong declared size must be an error, not a silently short buffer.
@@ -1793,7 +1924,8 @@ mod tests {
         // Build the VZ container the fetcher actually receives.
         let opts = liblzma::stream::LzmaOptions::new_preset(6).unwrap();
         let stream = liblzma::stream::Stream::new_lzma_encoder(&opts).unwrap();
-        let mut enc = liblzma::read::XzEncoder::new_stream(std::io::Cursor::new(plain.clone()), stream);
+        let mut enc =
+            liblzma::read::XzEncoder::new_stream(std::io::Cursor::new(plain.clone()), stream);
         let mut alone = Vec::new();
         enc.read_to_end(&mut alone).unwrap();
         let mut vz = Vec::new();
@@ -1875,7 +2007,8 @@ mod tests {
 
         let opts = liblzma::stream::LzmaOptions::new_preset(6).unwrap();
         let stream = liblzma::stream::Stream::new_lzma_encoder(&opts).unwrap();
-        let mut enc = liblzma::read::XzEncoder::new_stream(std::io::Cursor::new(plain.clone()), stream);
+        let mut enc =
+            liblzma::read::XzEncoder::new_stream(std::io::Cursor::new(plain.clone()), stream);
         let mut alone = Vec::new();
         enc.read_to_end(&mut alone).unwrap();
         let mut vz = Vec::new();
@@ -1908,14 +2041,27 @@ mod tests {
 
         eprintln!("\nLZMA1 decode, {mib:.0} MiB real sample:");
         eprintln!("  liblzma (xz 5.8.3)      {liblzma_ms:>7.2} ms/MiB");
-        eprintln!("  7-Zip LZMA SDK 25.01    {sdk_ms:>7.2} ms/MiB   ({:.2}x)", liblzma_ms / sdk_ms);
+        eprintln!(
+            "  7-Zip LZMA SDK 25.01    {sdk_ms:>7.2} ms/MiB   ({:.2}x)",
+            liblzma_ms / sdk_ms
+        );
     }
 
     #[test]
     fn directory_entries_survive_as_empty_dirs() {
         let files = vec![
-            FileEntry { path: "empty".into(), size: u64::MAX, executable: false, chunks: vec![] },
-            FileEntry { path: "a/b.txt".into(), size: 0, executable: false, chunks: vec![] },
+            FileEntry {
+                path: "empty".into(),
+                size: u64::MAX,
+                executable: false,
+                chunks: vec![],
+            },
+            FileEntry {
+                path: "a/b.txt".into(),
+                size: 0,
+                executable: false,
+                chunks: vec![],
+            },
         ];
         let t = tree(&files).unwrap();
         let (_, stats) = nar::nar_hash(&t, |_, _| Ok(())).unwrap();
@@ -1930,7 +2076,11 @@ mod tests {
             path: "f".into(),
             size: 16,
             executable: false,
-            chunks: vec![ChunkRef { sha: [0; 20], offset: 8, cb_original: 4 }],
+            chunks: vec![ChunkRef {
+                sha: [0; 20],
+                offset: 8,
+                cb_original: 4,
+            }],
         };
         let mut out = Vec::new();
         write_file(&f, || Ok(vec![0xAB; 4]), &mut out).unwrap();
@@ -1957,9 +2107,15 @@ pub fn hash_depot(
     // check cost one small extra GET rather than a second login. No cache anchors here on purpose:
     // hashing is what CREATES the anchors, so it always takes the CM path (and warms the cache for the
     // FOD that follows).
-    let mut wants = vec![Want { manifest: manifest_id, manifest_sha256: None }];
+    let mut wants = vec![Want {
+        manifest: manifest_id,
+        manifest_sha256: None,
+    }];
     if let Some(p) = previous.filter(|p| *p != manifest_id) {
-        wants.push(Want { manifest: p, manifest_sha256: None });
+        wants.push(Want {
+            manifest: p,
+            manifest_sha256: None,
+        });
     }
     let access = acquire(app_id, depot_id, &wants, None, branch, auth)?;
     let agent = http_agent();
@@ -1981,7 +2137,11 @@ pub fn hash_depot(
             ))));
         }
     }
-    let total: u64 = files.iter().filter(|f| f.size != u64::MAX).map(|f| f.size).sum();
+    let total: u64 = files
+        .iter()
+        .filter(|f| f.size != u64::MAX)
+        .map(|f| f.size)
+        .sum();
     let tree = tree(&files)?;
 
     let order = nar::flatten(&tree);
@@ -2027,7 +2187,10 @@ pub fn hash_depot(
     let (sri, stats) = nar::nar_hash(&tree, |idx, w| {
         steam_write(&files[*idx], &mut next, &mut seen, w)?;
         if progress {
-            let pct = seen.checked_mul(100).and_then(|n| n.checked_div(total)).unwrap_or(100);
+            let pct = seen
+                .checked_mul(100)
+                .and_then(|n| n.checked_div(total))
+                .unwrap_or(100);
             if pct > last_pct {
                 last_pct = pct;
                 eprint!("\r  {pct:3}%  {} / {} MiB", seen >> 20, total >> 20);
@@ -2081,7 +2244,10 @@ pub fn download_depot(
     let access = acquire(
         app_id,
         depot_id,
-        &[Want { manifest: manifest_id, manifest_sha256: manifest_sha }],
+        &[Want {
+            manifest: manifest_id,
+            manifest_sha256: manifest_sha,
+        }],
         key_sha,
         branch,
         auth,
@@ -2126,7 +2292,8 @@ pub fn write_depot(
     let mut handles: Vec<std::sync::Arc<std::fs::File>> = Vec::new();
     let mut work: Vec<ChunkRef> = Vec::new();
     let mut placement: Vec<Vec<(usize, u64)>> = Vec::new();
-    let mut slot_of: std::collections::HashMap<([u8; 20], u32), usize> = std::collections::HashMap::new();
+    let mut slot_of: std::collections::HashMap<([u8; 20], u32), usize> =
+        std::collections::HashMap::new();
     let mut occurrences = 0usize;
     for f in files.iter().filter(|f| f.size != u64::MAX) {
         let file = download::create_file(dir, &f.path, f.executable)?;
@@ -2204,7 +2371,13 @@ pub fn write_depot(
         access.depot_key,
     ));
     let sink = std::sync::Arc::new(DepotSink { handles, placement });
-    let mut progress = download::Progress::new(fetch_total.max(1), opts.progress);
+    let mut progress = download::Progress::with_sink(
+        fetch_total.max(1),
+        opts.progress_sink(
+            &format!("steam:{depot_id}:{manifest_id}"),
+            format!("steam://depot/{depot_id}"),
+        ),
+    );
     crate::pin::engine::unordered(
         src,
         crate::pin::engine::Work { items: work, sizes },
@@ -2238,14 +2411,24 @@ pub fn download_depot_any(
     // whose credential it cannot even read (e.g. a store whose token ACL the userns builder can't use),
     // as long as a host-side pin has warmed the cache. A miss falls straight through to the CM path.
     if let (Some((ks, ms)), false) = (anchors, anonymous) {
-        let wants = [Want { manifest: manifest_id, manifest_sha256: Some(ms) }];
+        let wants = [Want {
+            manifest: manifest_id,
+            manifest_sha256: Some(ms),
+        }];
         if let Some(access) = acquire_cached(depot_id, &wants, Some(ks)) {
             return write_depot(access, manifest_id, dir, opts);
         }
     }
     if anonymous {
         return download_depot(
-            app_id, depot_id, manifest_id, branch, Auth::Anonymous, dir, anchors, opts,
+            app_id,
+            depot_id,
+            manifest_id,
+            branch,
+            Auth::Anonymous,
+            dir,
+            anchors,
+            opts,
         );
     }
     let creds = credentials_from_store(&opts.credential_dir, opts.steam_account.as_deref())?;
@@ -2347,10 +2530,16 @@ fn is_not_owned(e: &Box<dyn std::error::Error>) -> bool {
 /// must add a credential or wait", never a false "no account owns this". Only when every account genuinely
 /// refused a title it could see (all `NotOwned`) is the aggregate `NotOwned`. This is the same honesty
 /// `probe_depots` applies; keeping the decision here means every walker path shares it.
-fn exhausted_steam(msg: String, refusals: &[Box<dyn std::error::Error>]) -> Box<dyn std::error::Error> {
-    let any_login = refusals
-        .iter()
-        .any(|e| matches!(e.downcast_ref::<SteamError>(), Some(SteamError::LoginFailed(_))));
+fn exhausted_steam(
+    msg: String,
+    refusals: &[Box<dyn std::error::Error>],
+) -> Box<dyn std::error::Error> {
+    let any_login = refusals.iter().any(|e| {
+        matches!(
+            e.downcast_ref::<SteamError>(),
+            Some(SteamError::LoginFailed(_))
+        )
+    });
     if any_login {
         Box::new(SteamError::LoginFailed(msg))
     } else {
@@ -2542,9 +2731,11 @@ pub fn parse_app_info(body: &str, app_id: u32, branch: &str) -> R<AppInfo> {
         else {
             continue; // legacy depot, or one this branch does not ship
         };
-        let dlc_app = d
-            .get("dlcappid")
-            .and_then(|x| x.as_str().and_then(|s| s.parse().ok()).or_else(|| x.as_u64().map(|n| n as u32)));
+        let dlc_app = d.get("dlcappid").and_then(|x| {
+            x.as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| x.as_u64().map(|n| n as u32))
+        });
         let oslist = d
             .get("config")
             .and_then(|c| c.get("oslist"))
@@ -2614,25 +2805,40 @@ pub fn verify_depot(
 
     let ctl = control(app_id, depot_id, &[manifest_id], branch, auth)?;
     let agent = http_agent();
-    let code = ctl
-        .codes
-        .get(&manifest_id)
-        .copied()
-        .ok_or_else(|| SteamError::Parse(format!("no request code for manifest {manifest_id}")))?;
-    let (files, _created) =
-        fetch_manifest(&agent, &ctl.hosts, depot_id, manifest_id, code, &ctl.depot_key)?;
+    let code =
+        ctl.codes.get(&manifest_id).copied().ok_or_else(|| {
+            SteamError::Parse(format!("no request code for manifest {manifest_id}"))
+        })?;
+    let (files, _created) = fetch_manifest(
+        &agent,
+        &ctl.hosts,
+        depot_id,
+        manifest_id,
+        code,
+        &ctl.depot_key,
+    )?;
 
     let mut rep = VerifyReport::default();
-    let total: u64 = files.iter().filter(|f| f.size != u64::MAX).map(|f| f.size).sum();
+    let total: u64 = files
+        .iter()
+        .filter(|f| f.size != u64::MAX)
+        .map(|f| f.size)
+        .sum();
     let mut read_so_far = 0u64;
     let mut last_pct = 0u64;
 
     for f in &files {
-        let path = f.path.split('/').fold(dir.to_path_buf(), |p, part| p.join(part));
+        let path = f
+            .path
+            .split('/')
+            .fold(dir.to_path_buf(), |p, part| p.join(part));
         if f.size == u64::MAX {
             if !path.is_dir() {
                 rep.bad_files += 1;
-                rep.note(format!("{}: manifest declares a directory, not present", f.path));
+                rep.note(format!(
+                    "{}: manifest declares a directory, not present",
+                    f.path
+                ));
             }
             rep.dirs += 1;
             continue;
@@ -2703,7 +2909,11 @@ pub fn verify_depot(
                     .unwrap_or(100);
                 if pct > last_pct {
                     last_pct = pct;
-                    eprint!("\r  {pct:3}%  {} / {} MiB verified", read_so_far >> 20, total >> 20);
+                    eprint!(
+                        "\r  {pct:3}%  {} / {} MiB verified",
+                        read_so_far >> 20,
+                        total >> 20
+                    );
                 }
             }
         }
@@ -2728,7 +2938,15 @@ pub fn verify_depot_any(
     opts: &crate::pin::gog::HashOpts,
 ) -> Result<VerifyReport, Box<dyn std::error::Error>> {
     if anonymous {
-        return verify_depot(app_id, depot_id, manifest_id, branch, Auth::Anonymous, dir, opts.progress);
+        return verify_depot(
+            app_id,
+            depot_id,
+            manifest_id,
+            branch,
+            Auth::Anonymous,
+            dir,
+            opts.progress,
+        );
     }
     let creds = credentials_from_store(&opts.credential_dir, opts.steam_account.as_deref())?;
     crate::pin::try_accounts(

@@ -1,0 +1,48 @@
+{
+  "fetchInfo": {
+    "gog": {
+      "x86_64-windows": [
+        {
+          "pname": "cyberpunk-2077-win",
+          "productId": "1423049311",
+          "buildId": "58989493373906337",
+          "version": "2.31a",
+          "outputHash": "sha256-CD/zy9Ez83J7D1pGrPixqQGZTL4KFab6FVpDJP4a1/A=",
+          "outputHashMode": "recursive",
+          "os": "windows",
+          "lang": "en",
+          "kind": "game",
+          "generation": 2
+        }
+      ]
+    }
+  },
+  "dlc": {
+    "phantom-liberty": {
+      "pname": "cyberpunk-2077-dlc-phantom-liberty-win",
+      "productId": "1423049311",
+      "buildId": "58989493373906337",
+      "version": "2.31a",
+      "dlcId": "1256837418",
+      "outputHash": "sha256-tnsjeSMDgycKVmCwQGhLZ9xsAqUEth/l8eVc27yXjjQ=",
+      "outputHashMode": "recursive",
+      "os": "windows",
+      "lang": "en",
+      "kind": "dlc",
+      "generation": 2
+    },
+    "redmod": {
+      "pname": "cyberpunk-2077-dlc-redmod-win",
+      "productId": "1423049311",
+      "buildId": "58989493373906337",
+      "version": "2.31a",
+      "dlcId": "1597316373",
+      "outputHash": "sha256-kErMUtuyiGkCngnXWJ9D/YxJEL4mpwTpdbIfYU/7zsE=",
+      "outputHashMode": "recursive",
+      "os": "windows",
+      "lang": "en",
+      "kind": "dlc",
+      "generation": 2
+    }
+  }
+}

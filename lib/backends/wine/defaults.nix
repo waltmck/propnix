@@ -16,8 +16,9 @@
 {
   lib,
   prefixLower,
-  # Graceful no-op GOG Galaxy SDK stub tree (a store path). Present on the winefex (aarch64) path; null on
-  # x86_64 (native wine), where the de-Galaxy mount rows are omitted.
+  # Graceful no-op GOG Galaxy SDK stub tree (a store path). Wired on BOTH hosts (its DLLs are x86_64/i386
+  # PEs matching the GAME, never the host); null only if a scope declines to provide it, in which case the
+  # de-Galaxy mount rows are omitted.
   galaxyStub ? null,
 }:
 { platform, wine }:
@@ -33,22 +34,56 @@ let
   # resolves them there FIRST — a system32/WINEDLLOVERRIDES stub can't shadow them — so bind a graceful
   # no-op stub over each (at its path
   # under drive_c/game). `config.galaxyStubDlls` (payload-relative paths the game declares) → one `mount` row
-  # apiece with the store-path stub as source. aarch64 only (galaxyStub != null); on x86_64 the game runs
-  # under native wine and these are omitted.
+  # apiece with the store-path stub as source.
+  #
+  # 64-BIT CALLERS ONLY, and that is an ABI FACT rather than a policy. The stub hands the game ONE uniform
+  # vtable whose every slot is a zero-argument C function (emulators/galaxy-stub/src/galaxy_stub.c). Under
+  # Microsoft x64 that is safe for a slot of ANY arity: arguments arrive in registers and the CALLER cleans
+  # the stack, so a callee that ignores them leaves nothing behind. On i386 the SDK's interfaces are
+  # __thiscall — the CALLEE pops the arguments — so a zero-argument slot standing in for an N-argument
+  # method leaves N bytes of arguments on the caller's stack, and the caller's own `ret` then pops an
+  # ARGUMENT as its return address.
+  #
+  # MEASURED 2026-09-03, homeworld-rm on native x86_64 WoW64 — the first i386 title ever to actually load
+  # this stub (before the x86_64 wiring it was a silent no-op, see TOOLCHAIN in emulators/galaxy-stub).
+  # HomeworldRM.exe's Galaxy init wrapper is:
+  #     004bd9e5  ff 15 2c 80 87 00   call [GalaxyFactory::CreateInstance]  ; a Galaxy.dll import
+  #     004bd9eb  8b 10               mov  edx,[eax]                       ; IGalaxy vtable
+  #     004bd9ed  6a 00               push 0
+  #     004bd9ef  68 c8 60 8e 00      push 0x8e60c8                        ; clientSecret
+  #     004bd9f4  68 60 60 8e 00      push 0x8e6060                        ; clientID "48201844549712537"
+  #     004bd9f9  8b c8               mov  ecx,eax                         ; this
+  #     004bd9fb  ff 52 04            call [edx+4]                         ; IGalaxy::Init — __thiscall, `ret 12`
+  #     004bd9fe  c3                  ret                                  ; pops 0x8e6060 when nobody popped
+  # and the game's own crash log reads "HomeworldRM.exe caused an Access Violation in module
+  # HomeworldRM.exe at 0023:008e6060 … Bytes at CS:EIP: 34 38 32 30 31 38 34 34 …" — it is EXECUTING the
+  # client-ID STRING LITERAL (0x8e6060 is that string in .rdata; it matches goggame-2114871440.info's
+  # `clientId` exactly), with the module list confirming the 29075-byte stub as the loaded Galaxy.dll.
+  # Dropping the row makes the fault go away and the game maps its window; nothing else does. A generic
+  # 32-bit no-op stub cannot be written: it would need the true arity of every slot of every interface.
+  #
+  # So i386 titles get NO rows, and declaring the knob there is a legible ERROR rather than a silent no-op
+  # (a silent no-op is precisely what kept this defect hidden). The offline guarantee for a 32-bit GOG
+  # title is `online = false` instead — a kernel network-namespace unshare, strictly stronger than trusting
+  # a stub to be a no-op.
   galaxyMounts =
-    if galaxyStub == null then
+    if galaxyStub == null || config.galaxyStubDlls == [ ] then
       { }
     else
-      lib.listToAttrs (
-        map (
-          rel:
-          lib.nameValuePair "drive_c/game/${rel}" {
-            type = "mount";
-            source = "${galaxyStub}/${baseNameOf rel}";
-            mode = "ro";
-          }
-        ) config.galaxyStubDlls
-      );
+      lib.throwIf (platform == "i386-windows")
+        "propnix wine tuning: `wine.galaxyStubDlls` cannot be used by an i386 title — the stub's uniform zero-argument vtable breaks __thiscall's callee-pops rule and the game ends up executing its own arguments (measured on homeworld-rm; see the comment above this throw in lib/backends/wine/defaults.nix). Drop the knob and set `online = false`, which enforces the same offline guarantee in the kernel."
+        (
+          lib.listToAttrs (
+            map (
+              rel:
+              lib.nameValuePair "drive_c/game/${rel}" {
+                type = "mount";
+                source = "${galaxyStub}/${baseNameOf rel}";
+                mode = "ro";
+              }
+            ) config.galaxyStubDlls
+          )
+        );
 
   # Native runtime DLLs staged over the builtins in system32: one read-only bind row apiece, bound over an
   # EXISTING system32 file (the wine builtin), so no mountpoint is created in the read-only windows bind. From
@@ -88,10 +123,40 @@ let
       source = "${prefixLower}/drive_c/Program Files (x86)";
       mode = "ro";
     };
-    # DOS drive mapping (c: → ../drive_c, z: → /): wine's own relative symlinks, bound read-only from the store.
+    # DOS drive mapping: wine's own relative symlinks (c: → ../drive_c, z: → /) from the store, under an
+    # EPHEMERAL (tmpfs-upper) overlay. `skeleton = null` — the two lower entries are never modified, only
+    # NEW letters are added, and those go straight to the tmpfs upper and are discarded at exit.
+    #
+    # WHY NOT A READ-ONLY BIND (which is what this was): mountmgr WRITES here, and one of those writes is a
+    # retry loop that never terminates if the write cannot succeed. `dlls/mountmgr.sys/device.c`'s
+    # `add_dos_device()` takes `device_section` and, for an auto-assigned letter, calls
+    # `unixlib.c: add_drive()`, whose tail is
+    #     while (avail != -1) { …scan a..z for a free letter…
+    #                           if (avail != -1) { … if (symlink( device, path ) != -1) goto done;
+    #                                              /* failed, retry the search */ } }
+    # The retry exists for a RACE (another process claimed the letter between the scan and the symlink), and
+    # it is correct for that: the next scan sees the letter taken and moves on. On a read-only dosdevices the
+    # symlink fails PERMANENTLY, the scan is unchanged, and the same letter is picked forever — `in_use[]` is
+    # only set by a scan that FINDS something, never by a failed create.
+    # MEASURED on this tree before the change (x86_64-linux, space-engineers): a winedevice.exe thread pinned
+    # at 99.4% CPU for 2m15s in `add_drive`, strace showing
+    #     symlink("/dev/sdd", "…/dosdevices/d::") = -1 EROFS (Read-only file system)
+    # on repeat, and — because `device_section` is held across that call — every OTHER process in the prefix
+    # blocking forever in any mountmgr IOCTL. Space Engineers' main thread hung in
+    # `NtQueryVolumeInformationFile → get_mountmgr_fs_info → server_wait_for_object` and never reached its
+    # renderer; wine's own `err:sync:RtlpWaitForCriticalSection … "dlls/mountmgr.sys/device.c: device_section"
+    # wait timed out` names the section. This is host-dependent, not game-dependent: it fires on any machine
+    # with a block device UDisks2 reports that has no letter yet, and it hangs any title that asks for volume
+    # information (a .NET `DriveInfo`/`GetVolumeInformation` is enough).
+    #
+    # EPHEMERAL, not persistent: the letters are a snapshot of the HOST's block devices at launch, so caching
+    # them across launches would only leave stale links to devices that are gone. Nothing hermetic is lost —
+    # the new entries point at /dev nodes and unix mount points that the launch's private mount namespace
+    # does not carry, so they dangle; what matters is that the symlink SUCCEEDS and add_drive returns.
     "dosdevices" = {
-      source = "${prefixLower}/dosdevices";
-      mode = "ro";
+      type = "overlay";
+      lower = "${prefixLower}/dosdevices";
+      skeleton = null;
     };
     # The writable profile (users\ + ProgramData\): PERSISTENT CoW overlays over the store skeleton. Reads
     # fall through to the store inode (shared page cache); writes persist to $PROPNIX_STATE with NO seed.
@@ -137,9 +202,20 @@ in
   # Load order: "n" = native, "b" = builtin, "" = disabled (n,b combinations also allowed, e.g. "n,b").
   # These three are universal wine hygiene, not per-game:
   dllOverrides = {
+    # mscoree is the CLR HOST, and since emulators/wine-prefix-lower.nix started shipping Wine Mono at
+    # C:\windows\mono\mono-2.0 this entry is load-bearing rather than cosmetic. Two corrections to the
+    # reason it used to carry:
+    #   * "b" is not a choice between implementations — the BUILTIN is the only mscoree that exists (wine
+    #     builds it into lib/wine/*/mscoree.dll; Wine Mono installs no native mscoree anywhere, its payload
+    #     is bin/libmono-2.0-x86{,_64}.dll plus managed assemblies). "n" would find nothing to load and ""
+    #     would disable .NET outright, so every managed title depends on this staying "b".
+    #   * it never suppressed the wine-mono install prompt. That prompt is mscoree's DllRegisterServer ->
+    #     install_wine_mono() -> invoke_appwiz(), reached only when wine.inf's RegisterDlls step registers
+    #     mscoree during `wineboot -u` — which propnix runs ONCE, at prefix-lower build time, and never at
+    #     runtime (.update-timestamp=disable). With a CLR now present, get_mono_path() succeeds anyway.
     mscoree = {
       value = "b";
-      reason = "builtin: suppress the wine-mono install prompt without breaking .NET.";
+      reason = "builtin: mscoree IS the CLR host and the builtin is its only implementation — \"n\" finds nothing to load, \"\" disables .NET outright. See the comment above for what this does NOT do.";
     };
     mshtml = {
       value = "";
@@ -232,7 +308,8 @@ in
 
   # Optional per-game SETUP SCRIPT: a path to an EXECUTABLE the launcher runs (OUTER, before wine) for
   # game-specific prefix setup that doesn't belong in the launcher (e.g. Skyrim seeding SkyrimPrefs.ini). Gets
-  # the runtime env + PROPNIX_PAYLOAD; a NON-ZERO exit ABORTS the launch. The game builds it (writeShellScript).
+  # the runtime env + PROPNIX_PAYLOAD (the primary tree) + PROPNIX_PAYLOADS (all of them, ':'-joined in mount
+  # priority order); a NON-ZERO exit ABORTS the launch. The game builds it (mkSetupScript).
 
   # Optional escape hatch for DYNAMIC HKCU overrides: a store-path executable whose JSON stdout is a set of
   # HKCU overrides applied this launch (runtime-derived → overrides static userReg). Non-zero/bad-JSON ABORTS.

@@ -1,0 +1,94 @@
+winewayland: don't call update_client_surfaces() while holding win_data_mutex
+
+STATUS: active. Fixes a HARD AB-BA DEADLOCK between the app's main thread and winewayland's own
+event thread, hit on a FRACTIONAL-SCALE output (measured on Hyprland, 3840x2160 @ scale 1.5).
+Symptom: the game maps a window that never paints — a plain white/blank surface, zero CPU, no crash,
+no log line after the last one the engine flushed. It is a RACE, so it strikes intermittently:
+kerbal-space-program hung on 3 of 4 launches on this display, three of them caught live with the
+identical mutex-owner pair below; the 4th launch reached its main menu normally. Both of the
+symptoms KSP had been reported with — "crashes while loading assets" and "just a white screen" —
+are this one hang landing at two different window operations (the MAINMENU scene change, and the
+D3D11 swapchain's vkCreateWin32SurfaceKHR). Neither was ever a crash: there is no exception, no
+Unity crash dump and no coredump, only a truncated log, which is what a hung writer looks like.
+
+MEASURED, not inferred (KSP 1.12.5 on x86_64-linux, wine-hangover 11.15, DXVK; pthread mutex owners
+read straight out of /proc/<pid>/mem at the statics' addresses, threads located with eu-stack):
+
+  user_mutex     (win32u/sysparams.c)      __owner=3325059 __count=2   <- app MAIN thread
+  win_data_mutex (winewayland.drv/window.c) __owner=3325467 __count=1  <- wayland EVENT thread
+  surfaces_lock  (win32u/window.c)          __owner=3325467
+
+  TID 3325059 (main), holds user_mutex, BLOCKED on win_data_mutex:
+    win32u_vkCreateWin32SurfaceKHR -> set_window_pixel_format -> update_window_state
+      -> apply_window_pos                 [get_win_ptr  -> user_lock #1]
+      -> update_surface_region            [get_win_ptr  -> user_lock #2]
+      -> window_surface_set_shape -> window_surface_flush
+      -> wayland_window_surface_flush -> set_window_surface_contents
+      -> wayland_win_data_get             *** waits for win_data_mutex ***
+
+  TID 3325467 (wayland event thread), holds win_data_mutex + surfaces_lock, BLOCKED on user_mutex:
+    waylanddrv_unix_read_events -> wl_display_dispatch_queue -> dispatch_event -> wl_closure_invoke
+      -> wp_fractional_scale_handle_scale [wayland_win_data_get -> win_data_mutex]
+      -> update_client_surfaces           [surfaces_lock]
+      -> NtUserGetAncestor -> list_window_parents -> get_user_handle_ptr
+      -> user_lock                        *** waits for user_mutex ***
+
+WHY A FRACTIONAL SCALE IS THE PRECONDITION, and not just background colour: wayland_surface_create()
+initialises `surface->window.scale = 1.0`, and wp_fractional_scale_handle_scale() returns EARLY when
+the compositor's preferred scale equals the one already recorded. On an unscaled (or integer-scaled)
+output the event therefore never reaches update_client_surfaces() and the inverted order is never
+taken. Only a scale the surface does not already have — i.e. a fractional one, or a move between
+differently-scaled outputs — runs the rest of the function. That is why this looks like a per-host
+bug rather than a per-game one: same wine, same game, no deadlock on a scale-1.0 display.
+
+Root cause: win32u OWNS the lock order. It calls into the driver (pWindowSurfaceFlush and friends)
+while holding the USER lock, so every driver path is entered as user_mutex -> win_data_mutex.
+wp_fractional_scale_handle_scale() ran the opposite way round: it took win_data_mutex in
+wayland_win_data_get() and then called update_client_surfaces(), a win32u entry point that takes the
+USER lock. When the compositor's wp_fractional_scale_v1.preferred_scale event lands while the app
+thread is inside a window-surface flush, the two orders meet and neither side can proceed. Nothing
+times out — both are plain pthread_mutex_lock waits — so the process sits there forever.
+
+Fix: hoist update_client_surfaces() out of the locked region, next to the NtUserExposeWindowSurface()
+call that already observes this discipline. Everything that reads or writes `data`/`surface` stays
+under the lock; only the win32u call moves. update_client_surfaces() -> wayland_client_surface_update()
+re-acquires win_data_mutex itself per client surface, so it needs no caller-held lock (it was
+previously relying on that mutex being PTHREAD_MUTEX_RECURSIVE).
+
+NOT FIXED HERE, and deliberately: window.c's wayland_win_data_create_wayland_surface() has the same
+inverted order (update_client_surfaces() at the `role` change, under win_data_mutex). It is reached
+from WAYLAND_WindowPosChanged, i.e. on the app's own thread after win32u has already dropped the USER
+lock, and it has never been observed to deadlock. Hoisting it is not a safe local edit — it sits
+between `data->wayland_surface = NULL` and wayland_surface_destroy(), where the detach must happen
+before the surface is freed. Left alone rather than guessed at.
+
+diff --git i/dlls/winewayland.drv/wayland_surface.c w/dlls/winewayland.drv/wayland_surface.c
+--- i/dlls/winewayland.drv/wayland_surface.c
++++ w/dlls/winewayland.drv/wayland_surface.c
+@@ -157,9 +157,6 @@
+ 
+     surface->window.scale = scale;
+ 
+-    /* reattach client surfaces as their rects have changed */
+-    update_client_surfaces(hwnd);
+-
+     /* the subsurface rect has changed */
+     if (surface->role == WAYLAND_SURFACE_ROLE_SUBSURFACE)
+     {
+@@ -169,6 +166,16 @@
+ 
+     wayland_win_data_release(data);
+ 
++    /* Reattach client surfaces as their rects have changed. This MUST run with win_data_mutex
++     * RELEASED: update_client_surfaces() is a win32u entry point that takes surfaces_lock and then
++     * the USER lock (NtUserGetAncestor -> get_user_handle_ptr -> user_lock), while win32u itself
++     * calls INTO this driver holding the USER lock (apply_window_pos -> update_surface_region ->
++     * window_surface_set_shape -> window_surface_flush -> wayland_window_surface_flush ->
++     * wayland_win_data_get). Taking win_data_mutex before user_mutex here inverts that order and
++     * deadlocks. Same discipline as NtUserExposeWindowSurface below, and as WAYLAND_WindowPosChanged's
++     * is_window_managed() call, which is already hoisted out of the lock for a related reason. */
++    update_client_surfaces(hwnd);
++
+     NtUserExposeWindowSurface(hwnd, 0, NULL);
+ }
+ 

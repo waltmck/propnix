@@ -92,9 +92,8 @@ let
       "x86_64-windows" = null;
       "i386-windows" = null;
     }
-    .${cfg.emulatedPlatform} or (throw
-      "propnix (${cfg.pname}): steam.emu has no gbe_fork shim for emulatedPlatform '${cfg.emulatedPlatform}' — add that ABI to emulators/gbe-fork, or set `steam.emu.enable = false` for this platform."
-    );
+    .${cfg.emulatedPlatform}
+      or (throw "propnix (${cfg.pname}): steam.emu has no gbe_fork shim for emulatedPlatform '${cfg.emulatedPlatform}' — add that ABI to emulators/gbe-fork, or set `steam.emu.enable = false` for this platform.");
   # The PE shims are upstream prebuilt bytes in their own derivation — again by passthru, so a wine game
   # pulls the two DLLs and nothing else.
   winShimFor =
@@ -103,9 +102,34 @@ let
       "steam_api64.dll" = "${gbeFork.winPrebuilt}/share/gbe_fork/win/x64/steam_api64.dll";
       "steam_api.dll" = "${gbeFork.winPrebuilt}/share/gbe_fork/win/x86/steam_api.dll";
     }
-    .${baseNameOf p} or (throw
-      "propnix (${cfg.pname}): steam.emu.libPaths entry '${p}' has an unrecognized basename — expected steam_api.dll / steam_api64.dll / *.so."
-    );
+    .${baseNameOf p}
+    or (throw "propnix (${cfg.pname}): steam.emu.libPaths entry '${p}' has an unrecognized basename — expected steam_api.dll / steam_api64.dll / *.so.");
+  # The SteamStub arm of the same placement (`steam.emu.steamStub`), one entry per declared `.dll` path.
+  # gbe_fork's in-memory wrapper patcher is architecture-matched to the shim it rides with; the proxy is
+  # built per (arch, shipped name) because its forwarder table is generated from THAT shim's exports.
+  # `<base>_gbe.dll` is the name the real shim moves to — it only has to be a name the payload does not
+  # already use, and it keeps the pair legible in a `ls` of the game dir.
+  winStubFor =
+    p:
+    let
+      dllName = baseNameOf p;
+      arch = if dllName == "steam_api64.dll" then "x64" else "x86";
+      extraName = "steamclient_extra_${arch}.dll";
+      realName = "${lib.removeSuffix ".dll" dllName}_gbe.dll";
+    in
+    {
+      inherit dllName realName extraName;
+      extra = "${gbeFork.winPrebuilt}/share/gbe_fork/win/${arch}/${extraName}";
+      proxy = gbeFork.steamStubProxy {
+        inherit
+          dllName
+          realName
+          extraName
+          arch
+          ;
+        shim = winShimFor p;
+      };
+    };
   unknownPaths = lib.subtractLists (soPaths ++ dllPaths) cfg.steam.emu.libPaths;
   # "Name (Steam)" → "Name"; "Name (linux, Steam)" → "Name"; anything else is returned untouched.
   stripProvenance =
@@ -120,18 +144,16 @@ let
     name:
     let
       d =
-        cfg.dlc.available.${name} or (throw
-          "propnix (${cfg.pname}): DLC '${name}' is not available (available: ${lib.concatStringsSep ", " (lib.attrNames cfg.dlc.available)})."
-        );
+        cfg.dlc.available.${name}
+          or (throw "propnix (${cfg.pname}): DLC '${name}' is not available (available: ${lib.concatStringsSep ", " (lib.attrNames cfg.dlc.available)}).");
     in
     {
       appId =
         if (d.dlcAppId or null) != null then
           d.dlcAppId
         else
-          d.depotId or (throw
-            "propnix (${cfg.pname}): DLC '${name}' is not a Steam depot fetch (no depotId/dlcAppId on the derivation) — steam.emu cannot project its entitlement."
-          );
+          d.depotId
+            or (throw "propnix (${cfg.pname}): DLC '${name}' is not a Steam depot fetch (no depotId/dlcAppId on the derivation) — steam.emu cannot project its entitlement.");
       # Row titles carry a human PROVENANCE suffix, and it is not always the bare " (Steam)": a game that
       # pins the same DLC once per platform distinguishes the rows — "Factorio: Space Age (linux, Steam)".
       # The emitted list is a DISPLAY NAME the engine shows in its own DLC/Additional-Content UI, so strip
@@ -154,9 +176,15 @@ let
     # Wine's union-replacement mirrors, one per declared .dll path. Built into the ONE shared tree (a
     # game's every backend uses the same settings drv): stray on thin — nothing there loads a PE — exactly
     # as the root .so is omitted entirely on wine, which has no preload to point at it.
-    mirror = lib.throwIfNot (unknownPaths == [ ]) "propnix (${cfg.pname}): steam.emu.libPaths entries with unrecognized suffix (need .so or .dll): ${toString unknownPaths}" (
-      lib.genAttrs dllPaths winShimFor
-    );
+    mirror =
+      lib.throwIfNot (unknownPaths == [ ])
+        "propnix (${cfg.pname}): steam.emu.libPaths entries with unrecognized suffix (need .so or .dll): ${toString unknownPaths}"
+        (lib.genAttrs dllPaths winShimFor);
+    # OPT-IN, per title: a proxy in front of every mirrored dll is only correct for a payload whose exe is
+    # actually SteamStub-wrapped, and it is one more moving part everywhere else.
+    stubProxies = lib.optionalAttrs cfg.steam.emu.steamStub (lib.genAttrs dllPaths winStubFor);
+    steamOffline = cfg.steam.emu.offline;
+    interfaces = cfg.steam.emu.interfaces;
     dlc = lib.genAttrs cfg.dlc.enabled entitlement;
   };
 in
@@ -189,6 +217,79 @@ in
         on every package rather than hiding until someone enables DLC. On wine the mechanism is
         union-replacement at the declared `libPaths` — enabling it there with no `.dll` path declared is
         a legible eval error rather than a silently-inert shim.
+      '';
+    };
+    emu.offline = lib.mkOption {
+      type = knobTypes.lastWins;
+      default = true;
+      description = ''
+        Whether the shim reports the Steam client as being in OFFLINE MODE
+        (`[main::connectivity] offline` in the generated `configs.main.ini`).
+
+        This is a statement about LOGON STATE, not a network switch. Measured in the pinned gbe_fork
+        source, the key is read once into `Settings::offline` and consulted at exactly three call sites,
+        all in `dll/steam_user.cpp` — `BLoggedOn()` and `BConnected()` return `!is_offline()`, and
+        `GetLogonState()` returns `k_ELogonStateNotLoggedOn` instead of `k_ELogonStateLoggedOn`. What the
+        shim does on the wire is governed by the separate `disable_networking` / `disable_lan_only` keys,
+        which propnix leaves at their upstream defaults regardless of this option.
+
+        `true` (the default) is the honest answer for everything this module normally serves: there is no
+        Steam session behind the shim, so a game that asks "am I logged on?" is told no, and an engine
+        that has an offline path takes it. Set it `false` ONLY for a title that is online-only by nature
+        (`online = true`, no single-player mode), where a client can read "not logged on" as "the Steam
+        client is coming back" and block on a logon that will never arrive. Flipping it does not give the
+        game a real Steam session and does not help it authenticate to any server that validates tickets
+        with Valve — it only stops the shim from volunteering a "no".
+      '';
+    };
+    emu.interfaces = lib.mkOption {
+      type = knobTypes.lastWins;
+      default = null;
+      description = ''
+        The contents of the shim's `steam_interfaces.txt` (one interface-version string per line), or
+        `null` for the modern default in builders/steam-offline-entitlement.nix.
+
+        This is NOT cosmetic and it is NOT only about the "old" flat accessors: the version named here is
+        the VTABLE LAYOUT the shim's global accessors hand out. gbe_fork keeps one `old_<itf>` string per
+        interface, initialised to the revision it was compiled against and overwritten from this file;
+        `SteamClient()` returns `SteamInternal_CreateInterface(old_client)`, which casts the one
+        implementation object to that version's class — `ISteamClient001` … `ISteamClient017` … are
+        distinct, differently-shaped vtables. A game built against an older SDK walks that pointer with ITS
+        header's slot numbering, so the two layouts must agree.
+
+        SET THIS whenever the game's OWN shipped `steam_api(64).dll` advertises an older SDK than the
+        default list. Read the revisions straight out of that dll (`strings`; upstream's
+        `generate_interfaces_file` tool does exactly this) — that file is the ground truth for what the
+        engine beside it will call. pkgs/games/cities-skylines is the worked example, and the measured
+        failure of getting it wrong: modern `ISteamClient` dropped `GetISteamUnifiedMessages`, so
+        `SteamClient017`'s slot 25 landed on the shim's `GetISteamController`, which does not recognise
+        `STEAMUNIFIEDMESSAGES_INTERFACE_VERSION001` and answers with a MODAL "Missing interface" MessageBox
+        and `std::exit()`.
+      '';
+    };
+    emu.steamStub = lib.mkOption {
+      type = knobTypes.lastWins;
+      default = false;
+      description = ''
+        Set this when the game's own exe is wrapped in Valve's SteamStub DRM. It changes what the wine
+        mirror stages at each declared `.dll` `libPaths` entry: instead of gbe_fork's shim alone, a small
+        propnix-built PROXY takes the shipped name, the shim moves one name over
+        (`steam_api64_gbe.dll`) behind the proxy's forwarders, and gbe_fork's `steamclient_extra_*.dll`
+        joins them. The proxy's only added behaviour is to load that patcher from its DllMain.
+
+        WHY IT IS A SEPARATE KNOB AND NOT AUTOMATIC. A SteamStub'd exe carries the wrapper in a `.bind`
+        section with the PE entry point inside it, decrypts itself, then MANUALLY MAPS an embedded copy of
+        Valve's Steam API and asks that for the ownership answer. Replacing the on-disk `steam_api64.dll` —
+        everything `steam.emu` otherwise does — cannot reach it, so a wrapped title fails with Valve's
+        "Application load error 3:…" (or an immediate exit) no matter how correct the shim is; and an
+        UNWRAPPED title gains nothing from the extra two files. Which one a payload is, is a fact about its
+        bytes: a 10th section named `.bind` whose range contains `AddressOfEntryPoint`.
+
+        The mechanism, the measurements behind it (a wine `+relay` trace placing the wrapper's Steam calls
+        in an anonymous mapping rather than any module), and the two alternatives that were tried and
+        MEASURED not to work, are in emulators/gbe-fork/steamstub-proxy.nix. VERIFIED on
+        pkgs/games/civilization-6 (x86_64-linux, 2026-09-03): without it the process exits 53 having
+        written nothing; with it the game reaches its rendered front end.
       '';
     };
     emu.libPaths = lib.mkOption {

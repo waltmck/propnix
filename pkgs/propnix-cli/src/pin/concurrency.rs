@@ -152,7 +152,11 @@ impl Governor {
         self.samples.clear();
 
         if let Some(prev) = self.prev {
-            let change = if prev > 0.0 { (reading - prev) / prev } else { 1.0 };
+            let change = if prev > 0.0 {
+                (reading - prev) / prev
+            } else {
+                1.0
+            };
             if change < -NOISE {
                 self.dir = -self.dir; // that step made things worse — turn round
             } else if change.abs() <= NOISE {
@@ -164,7 +168,11 @@ impl Governor {
         }
         self.prev = Some(reading);
 
-        let factor = if self.dir > 0.0 { STEP_UP } else { 1.0 / STEP_UP };
+        let factor = if self.dir > 0.0 {
+            STEP_UP
+        } else {
+            1.0 / STEP_UP
+        };
         let mut next = self.limit * factor;
         // A PROBE MUST MOVE THE THING IT MEASURES. The workers use `limit()`, i.e. the ROUNDED limit, so a
         // multiplicative step is a no-op wherever the step is smaller than half an integer: from 1.0 an
@@ -264,7 +272,11 @@ mod tests {
         for _ in 0..5 {
             g.observe(1.0, Pressure::ConsumerBound, 32, 0);
         }
-        assert_eq!(g.limit(), before, "a consumer-bound epoch must not move the limit");
+        assert_eq!(
+            g.limit(),
+            before,
+            "a consumer-bound epoch must not move the limit"
+        );
     }
 
     #[test]
@@ -279,7 +291,11 @@ mod tests {
         let l1 = g.limit();
         g.observe(100.0, Pressure::Network, 32, 0);
         let moved = (g.limit() as f64 / l1 as f64).max(l1 as f64 / g.limit() as f64);
-        assert!(moved <= STEP_UP + 0.01, "should move at most one probe step, went {l1} -> {}", g.limit());
+        assert!(
+            moved <= STEP_UP + 0.01,
+            "should move at most one probe step, went {l1} -> {}",
+            g.limit()
+        );
     }
 
     /// THE production failure this guards, part 1: the limit could reach the floor and never come back.
@@ -334,7 +350,11 @@ mod tests {
             // Half of everything fails: that is pushback, not noise.
             g.observe(10.0, Pressure::Network, 10, 10);
         }
-        assert!(g.limit() < before, "a 50% failure rate must reduce the limit, stayed at {}", g.limit());
+        assert!(
+            g.limit() < before,
+            "a 50% failure rate must reduce the limit, stayed at {}",
+            g.limit()
+        );
     }
 
     /// A rate computed from one or two events is noise, not pushback. Guards the sample floor.

@@ -224,11 +224,22 @@ mod tests {
         // so a persistently-failing host settles just above the floor rather than on it. That equilibrium
         // IS the design — it is what keeps the host discoverable when it recovers.
         let w = pool.weights();
-        assert!(w[1] < 0.05, "dead host should collapse to near the floor, got {:?}", w);
+        assert!(
+            w[1] < 0.05,
+            "dead host should collapse to near the floor, got {:?}",
+            w
+        );
 
         let s = share(&pool, 20_000);
-        assert!(s[1] < 0.06, "dead host should get a small share, got {}", s[1]);
-        assert!(s[1] > 0.0, "…but never zero, or it could never be found healthy again");
+        assert!(
+            s[1] < 0.06,
+            "dead host should get a small share, got {}",
+            s[1]
+        );
+        assert!(
+            s[1] > 0.0,
+            "…but never zero, or it could never be found healthy again"
+        );
     }
 
     #[test]
@@ -239,7 +250,10 @@ mod tests {
             pool.record_success(0, 8 << 20, Duration::from_secs(1));
             pool.record_failure(1);
         }
-        assert!(pool.weights()[1] < 0.05, "precondition: the host must have collapsed first");
+        assert!(
+            pool.weights()[1] < 0.05,
+            "precondition: the host must have collapsed first"
+        );
 
         // Recovery is GRADUAL by construction: the exponent is driven by the running mean loss, which
         // itself decays as the failures stop, so each success buys less than the last. Tens of
@@ -249,13 +263,20 @@ mod tests {
             pool.record_success(1, 8 << 20, Duration::from_secs(1));
         }
         let partial = pool.weights()[1];
-        assert!(partial > W_MIN * 2.0, "should be climbing after 10 successes, got {partial}");
+        assert!(
+            partial > W_MIN * 2.0,
+            "should be climbing after 10 successes, got {partial}"
+        );
 
         for _ in 0..40 {
             pool.record_success(1, 8 << 20, Duration::from_secs(1));
         }
         let w = pool.weights();
-        assert!(w[1] > 0.9, "a healthy host must return to full weight, got {:?}", w);
+        assert!(
+            w[1] > 0.9,
+            "a healthy host must return to full weight, got {:?}",
+            w
+        );
     }
 
     #[test]
@@ -294,7 +315,10 @@ mod tests {
             pool.record_success(1, 8 << 20, Duration::from_secs(1));
         }
         for w in pool.weights() {
-            assert!(w > 0.9, "healthy hosts must not be punished by an untimeable sample");
+            assert!(
+                w > 0.9,
+                "healthy hosts must not be punished by an untimeable sample"
+            );
         }
     }
 

@@ -404,9 +404,18 @@ in
         A store-path executable the launcher runs in the OUTER phase, BEFORE the game's view exists — the
         escape hatch for per-game setup that no option can express, typically seeding a config file the
         engine reads from its save dir (factorio's cache/update settings, skyrim's SkyrimPrefs iSize).
-        Runs with the runtime env (PROPNIX_SAVE_DIR/APPID/WIDTH/HEIGHT/QUALITY + PROPNIX_PAYLOAD = the
-        game tree); a NON-ZERO exit ABORTS the launch, because a setup failure is a packaging bug or a
-        half-written config, not something to launch into. Build it with `mkSetupScript`.
+        Runs with the runtime env (PROPNIX_SAVE_DIR/APPID/WIDTH/HEIGHT/QUALITY); a NON-ZERO exit ABORTS
+        the launch, because a setup failure is a packaging bug or a half-written config, not something to
+        launch into. Build it with `mkSetupScript`.
+
+        THE GAME TREES reach it as TWO env vars, because they answer different questions:
+        `PROPNIX_PAYLOAD` = the PRIMARY tree (the launch cwd / exe+icon source), and `PROPNIX_PAYLOADS` =
+        EVERY game-content tree ':'-joined in mount-priority order (enabled DLC, the primary tree, then
+        the co-base depots — the order the game dir unions them, so the first hit is the file the game
+        itself opens). Read the list with the `payload_find` / `payload_require` helpers `mkSetupScript`
+        always supplies (lib/builders/payload-lib.sh), NOT `"$PROPNIX_PAYLOAD/<file>"` — a multi-depot
+        build routinely ships the asset outside the head tree (Skyrim SE's Steam arm: the exe, and hence
+        the head, is depot 489833; the quality-preset INIs are in 489832).
 
         TOP-LEVEL, not a backend knob: it runs before any prefix or view is assembled, so nothing about it
         is wine- or thin-specific. It used to live at `wine.setupScript`, where setting it on a thin game

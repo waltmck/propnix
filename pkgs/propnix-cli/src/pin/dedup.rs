@@ -94,7 +94,10 @@ pub fn plan<K: Eq + Hash>(keys: &[K], sizes: &[u64], cache_budget: u64) -> (Dedu
             } else {
                 0
             };
-            steps.push(Step::Fetch { unique: u, retain_for });
+            steps.push(Step::Fetch {
+                unique: u,
+                retain_for,
+            });
             fetch.push(p);
         } else if resident[u] {
             steps.push(Step::Cached { unique: u });
@@ -104,7 +107,10 @@ pub fn plan<K: Eq + Hash>(keys: &[K], sizes: &[u64], cache_budget: u64) -> (Dedu
             }
         } else {
             // A duplicate the budget could not hold: fetched again, exactly as before dedup existed.
-            steps.push(Step::Fetch { unique: u, retain_for: 0 });
+            steps.push(Step::Fetch {
+                unique: u,
+                retain_for: 0,
+            });
             fetch.push(p);
         }
     }
@@ -121,7 +127,10 @@ pub fn plan<K: Eq + Hash>(keys: &[K], sizes: &[u64], cache_budget: u64) -> (Dedu
 
 impl Dedup {
     /// The bytes for the next occurrence, calling `pull` (the engine) only when the plan fetches.
-    pub fn next(&mut self, pull: impl FnOnce() -> Result<Vec<u8>, String>) -> Result<Vec<u8>, String> {
+    pub fn next(
+        &mut self,
+        pull: impl FnOnce() -> Result<Vec<u8>, String>,
+    ) -> Result<Vec<u8>, String> {
         let step = self
             .steps
             .get(self.pos)
@@ -182,7 +191,10 @@ mod tests {
                 .unwrap();
             out.push(v);
         }
-        assert!(fetch_iter.next().is_none(), "every planned fetch must be consumed");
+        assert!(
+            fetch_iter.next().is_none(),
+            "every planned fetch must be consumed"
+        );
         (out, pulls.get())
     }
 
@@ -202,7 +214,11 @@ mod tests {
                 })
                 .unwrap();
             let got = u32::from_le_bytes(v[..4].try_into().unwrap());
-            assert_eq!(got, keys[i], "occurrence {i}: emitted chunk {got}, expected {}", keys[i]);
+            assert_eq!(
+                got, keys[i],
+                "occurrence {i}: emitted chunk {got}, expected {}",
+                keys[i]
+            );
             emitted.push(got);
         }
         assert!(fetch_iter.next().is_none(), "every planned fetch consumed");
@@ -217,7 +233,9 @@ mod tests {
         // unavailable in this environment anyway.
         let mut state: u64 = 0x9e3779b97f4a7c15;
         let mut nxt = |m: u64| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 33) % m
         };
         let distinct = 400u32;
@@ -231,9 +249,19 @@ mod tests {
         // budget caches everything; zero disables the cache. All must agree.
         let total: u64 = sizes.iter().sum();
         let reference = run_u32(&keys, &sizes, 0); // no cache: each occurrence fetched independently
-        for budget in [1u64, 64 * 1024, 512 * 1024, 4 * 1024 * 1024, total, total * 2] {
+        for budget in [
+            1u64,
+            64 * 1024,
+            512 * 1024,
+            4 * 1024 * 1024,
+            total,
+            total * 2,
+        ] {
             let got = run_u32(&keys, &sizes, budget);
-            assert_eq!(got, reference, "budget {budget}: stream differs from the cache-free reference");
+            assert_eq!(
+                got, reference,
+                "budget {budget}: stream differs from the cache-free reference"
+            );
         }
     }
 
@@ -268,8 +296,16 @@ mod tests {
         let keys = [1u8, 2, 1, 2];
         let sizes = [100u64; 4];
         let (dd, fetch) = plan(&keys, &sizes, 100);
-        assert_eq!(fetch, vec![0, 1, 3], "chunk 2's duplicate must be refetched");
-        assert_eq!(dd.stats().0, 1, "only chunk 1's duplicate is served from memory");
+        assert_eq!(
+            fetch,
+            vec![0, 1, 3],
+            "chunk 2's duplicate must be refetched"
+        );
+        assert_eq!(
+            dd.stats().0,
+            1,
+            "only chunk 1's duplicate is served from memory"
+        );
         let (out, pulls) = run(&keys, &sizes, 100);
         assert_eq!(pulls, 3);
         assert_eq!(out[2], vec![1u8; 100]);
@@ -282,7 +318,11 @@ mod tests {
         let keys = [1u8, 1, 2, 2];
         let sizes = [100u64; 4];
         let (dd, fetch) = plan(&keys, &sizes, 100);
-        assert_eq!(fetch, vec![0, 2], "both duplicates fit sequentially in one 100-byte budget");
+        assert_eq!(
+            fetch,
+            vec![0, 2],
+            "both duplicates fit sequentially in one 100-byte budget"
+        );
         assert_eq!(dd.stats(), (2, 200));
         let (_, pulls) = run(&keys, &sizes, 100);
         assert_eq!(pulls, 2);
@@ -293,7 +333,10 @@ mod tests {
         let keys = [5u8, 5, 5];
         let sizes = [10u64; 3];
         let (out, pulls) = run(&keys, &sizes, 0);
-        assert_eq!(pulls, 3, "no budget, no retention — every occurrence fetches");
+        assert_eq!(
+            pulls, 3,
+            "no budget, no retention — every occurrence fetches"
+        );
         for v in out {
             assert_eq!(v, vec![5u8; 10]);
         }

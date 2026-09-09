@@ -88,7 +88,8 @@ propnix/
 │   │   ├── desktop-item.nix       # mkDesktopItem
 │   │   ├── store-skeleton.nix     # mkStoreSkeleton (data-only overlay skeleton; also the thin exec-bit fix)
 │   │   ├── wine-reg.nix           # mkWineReg (declarative HKLM/.Default hives)
-│   │   ├── setup-script.nix       # mkSetupScript (pipefail + pinned PATH wrapper) + ini-lib.sh (shared ini_set)
+│   │   ├── setup-script.nix       # mkSetupScript (pipefail + pinned PATH wrapper) + payload-lib.sh (always;
+│   │   │                          #   payload_find/payload_require over PROPNIX_PAYLOADS) + ini-lib.sh (opt-in ini_set)
 │   ├── icons/
 │   │   ├── pipeline.sh            # the shared autocrop/recentre → hicolor theme + splash shell lib
 │   │   ├── from-png.nix           # mkAppIcon — a high-res raster from the game data (preferred)
@@ -209,7 +210,9 @@ Two options are **unified across backends**:
 
 **`mkLauncherPackage`** (launcher-package.nix) — the shared packaging tail both builders delegate to: the `bin/<pname>` makeWrapper around `propnix-launcher --config <configFile>`, the `.desktop` entry (`startupWMClass` = the exe basename lowercased; `Icon` only when a raster theme is installed), `meta.broken` from `broken.{systems,reason}`, and the final `symlinkJoin` with `passthru.configFile`/`.launcher` + the builder's `extraPassthru`. `iconName = "org.propnix.${appid}"` is computed per-builder; the icon *source* choice stays per-builder (PE vs Unity vs `icon.png`), all three emitting one layout (hicolor theme + `share/propnix/<id>.png` splash) via the shared `icons/pipeline.sh`; `from-pe` keeps its per-true-size install (no fake upscaled theme).
 
-**`mkSetupScript`** (setup-script.nix) — wraps a game's `setup.sh` as the store-path executable behind `wine.setupScript`: `set -euo pipefail` + a pinned coreutils/sed/awk/grep PATH; `withIniLib = true` prepends the shared `ini_set` INI editor (`ini-lib.sh`, parameterized `INI_SEP`/`INI_CRLF`/`INI_SKIP_COMMENTS` — the three variants the games need).
+**`mkSetupScript`** (setup-script.nix) — wraps a game's `setup.sh` as the store-path executable behind `setupScript`: `set -euo pipefail` + a pinned coreutils/sed/awk/grep PATH + the payload-tree lookup helpers (`payload-lib.sh`, always); `withIniLib = true` additionally prepends the shared `ini_set` INI editor (`ini-lib.sh`, parameterized `INI_SEP`/`INI_CRLF`/`INI_SKIP_COMMENTS` — the three variants the games need).
+
+**The setup hook's payload contract.** The launcher hands a setup (or `userRegScript`) executable **two** payload vars, because they answer different questions. `PROPNIX_PAYLOAD` is the *primary* tree — the launch cwd and the exe/icon source — and is unchanged, so every script written against it still works. `PROPNIX_PAYLOADS` is **every game-content tree**, `:`-joined, highest mount priority first (enabled DLC, the primary tree, then the co-base depots — the order the game dir unions them, so the *first* hit is the file the game itself opens); it excludes `extraLowers`, which are framework artifacts (patched-exe overlay, entitlement settings) rather than shipped assets. `payload-lib.sh` supplies `payload_trees` / `payload_find REL` / `payload_require REL` to read it; a script must use those rather than `"$PROPNIX_PAYLOAD/<file>"`, because the head is pinned by the *exe's* depot (`icon.auto` runs `wrestool` on `${head}/${exe}`) and a multi-depot title routinely ships the asset elsewhere — Skyrim SE's Steam arm has SkyrimSE.exe in depot 489833 and its `Low/Medium/High/Ultra.ini` quality presets in 489832, so `$PROPNIX_PAYLOAD/High.ini` simply does not exist there. The launcher's `payloads` config field is `#[serde(default)]` and falls back to `[payload]`, so a config baked before it existed degenerates to exactly the old single-tree behaviour.
 
 ### Fetchers (lib/fetchers/)
 

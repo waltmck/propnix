@@ -233,15 +233,15 @@ pub fn supersede_manifests(depot: u32, keep: &[u64]) {
     let Ok(rd) = std::fs::read_dir(dir()) else {
         return;
     };
-    let hour_ago = std::time::SystemTime::now()
-        .checked_sub(std::time::Duration::from_secs(3600));
+    let hour_ago = std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(3600));
     for e in rd.flatten() {
         let p = e.path();
         let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        let is_stale_manifest =
-            name.starts_with(&prefix) && name.ends_with(".zip") && !keep_names.iter().any(|k| k == name);
+        let is_stale_manifest = name.starts_with(&prefix)
+            && name.ends_with(".zip")
+            && !keep_names.iter().any(|k| k == name);
         let is_old_temp = name.starts_with(".tmp-")
             && hour_ago.is_some_and(|cut| {
                 e.metadata()
@@ -306,12 +306,20 @@ mod tests {
             let first = [1u8; 32];
             write_key(3, &first);
             write_key(3, &[2u8; 32]); // must NOT replace
-            assert_eq!(read_key(3, &sha256_hex(&first)), Some(first), "host pin must not clobber");
+            assert_eq!(
+                read_key(3, &sha256_hex(&first)),
+                Some(first),
+                "host pin must not clobber"
+            );
 
             // A build, meeting an entry it cannot read (here simulated by chmod 0000 — unreadable even to
             // the owner), replaces it with its own readable copy.
-            std::fs::set_permissions(&super::key_path(3), PermissionsExt::from_mode(0o000)).unwrap();
-            assert!(!super::readable(&super::key_path(3)), "0000 entry must read as unreadable");
+            std::fs::set_permissions(&super::key_path(3), PermissionsExt::from_mode(0o000))
+                .unwrap();
+            assert!(
+                !super::readable(&super::key_path(3)),
+                "0000 entry must read as unreadable"
+            );
             std::env::set_var("NIX_BUILD_TOP", "/build/x");
             let healed = [7u8; 32];
             write_key(3, &healed);
@@ -337,10 +345,22 @@ mod tests {
             // Supersede is CALLER-driven and takes the full keep-set — crucially it must NOT delete a
             // manifest this same run just wrote (the re-pin double-fetch bug).
             supersede_manifests(5, &[100, 200]);
-            assert!(super::manifest_path(5, 100).exists(), "a kept manifest stays");
-            assert!(super::manifest_path(5, 200).exists(), "the second kept manifest stays too");
-            assert!(!super::manifest_path(5, 99).exists(), "depot 5's stale manifest is pruned");
-            assert!(super::manifest_path(6, 42).exists(), "another depot's manifest is untouched");
+            assert!(
+                super::manifest_path(5, 100).exists(),
+                "a kept manifest stays"
+            );
+            assert!(
+                super::manifest_path(5, 200).exists(),
+                "the second kept manifest stays too"
+            );
+            assert!(
+                !super::manifest_path(5, 99).exists(),
+                "depot 5's stale manifest is pruned"
+            );
+            assert!(
+                super::manifest_path(6, 42).exists(),
+                "another depot's manifest is untouched"
+            );
         })
     }
 
@@ -352,7 +372,10 @@ mod tests {
             // not delete the first — supersede is no longer coupled to write_manifest.
             write_manifest(7, 100, b"first");
             write_manifest(7, 200, b"second");
-            assert!(super::manifest_path(7, 100).exists(), "write_manifest must not prune a sibling");
+            assert!(
+                super::manifest_path(7, 100).exists(),
+                "write_manifest must not prune a sibling"
+            );
             assert!(super::manifest_path(7, 200).exists());
         })
     }
@@ -388,13 +411,17 @@ mod tests {
         with_root("sym", || {
             // A link left where a cache file belongs would otherwise read whatever it points at —
             // possibly an unrelated file whose bytes happen to verify. Refuse the link itself.
-            let elsewhere = std::env::temp_dir().join(format!("propnix-cache-elsewhere-{}", std::process::id()));
+            let elsewhere = std::env::temp_dir()
+                .join(format!("propnix-cache-elsewhere-{}", std::process::id()));
             std::fs::write(&elsewhere, [9u8; 32]).unwrap();
             let kp = super::key_path(3);
             std::fs::create_dir_all(kp.parent().unwrap()).unwrap();
             std::os::unix::fs::symlink(&elsewhere, &kp).unwrap();
             let want = sha256_hex(&[9u8; 32]);
-            assert!(read_key(3, &want).is_none(), "a symlink is a miss, not a readable entry");
+            assert!(
+                read_key(3, &want).is_none(),
+                "a symlink is a miss, not a readable entry"
+            );
             let _ = std::fs::remove_file(&elsewhere);
         })
     }
@@ -405,7 +432,10 @@ mod tests {
             let kp = super::key_path(5);
             std::fs::create_dir_all(kp.parent().unwrap()).unwrap();
             std::fs::write(&kp, [1u8; 16]).unwrap(); // wrong length
-            assert!(read_key(5, &sha256_hex(&[1u8; 16])).is_none(), "a 16-byte key is not a key");
+            assert!(
+                read_key(5, &sha256_hex(&[1u8; 16])).is_none(),
+                "a 16-byte key is not a key"
+            );
             std::fs::write(&kp, [1u8; 65]).unwrap(); // over the key cap
             assert!(read_key(5, &sha256_hex(&[1u8; 65])).is_none());
         })

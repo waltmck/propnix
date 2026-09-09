@@ -361,7 +361,10 @@ async fn fetch_one<IO: ChunkIo>(shared: &Arc<Shared<IO>>, idx: usize) -> Option<
             }
             Err(join) => {
                 // A panic in target() is a BUG, like a panic in decode: end the run with the reason.
-                shared.fail(format!("{}: target task died: {join}", shared.io.label(&item)));
+                shared.fail(format!(
+                    "{}: target task died: {join}",
+                    shared.io.label(&item)
+                ));
                 return None;
             }
         }
@@ -374,14 +377,23 @@ async fn fetch_one<IO: ChunkIo>(shared: &Arc<Shared<IO>>, idx: usize) -> Option<
         + Duration::from_secs_f64(
             shared.sizes[idx] as f64 / shared.tuning.trickle_floor.max(1) as f64,
         );
-    let resp = shared.client.get(&target.url).timeout(deadline).send().await;
+    let resp = shared
+        .client
+        .get(&target.url)
+        .timeout(deadline)
+        .send()
+        .await;
     let body = match resp {
         Ok(r) => {
             let status = r.status().as_u16();
             if !r.status().is_success() {
                 shared.io.observe(&item, target.endpoint, Outcome::Failed);
                 shared.io.on_http_status(&item, status);
-                requeue(shared, idx, &format!("{}: HTTP {status}", shared.io.label(&item)));
+                requeue(
+                    shared,
+                    idx,
+                    &format!("{}: HTTP {status}", shared.io.label(&item)),
+                );
                 return None;
             }
             match r.bytes().await {
@@ -435,7 +447,10 @@ async fn fetch_one<IO: ChunkIo>(shared: &Arc<Shared<IO>>, idx: usize) -> Option<
         }
         Err(join) => {
             // A panic in decode is a BUG. Do not requeue it forever — end the run with the reason.
-            shared.fail(format!("{}: decode task died: {join}", shared.io.label(&item)));
+            shared.fail(format!(
+                "{}: decode task died: {join}",
+                shared.io.label(&item)
+            ));
             None
         }
     }
@@ -587,14 +602,20 @@ async fn govern<IO: ChunkIo>(shared: Arc<Shared<IO>>, max: usize) {
         let (limit_now, stalled_for, complete) = {
             let st = shared.state.lock().unwrap();
             let complete = st.delivered >= shared.items.len();
-            (st.limit, st.last_success.elapsed(), complete || st.failure.is_some())
+            (
+                st.limit,
+                st.last_success.elapsed(),
+                complete || st.failure.is_some(),
+            )
         };
         if complete {
             return;
         }
         if stalled_for > shared.tuning.stall_timeout {
             let last = shared.state.lock().unwrap().last_requeue.clone();
-            let last = last.map(|why| format!("; last error: {why}")).unwrap_or_default();
+            let last = last
+                .map(|why| format!("; last error: {why}"))
+                .unwrap_or_default();
             shared.fail(format!(
                 "no chunk has succeeded in {}s — giving up (the link looks down, not slow){last}",
                 stalled_for.as_secs()
@@ -613,14 +634,26 @@ async fn govern<IO: ChunkIo>(shared: Arc<Shared<IO>>, max: usize) {
                 Pressure::Network
             }
         };
-        let throughput = if elapsed > 0.0 { bytes as f64 / elapsed } else { 0.0 };
+        let throughput = if elapsed > 0.0 {
+            bytes as f64 / elapsed
+        } else {
+            0.0
+        };
         let limit = gov.observe(throughput, pressure, ok, errors);
         if std::env::var_os("PROPNIX_PIN_DEBUG").is_some() {
             eprintln!(
                 "\n  [pin] inflight {limit_now} -> {limit}  {:.1} MB/s  {}{}",
                 throughput / 1e6,
-                if pressure == Pressure::ConsumerBound { "consumer-bound" } else { "network" },
-                if errors > 0 { format!("  errors={errors}/{}", ok + errors) } else { String::new() },
+                if pressure == Pressure::ConsumerBound {
+                    "consumer-bound"
+                } else {
+                    "network"
+                },
+                if errors > 0 {
+                    format!("  errors={errors}/{}", ok + errors)
+                } else {
+                    String::new()
+                },
             );
         }
         if limit != limit_now {
@@ -957,7 +990,10 @@ mod tests {
         for i in 0..12 {
             assert_eq!(o.next_chunk().unwrap(), body(i), "block {i}");
         }
-        assert!(tries.load(Ordering::Relaxed) >= 3, "block 7 should have been retried");
+        assert!(
+            tries.load(Ordering::Relaxed) >= 3,
+            "block 7 should have been retried"
+        );
     }
 
     #[test]
@@ -971,7 +1007,10 @@ mod tests {
         assert_eq!(o.next_chunk().unwrap(), body(0));
         std::thread::sleep(Duration::from_millis(300));
         let p = peak.load(Ordering::Relaxed);
-        assert!(p < 40, "read-ahead escaped the window: reached block {p} of 200");
+        assert!(
+            p < 40,
+            "read-ahead escaped the window: reached block {p} of 200"
+        );
     }
 
     #[test]
@@ -987,9 +1026,15 @@ mod tests {
         }
         let sink = Arc::new(Collect(Mutex::new(Vec::new())));
         let mut bytes = 0u64;
-        unordered(io, work(50), 16, (LEN * 64) as u64, Arc::clone(&sink) as Arc<dyn Sink>, fast(), |n| {
-            bytes += n
-        })
+        unordered(
+            io,
+            work(50),
+            16,
+            (LEN * 64) as u64,
+            Arc::clone(&sink) as Arc<dyn Sink>,
+            fast(),
+            |n| bytes += n,
+        )
         .unwrap();
         let got = sink.0.lock().unwrap();
         assert_eq!(got.len(), 50, "every block must arrive");
@@ -1001,7 +1046,11 @@ mod tests {
         for (i, d) in got.iter() {
             assert_eq!(d, &body(*i), "block {i} content");
         }
-        assert_eq!(bytes, (50 * LEN) as u64, "progress must account for every byte");
+        assert_eq!(
+            bytes,
+            (50 * LEN) as u64,
+            "progress must account for every byte"
+        );
     }
 
     #[test]
@@ -1063,7 +1112,11 @@ mod tests {
         for (i, d) in got.iter() {
             assert_eq!(d, &body(*i), "block {i} content");
         }
-        assert_eq!(bytes, (n * LEN) as u64, "progress must account for every byte");
+        assert_eq!(
+            bytes,
+            (n * LEN) as u64,
+            "progress must account for every byte"
+        );
     }
 
     #[test]
@@ -1073,11 +1126,16 @@ mod tests {
         let base = serve(|_| Reply::Status(503));
         let (io, _) = io_for(base);
         let o = ordered(io, work(8), 4, (LEN * 4) as u64, fast()).unwrap();
-        let err = o.next_chunk().expect_err("a dead link must surface an error");
+        let err = o
+            .next_chunk()
+            .expect_err("a dead link must surface an error");
         assert!(err.contains("no chunk has succeeded"), "got: {err}");
         // Requeues are silent by default, so the stall message is the one place the user learns WHAT
         // kept failing.
-        assert!(err.contains("HTTP 503"), "the stall message must carry the last error: {err}");
+        assert!(
+            err.contains("HTTP 503"),
+            "the stall message must carry the last error: {err}"
+        );
     }
 
     #[test]
@@ -1091,8 +1149,16 @@ mod tests {
                 Err("disk is full".into())
             }
         }
-        let err = unordered(io, work(8), 4, (LEN * 8) as u64, Arc::new(Boom) as Arc<dyn Sink>, fast(), |_| {})
-            .expect_err("a write failure must end the run");
+        let err = unordered(
+            io,
+            work(8),
+            4,
+            (LEN * 8) as u64,
+            Arc::new(Boom) as Arc<dyn Sink>,
+            fast(),
+            |_| {},
+        )
+        .expect_err("a write failure must end the run");
         assert!(err.contains("disk is full"), "got: {err}");
     }
 
@@ -1123,9 +1189,21 @@ mod tests {
             accepted: AtomicUsize::new(0),
             violations: AtomicUsize::new(0),
         });
-        unordered(io, work(30), 16, (LEN * 2) as u64, Arc::clone(&sink) as Arc<dyn Sink>, fast(), |_| {})
-            .unwrap();
-        assert_eq!(sink.accepted.load(Ordering::Relaxed), 30, "every block must still arrive");
+        unordered(
+            io,
+            work(30),
+            16,
+            (LEN * 2) as u64,
+            Arc::clone(&sink) as Arc<dyn Sink>,
+            fast(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            sink.accepted.load(Ordering::Relaxed),
+            30,
+            "every block must still arrive"
+        );
         assert_eq!(
             sink.violations.load(Ordering::Relaxed),
             0,
@@ -1191,7 +1269,10 @@ mod tests {
             );
             for i in 0..n {
                 let c = sink.accepts[i].load(Ordering::Relaxed);
-                assert_eq!(c, 1, "iter {iter}: block {i} was accepted {c} times, want exactly 1");
+                assert_eq!(
+                    c, 1,
+                    "iter {iter}: block {i} was accepted {c} times, want exactly 1"
+                );
             }
         }
     }

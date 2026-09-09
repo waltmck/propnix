@@ -11,8 +11,8 @@ mod cred;
 mod pin;
 
 use clap::{Args, Parser, Subcommand};
-use std::process::ExitCode;
 use cred::store::CredStore;
+use std::process::ExitCode;
 
 #[derive(Parser)]
 #[command(
@@ -277,6 +277,11 @@ enum DownloadCmd {
         /// Cache trust anchor: sha256 (hex) of the raw manifest, from the pin's `manifestSha256`.
         #[arg(long)]
         manifest_sha256: Option<String>,
+        /// Emit progress as `@nix` structured activities on stderr instead of a human bar, so a FOD
+        /// build shows a real progress bar under `nix build` / `nom`. Set by fetchSteamDepot /
+        /// fetchGogGalaxyBuild; leave it off for an interactive run.
+        #[arg(long)]
+        nix_progress: bool,
     },
     /// Download a GOG Galaxy build (replaces gogdl).
     Gog {
@@ -305,6 +310,11 @@ enum DownloadCmd {
         /// MiB of chunks admitted ahead of the disk — the download's memory bound.
         #[arg(long, default_value_t = 128)]
         window_mib: u64,
+        /// Emit progress as `@nix` structured activities on stderr instead of a human bar, so a FOD
+        /// build shows a real progress bar under `nix build` / `nom`. Set by fetchGogGalaxyBuild;
+        /// leave it off for an interactive run.
+        #[arg(long)]
+        nix_progress: bool,
     },
 }
 
@@ -436,9 +446,15 @@ fn cmd_pin(a: PinArgs) -> Result<(), Box<dyn std::error::Error>> {
         gog_branch: a.gog_branch,
         // Precedence: flag > env > try every stored account.
         gog_account: a.gog_account.or_else(|| env_account("PROPNIX_GOG_ACCOUNT")),
-        steam_account: a.steam_account.or_else(|| env_account("PROPNIX_STEAM_ACCOUNT")),
+        steam_account: a
+            .steam_account
+            .or_else(|| env_account("PROPNIX_STEAM_ACCOUNT")),
     };
-    validate_accounts(&opts.credential_dir, opts.gog_account.as_deref(), opts.steam_account.as_deref())?;
+    validate_accounts(
+        &opts.credential_dir,
+        opts.gog_account.as_deref(),
+        opts.steam_account.as_deref(),
+    )?;
     if a.new {
         // Refuse BEFORE the expensive resolve-and-hash, not at landing time. A scaffold is generic
         // placeholders, and — since `pin` writes in place — landing one over an existing versions.json
@@ -458,9 +474,7 @@ fn cmd_pin(a: PinArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
         let spec = match (a.gog, a.steam) {
             (true, false) => pin::NewSpec::Gog {
-                product_id: a
-                    .product_id
-                    .ok_or("--new --gog needs --product-id")?,
+                product_id: a.product_id.ok_or("--new --gog needs --product-id")?,
                 os: a.os,
                 lang: a.lang,
                 platform: a.platform,
@@ -531,7 +545,11 @@ fn land(
         std::fs::create_dir_all(dir)?;
     }
     if std::fs::read_to_string(&path).is_ok_and(|old| old == doc) {
-        eprintln!("  {}: unchanged — {} left untouched", opts.game, path.display());
+        eprintln!(
+            "  {}: unchanged — {} left untouched",
+            opts.game,
+            path.display()
+        );
         return Ok(());
     }
     let tmp = dir.join(format!(".versions.json.tmp-{}", std::process::id()));
@@ -557,8 +575,13 @@ fn cmd_steam_probe(
         gog_account: None,
         steam_account: steam_account.or_else(|| env_account("PROPNIX_STEAM_ACCOUNT")),
         progress: false,
+        nix_progress: false,
     };
-    validate_accounts(&opts.credential_dir, opts.gog_account.as_deref(), opts.steam_account.as_deref())?;
+    validate_accounts(
+        &opts.credential_dir,
+        opts.gog_account.as_deref(),
+        opts.steam_account.as_deref(),
+    )?;
     for (depot, owner) in pin::steam::probe_depots(app, depots, branch, &opts)? {
         match owner {
             Some(account) => println!("{app}\t{depot}\towned\t{account}"),
@@ -583,6 +606,7 @@ fn cmd_download(what: DownloadCmd) -> Result<(), Box<dyn std::error::Error>> {
             window_mib,
             depot_key_sha256,
             manifest_sha256,
+            nix_progress,
         } => {
             std::fs::create_dir_all(&dir)?;
             let opts = gog::HashOpts {
@@ -592,8 +616,13 @@ fn cmd_download(what: DownloadCmd) -> Result<(), Box<dyn std::error::Error>> {
                 gog_account: None,
                 steam_account: steam_account.or_else(|| env_account("PROPNIX_STEAM_ACCOUNT")),
                 progress: true,
+                nix_progress,
             };
-            validate_accounts(&opts.credential_dir, opts.gog_account.as_deref(), opts.steam_account.as_deref())?;
+            validate_accounts(
+                &opts.credential_dir,
+                opts.gog_account.as_deref(),
+                opts.steam_account.as_deref(),
+            )?;
             // Both anchors or neither: a lone anchor can never complete the cache path, and passing a
             // half-pair through would just make `acquire` probe the cache for nothing.
             let anchors = depot_key_sha256.as_deref().zip(manifest_sha256.as_deref());
@@ -620,6 +649,7 @@ fn cmd_download(what: DownloadCmd) -> Result<(), Box<dyn std::error::Error>> {
             dir,
             workers,
             window_mib,
+            nix_progress,
         } => {
             std::fs::create_dir_all(&dir)?;
             let opts = gog::HashOpts {
@@ -630,8 +660,13 @@ fn cmd_download(what: DownloadCmd) -> Result<(), Box<dyn std::error::Error>> {
                 gog_account: gog_account.or_else(|| env_account("PROPNIX_GOG_ACCOUNT")),
                 steam_account: None,
                 progress: true,
+                nix_progress,
             };
-            validate_accounts(&opts.credential_dir, opts.gog_account.as_deref(), opts.steam_account.as_deref())?;
+            validate_accounts(
+                &opts.credential_dir,
+                opts.gog_account.as_deref(),
+                opts.steam_account.as_deref(),
+            )?;
             // Same contract as `hash gog`: be explicit about a tree that buildId alone does not pin.
             let deps = deps_build_id.map(gog::DepsPin::Expect);
             let w = gog::download_build(
@@ -696,8 +731,13 @@ fn cmd_hash(what: HashCmd) -> Result<(), Box<dyn std::error::Error>> {
                 gog_account: env_account("PROPNIX_GOG_ACCOUNT"),
                 steam_account: None,
                 progress: true,
+                nix_progress: false,
             };
-            validate_accounts(&opts.credential_dir, opts.gog_account.as_deref(), opts.steam_account.as_deref())?;
+            validate_accounts(
+                &opts.credential_dir,
+                opts.gog_account.as_deref(),
+                opts.steam_account.as_deref(),
+            )?;
             // `Expect` when the flag is given, and NO DepsPin at all when it is not: the harness
             // contract is to be explicit about a tree buildId does not pin, so a bare `hash gog` on
             // such a build is refused with the current repository build named. (`propnix pin` passes
@@ -737,8 +777,13 @@ fn cmd_hash(what: HashCmd) -> Result<(), Box<dyn std::error::Error>> {
                 gog_account: None,
                 steam_account: account.clone(),
                 progress: true,
+                nix_progress: false,
             };
-            validate_accounts(&opts.credential_dir, opts.gog_account.as_deref(), opts.steam_account.as_deref())?;
+            validate_accounts(
+                &opts.credential_dir,
+                opts.gog_account.as_deref(),
+                opts.steam_account.as_deref(),
+            )?;
             let (sri, stats, _, _anchors) = if anonymous {
                 steam::hash_depot(
                     app,
@@ -919,9 +964,15 @@ fn cmd_verify(what: VerifyCmd) -> Result<(), Box<dyn std::error::Error>> {
                 gog_account: None,
                 steam_account: account,
                 progress: true,
+                nix_progress: false,
             };
-            validate_accounts(&opts.credential_dir, opts.gog_account.as_deref(), opts.steam_account.as_deref())?;
-            let rep = steam::verify_depot_any(app, depot, manifest, &branch, anonymous, &dir, &opts)?;
+            validate_accounts(
+                &opts.credential_dir,
+                opts.gog_account.as_deref(),
+                opts.steam_account.as_deref(),
+            )?;
+            let rep =
+                steam::verify_depot_any(app, depot, manifest, &branch, anonymous, &dir, &opts)?;
             println!(
                 "{} files, {} dirs, {} chunks checked",
                 rep.files, rep.dirs, rep.chunks

@@ -26,6 +26,14 @@ let
   expected = {
     baby-steps = "gog/x86_64-windows/${wineB}";
     baldurs-gate-3 = "gog/x86_64-windows/${wineB}";
+    # Steam-only, Windows-only pins (Steam publishes macOS/Linux depots for this app too, but they are
+    # deliberately not pinned) → the single pair resolves itself.
+    cities-skylines = "steam/x86_64-windows/${wineB}";
+    # Likewise Steam-only, Windows-only — and not sold on GOG at all, so the single pinned pair is also the
+    # only one that could ever exist here. The four base depots are all ONE (steam, x86_64-windows) row, so
+    # they add payloads, not pairs.
+    civilization-6 = "steam/x86_64-windows/${wineB}";
+    cyberpunk-2077 = "gog/x86_64-windows/${wineB}";
     dont-starve = "gog/i386-windows/${wineB}";
     # The only HOST-DEPENDENT platform in the matrix: factorio ranks Wube's native ARM64 Linux build first,
     # and `strategy.runnable` drops it on x86_64 (no ARM-on-x86 emulator here), so the resolver walks on
@@ -44,8 +52,29 @@ let
     outlast-2 = "gog/x86_64-windows/${wineB}";
     papers-please = "gog/x86_64-windows/${wineB}";
     prison-architect = "gog/x86_64-windows/${wineB}";
+    # R.E.P.O. — Steam ships ONE depot for this app (no macOS/Linux, no DLC), so the matrix has a single
+    # pair and there is nothing for the resolver to choose between.
+    repo = "steam/x86_64-windows/${wineB}";
+    # Rust — Steam-only (Facepunch sell it nowhere else), two depots on the one platform, so the single
+    # pinned pair resolves itself. Packaged despite being unlikely to actually run: see pkgs/games/rust,
+    # which records the EAC evidence rather than guessing.
+    rust = "steam/x86_64-windows/${wineB}";
+    # Pinned from BOTH stores at the SAME platform (as baldurs-gate-3 now is). That adds nothing to the
+    # ranking — one pinned platform ⇒ `platformPreference` derives itself — so what this row pins is that
+    # the FETCHER tie-break is the USER's, not the game's: `preferredFetchers` defaults to the registry's
+    # own attr order, "gog" sorts before "steam", and the GOG build wins with no game-authored `fetcher`
+    # exception. The `definesFetcher` ratchet below holds the second half of that; the
+    # `same-platform-*` guards hold the first (both directions, so a registry reorder cannot silently
+    # flip which store a default `nix run` downloads).
+    shadow-of-mordor = "gog/x86_64-windows/${wineB}";
     skyrim-se = "gog/x86_64-windows/${wineB}";
+    space-engineers = "steam/x86_64-windows/${wineB}";
     stellaris = "steam/x86_64-linux/${linuxB}";
+    # Paradox's other Clausewitz title, but WINDOWS-only pins → wine, where stellaris goes Linux/box64.
+    victoria-3 = "steam/x86_64-windows/${wineB}";
+    # Complete Edition: GOG ships every expansion INSIDE the base build (no dlcId depots to pin), so this
+    # is a plain single-pair GOG/Windows row like the other CDPR titles.
+    witcher-3 = "gog/x86_64-windows/${wineB}";
   };
   triple = g: "${g.config.fetcher}/${g.config.emulatedPlatform}/${g.config.backend}";
   matrixErrors = lib.concatLists (
@@ -90,15 +119,40 @@ let
       == "gog/x86_64-windows/${wineB}";
     fetcher-apply-reresolves-platform =
       triple (dflt.hollow-knight.apply { fetcher = "steam"; }) == "steam/x86_64-linux/${linuxB}";
+    # ── two fetchers pinning ONE platform (shadow-of-mordor, baldurs-gate-3, skyrim-se) ──
+    # The `platformPreference` ratchet counts PINNED PLATFORMS, not pinned pairs, so a game in this shape
+    # states no ranking and the store is decided purely by the user's `preferredFetchers` order. Both
+    # directions are pinned deliberately: the DEFAULT is only "gog" because `attrNames fetchers` is
+    # name-sorted, which is an implementation fact of the registry rather than a stated policy — pin it
+    # here so a rename or a reordering shows up as a failed guard instead of as a default `nix run`
+    # quietly downloading 43 GB from the other store.
+    same-platform-tiebreak-is-the-user-list =
+      triple
+        (mk {
+          preferredFetchers = [
+            "steam"
+            "gog"
+          ];
+        }).shadow-of-mordor == "steam/x86_64-windows/${wineB}";
+    # …and neither single-store user is ever stranded: both narrowings reach the SAME platform, so this
+    # shape has no unreachable-pair case at all (contrast `unreachable-pair-throws` above).
+    same-platform-gog-only-resolves = triple gogOnly.shadow-of-mordor == "gog/x86_64-windows/${wineB}";
+    same-platform-steam-only-resolves =
+      triple (mk { preferredFetchers = [ "steam" ]; }).shadow-of-mordor
+      == "steam/x86_64-windows/${wineB}";
+    # A game in this shape must NOT declare a ranking: with one pinned platform the derived default is the
+    # singleton list, and a hand-written `[ "x86_64-windows" ]` would be a claim the schema already makes.
+    same-platform-ranking-stays-derived =
+      dflt.shadow-of-mordor.config.platformPreference == [ "x86_64-windows" ];
     # ── the host-runnability filter (lib/strategy.nix `runnable`) ──
     # A platform this host cannot execute is skipped by the RESOLVER but stays selectable EXPLICITLY, and an
     # explicit selection must still EVALUATE — the CI eval matrix forces every pinned pair on both systems,
     # so a throw here would turn "this host can't run it" into a red leg. Unrunnability is a BUILD refusal.
     host-filter-skips-unrunnable-platform =
-      dflt.factorio.config.emulatedPlatform
-      == (if isAarch64 then "aarch64-linux" else "x86_64-linux");
+      dflt.factorio.config.emulatedPlatform == (if isAarch64 then "aarch64-linux" else "x86_64-linux");
     unrunnable-platform-still-evaluates =
-      (builtins.tryEval (dflt.factorio.apply { emulatedPlatform = "aarch64-linux"; }).config.backend).success;
+      (builtins.tryEval (dflt.factorio.apply { emulatedPlatform = "aarch64-linux"; }).config.backend)
+      .success;
     unrunnable-platform-is-broken-off-host =
       (dflt.factorio.apply { emulatedPlatform = "aarch64-linux"; }).meta.broken == !isAarch64;
 
@@ -121,10 +175,12 @@ let
   errors =
     matrixErrors
     ++ guardErrors
-    ++ lib.optional (uncovered != [ ])
-      "games missing from the resolution roster (add their expected triple): ${toString uncovered}"
-    ++ lib.optional (stale != [ ])
-      "resolution roster names games that no longer exist: ${toString stale}"
+    ++ lib.optional (
+      uncovered != [ ]
+    ) "games missing from the resolution roster (add their expected triple): ${toString uncovered}"
+    ++ lib.optional (
+      stale != [ ]
+    ) "resolution roster names games that no longer exist: ${toString stale}"
     ++
       lib.optional (definesFetcher != fetcherExceptions)
         "games defining `fetcher` (quality exceptions) changed: got [${toString definesFetcher}], sanctioned [${toString fetcherExceptions}]";

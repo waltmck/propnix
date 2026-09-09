@@ -15,6 +15,37 @@
           "generation": 2
         }
       ]
+    },
+    "steam": {
+      "x86_64-windows": [
+        {
+          "pname": "skyrim-se-489833",
+          "appId": 489830,
+          "depotId": 489833,
+          "manifestId": "4886117324142477814",
+          "version": "24914197",
+          "outputHash": "sha256-NC+7Zzw3dopyXsSO8y3rYZExqErxa7CKmyl+IcIpfFo=",
+          "title": "Skyrim Special Edition (windows exe, Steam)"
+        },
+        {
+          "pname": "skyrim-se-489832",
+          "appId": 489830,
+          "depotId": 489832,
+          "manifestId": "5728778377666085157",
+          "version": "24914197",
+          "outputHash": "sha256-jVnHEvzB8CHfj0UNh2vaNWhlXXGYFQaCQDuqwbqNq80=",
+          "title": "Skyrim Special Edition (windows root, Steam)"
+        },
+        {
+          "pname": "skyrim-se-489831",
+          "appId": 489830,
+          "depotId": 489831,
+          "manifestId": "4940892828028256588",
+          "version": "24914197",
+          "outputHash": "sha256-dSfxAlGLqvpaacF42+y9T0lPhSUV9Q05WxyyVousfmw=",
+          "title": "Skyrim Special Edition (content, Steam)"
+        }
+      ]
     }
   }
 }

@@ -17,6 +17,12 @@
 # from source needs a mingw cross of the Windows file set (a different source list, `common_link_win`, and
 # mingw builds of protobuf/curl/mbedtls/portaudio) and is the remaining piece of this migration — nothing in
 # propnix's current platform set depends on it, since wine loads the PE and the prebuilt one works.
+#
+# ONE THING IS BUILT FROM SOURCE ON THE WINDOWS SIDE: `steamStubProxy` (./steamstub-proxy.nix), a tiny PE
+# that stands in front of the shim for a SteamStub-wrapped exe. It is a separate, LAZY passthru — a game
+# that does not set `steam.emu.steamStub` pulls neither it nor a mingw toolchain — and its whole
+# justification (with the wine `+relay` measurements that establish the wrapper never asks the on-disk
+# steam lib anything) lives in that file's header.
 {
   lib,
   stdenv,
@@ -26,6 +32,13 @@
   fetchurl,
   p7zip,
   symlinkJoin,
+  # Cross-mingw toolchains for the SteamStub proxy (./steamstub-proxy.nix), threaded through verbatim; the
+  # host leg picks which one exists. Optional so a scope that never asks for a proxy needs none of them.
+  llvmMingw ? null,
+  mingwGccW64 ? null,
+  mingwGcc32 ? null,
+  mingwThreads64 ? null,
+  mingwThreads32 ? null,
 }:
 let
   version = "2026_07_19";
@@ -74,9 +87,19 @@ let
     dontPatchELF = true;
     installPhase = ''
       runHook preInstall
-      7z x -y "$src" 'release/regular/x64/steam_api64.dll' 'release/regular/x86/steam_api.dll' -owin > /dev/null
+      7z x -y "$src" 'release/regular/x64/steam_api64.dll' 'release/regular/x86/steam_api.dll' \
+        'release/steamclient_experimental/extra_dlls/steamclient_extra_x64.dll' \
+        'release/steamclient_experimental/extra_dlls/steamclient_extra_x86.dll' -owin > /dev/null
       install -Dm444 win/release/regular/x64/steam_api64.dll "$out/share/gbe_fork/win/x64/steam_api64.dll"
       install -Dm444 win/release/regular/x86/steam_api.dll "$out/share/gbe_fork/win/x86/steam_api.dll"
+      # The SteamStub v3.1 in-memory patcher, from the SAME release archive so it can never disagree with
+      # the shim it is staged beside. Upstream files it under the cold-client-loader tree because that is
+      # how THEY deliver it (process injection); propnix loads it from a static-import DllMain instead —
+      # see emulators/gbe-fork/steamstub-proxy.nix, which is the only consumer.
+      install -Dm444 win/release/steamclient_experimental/extra_dlls/steamclient_extra_x64.dll \
+        "$out/share/gbe_fork/win/x64/steamclient_extra_x64.dll"
+      install -Dm444 win/release/steamclient_experimental/extra_dlls/steamclient_extra_x86.dll \
+        "$out/share/gbe_fork/win/x86/steamclient_extra_x86.dll"
       runHook postInstall
     '';
     meta.sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
@@ -87,20 +110,34 @@ in
 symlinkJoin {
   name = "gbe-fork-${version}";
   paths = [ winPrebuilt ];
-  postBuild = lib.concatStringsSep "\n" (
-    lib.mapAttrsToList (arch: shim: ''
-      mkdir -p "$out/share/gbe_fork/${arch}"
-      ln -s ${shim}/lib/libsteam_api.so "$out/share/gbe_fork/${arch}/libsteam_api.so"
-    '') usableShims
-  )
-  # LGPL notices, from the host shim's source (same revision as every ABI's).
-  + ''
-    mkdir -p "$out/share/doc"
-    ln -s ${linuxShims.${if stdenv.hostPlatform.isAarch64 then "aarch64" else "x64"}}/share/doc/gbe_fork \
-      "$out/share/doc/gbe_fork"
-  '';
+  postBuild =
+    lib.concatStringsSep "\n" (
+      lib.mapAttrsToList (arch: shim: ''
+        mkdir -p "$out/share/gbe_fork/${arch}"
+        ln -s ${shim}/lib/libsteam_api.so "$out/share/gbe_fork/${arch}/libsteam_api.so"
+      '') usableShims
+    )
+    # LGPL notices, from the host shim's source (same revision as every ABI's).
+    + ''
+      mkdir -p "$out/share/doc"
+      ln -s ${
+        linuxShims.${if stdenv.hostPlatform.isAarch64 then "aarch64" else "x64"}
+      }/share/doc/gbe_fork \
+        "$out/share/doc/gbe_fork"
+    '';
   passthru = {
     inherit version linuxShims winPrebuilt;
+    # The SteamStub arm, as a FUNCTION (steam-emu calls it per declared `.dll` libPath). Lazy like
+    # `linuxShims`: a game that never sets `steam.emu.steamStub` pulls no mingw toolchain.
+    steamStubProxy = callPackage ./steamstub-proxy.nix {
+      inherit
+        llvmMingw
+        mingwGccW64
+        mingwGcc32
+        mingwThreads64
+        mingwThreads32
+        ;
+    };
     # The host's own build, for a `nix build .#gbeFork.native` smoke test.
     native = shimFor stdenv.hostPlatform.system;
   };

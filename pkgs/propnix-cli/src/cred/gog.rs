@@ -92,14 +92,23 @@ impl Provider for Gog {
             .and_then(|v| v.as_str())
             .ok_or("GOG token response had no access_token")?
             .to_string();
-        if token_body.get("refresh_token").and_then(|v| v.as_str()).is_none() {
+        if token_body
+            .get("refresh_token")
+            .and_then(|v| v.as_str())
+            .is_none()
+        {
             return Err("GOG token response had no refresh_token".into());
         }
 
         // 4. Resolve the account username (for the label + the store dir). Best-effort — fall back to the
         //    numeric user_id if the lookup fails.
         let username = fetch_username(&access_token)
-            .or_else(|| token_body.get("user_id").and_then(|v| v.as_str()).map(str::to_string))
+            .or_else(|| {
+                token_body
+                    .get("user_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
             .ok_or("could not determine the GOG account username")?;
 
         // 5. Build galaxy_tokens.json: the token response, plus the client_id/client_secret keys the existing
@@ -107,10 +116,13 @@ impl Provider for Gog {
         let mut token = token_body;
         token["client_id"] = serde_json::Value::String(CLIENT_ID.to_string());
         token["client_secret"] = serde_json::Value::String(CLIENT_SECRET.to_string());
-        let bytes = serde_json::to_vec_pretty(&token)
-            .map_err(|e| format!("serializing token: {e}"))?;
+        let bytes =
+            serde_json::to_vec_pretty(&token).map_err(|e| format!("serializing token: {e}"))?;
 
-        Ok(Credential { username, token: bytes })
+        Ok(Credential {
+            username,
+            token: bytes,
+        })
     }
 }
 
@@ -149,7 +161,10 @@ mod tests {
             extract_code("https://embed.gog.com/on_login_success?origin=client&code=ABC123&x=1"),
             "ABC123"
         );
-        assert_eq!(extract_code("https://www.gog.com/on_login_success?code=DEF456"), "DEF456");
+        assert_eq!(
+            extract_code("https://www.gog.com/on_login_success?code=DEF456"),
+            "DEF456"
+        );
         assert_eq!(extract_code("PLAINCODE"), "PLAINCODE");
     }
 }

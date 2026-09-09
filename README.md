@@ -60,6 +60,7 @@ that work there.
 | `outlast` | **x86_64-windows** | **x86_64-windows** |
 | `outlast-2` | **x86_64-windows** | **x86_64-windows** |
 | `papers-please` | **x86_64-windows** | **x86_64-windows** |
+| `potionomics` | **x86_64-windows** | **x86_64-windows** |
 | `prison-architect` | **x86_64-windows** | **x86_64-windows** |
 | `skyrim-se` | **x86_64-windows** | **x86_64-windows** |
 | `stellaris` | **x86_64-linux** | **x86_64-linux** |
@@ -87,6 +88,7 @@ game with entries under only one column can only be built by someone who owns it
 | `outlast` | x86_64-windows | — |
 | `outlast-2` | x86_64-windows | — |
 | `papers-please` | x86_64-windows | — |
+| `potionomics` | — | x86_64-windows |
 | `prison-architect` | x86_64-windows | — |
 | `skyrim-se` | x86_64-windows | — |
 | `stellaris` | — | x86_64-linux |

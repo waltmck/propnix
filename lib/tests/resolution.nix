@@ -43,6 +43,7 @@ let
     outlast = "gog/x86_64-windows/${wineB}";
     outlast-2 = "gog/x86_64-windows/${wineB}";
     papers-please = "gog/x86_64-windows/${wineB}";
+    potionomics = "steam/x86_64-windows/${wineB}";
     prison-architect = "gog/x86_64-windows/${wineB}";
     skyrim-se = "gog/x86_64-windows/${wineB}";
     stellaris = "steam/x86_64-linux/${linuxB}";

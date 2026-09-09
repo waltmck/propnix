@@ -13,6 +13,7 @@
 #   * a BLOCKED check — one that resolved no upstream target at all — still opens an issue, still says
 #     why, and still settles into `unchanged` week after week instead of notifying;
 #   * closing is a close with `--reason completed`, and closing a game with no open issue is a no-op;
+#   * a maintainers cc (PIN_MAINTAINERS) renders as plain text and never causes a write by itself;
 #   * `gh issue reopen` is NEVER invoked, and the lookup NEVER goes through the search index.
 #
 # Usage: ci/pin-issue-test.sh      (needs bash, jq; no network, no credentials, no gh)
@@ -239,7 +240,24 @@ grep -E 'propnix pin [a-z-]+ *>' <<<"$body" \
   && fail "the update command must not redirect over versions.json — the tool writes it in place"
 echo "  ok  15. the documented update command writes in place"
 
-# ── 16. structural invariants ───────────────────────────────────────────────────────────────────────
+# ── 16. a maintainers cc from the workflow lands in the body — as plain text, never as a write ──────
+body=$(PIN_MAINTAINERS="@alice @bob" "$here/pin-issue.sh" render factorio "$work/check.json")
+grep -q 'Cc @alice @bob' <<<"$body" || fail "PIN_MAINTAINERS should render as a cc line"
+grep -q '`@alice' <<<"$body" && fail "handles must not be backticked — a code span suppresses the mention"
+"$here/pin-issue.sh" render factorio "$work/check.json" | grep -q '^Cc ' \
+  && fail "no PIN_MAINTAINERS -> no cc line"
+# The no-notification invariant survives the cc: same target, cc present -> still zero writes. (If it
+# did not, every game with a maintainer would notify them every Monday about a months-old lag.)
+cat > "$work/open.json" <<'EOF'
+[{"number":42,"body":"<!-- propnix-pin: game=factorio target=222 -->\nold body"}]
+EOF
+printf '<!-- propnix-pin: game=factorio target=222 -->\nold body\n' > "$work/body"; reset
+out=$(PIN_MAINTAINERS="@alice" "$here/pin-issue.sh" open-or-edit factorio "$work/check.json" 2>/dev/null)
+[ "$out" = unchanged ] || fail "a maintainers cc must not defeat the unchanged-target guard, got '$out'"
+[ "$(calls 'issue edit')" = 0 ] || fail "cc present but target unchanged -> still no writes"
+echo "  ok  16. maintainers cc renders plain and never causes a write on its own"
+
+# ── 17. structural invariants ───────────────────────────────────────────────────────────────────────
 grep -q 'issue reopen' "$log" && fail "gh issue reopen was invoked"
 # Only NON-COMMENT lines count: both banned strings appear in prose that explains why they are banned.
 # `grep -n` prefixes each hit with "N:", so the comment filter has to allow for that prefix — matching
@@ -250,6 +268,6 @@ noncomment() { grep -n "$1" "$2" | grep -v ':[[:space:]]*#' || true; }
 [ -z "$(noncomment 'gh issue list' "$here/pin-issue.sh")" ] \
   || fail "pin-issue.sh uses 'gh issue list', which routes through the eventually-consistent search index"
 grep -q 'state=open' "$here/pin-issue.sh" || fail "the lookup must constrain to state=open"
-echo "  ok  16. no reopen path, no search-index lookup, state=open enforced"
+echo "  ok  17. no reopen path, no search-index lookup, state=open enforced"
 
-echo "pin-issue-test: all 16 transitions OK"
+echo "pin-issue-test: all 17 transitions OK"

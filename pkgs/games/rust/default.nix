@@ -211,6 +211,7 @@ mkApp (
   { config, lib, ... }:
   {
     pname = "rust";
+    maintainers = [ "waltmck" ];
     appid = "rust";
     name = "Rust";
 

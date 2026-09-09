@@ -15,6 +15,7 @@ mkApp (
   { config, lib, ... }:
   {
     pname = "iron-lung";
+    maintainers = [ "waltmck" ];
     appid = "iron-lung";
     name = "Iron Lung";
 

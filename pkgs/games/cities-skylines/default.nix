@@ -46,6 +46,7 @@ let
 in
 mkApp {
   pname = "cities-skylines";
+  maintainers = [ "waltmck" ];
   appid = "cities-skylines";
   name = "Cities: Skylines";
 

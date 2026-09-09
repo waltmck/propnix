@@ -64,4 +64,9 @@ in
   # permanently. Evaluating it here instead keeps the gate (a malformed pin — an unknown key, a bad SRI,
   # a coerced JSON type — still fails) without dropping brokenness, and without reaching for `--impure`.
   inherit (scope) games;
+
+  # name → bare GitHub maintainer handles (the `maintainers` option), evaluated in one shot for the pin
+  # workflows' @mentions (auto-update.yml). Read off `config` through the lazyDerivation spine, so it
+  # forces neither axis resolution nor the derivation — broken titles resolve too.
+  maintainers = lib.mapAttrs (_: game: game.config.maintainers) scope.games;
 }

@@ -16,6 +16,7 @@
 }:
 mkApp {
   pname = "baby-steps";
+  maintainers = [ "waltmck" ];
   appid = "baby-steps";
   name = "Baby Steps";
 

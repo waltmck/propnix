@@ -110,6 +110,7 @@ let
 in
 mkApp {
   pname = "civilization-6";
+  maintainers = [ "waltmck" ];
   appid = "civilization-6";
   name = "Sid Meier's Civilization VI";
 

@@ -62,6 +62,7 @@ mkApp (
   in
   {
     pname = "skyrim-se";
+    maintainers = [ "waltmck" ];
     appid = "skyrim-se";
     name = "Skyrim Special Edition";
 

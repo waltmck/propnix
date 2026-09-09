@@ -89,6 +89,7 @@ mkApp (
   { config, ... }:
   {
     pname = "baldurs-gate-3";
+    maintainers = [ "waltmck" ];
     appid = "baldurs-gate-3";
     name = "Baldur's Gate 3";
 

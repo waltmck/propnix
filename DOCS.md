@@ -246,8 +246,8 @@ Drop a directory under `pkgs/games/<name>/` — it's auto-discovered into the sc
   select any other pinned pair), `fetchInfo = (lib.importJSON ./versions.json).fetchInfo;`, and `exe`.
   Everything else is optional and may be set conditionally on the axes: `exeArgs`, `workingDir`,
   `saveBinds` (HOME-relative `dst` on every backend), `maskFiles` (runtime whiteouts for dlopen'd store
-  DLLs), `env`, `icon.{png,symbolic,auto}`, `broken.{systems,reason}`, `dlc.available`, plus the
-  backend namespaces below.
+  DLLs), `env`, `icon.{png,symbolic,auto}`, `broken.{systems,reason}`, `maintainers` (bare GitHub
+  usernames — see *Keeping pins current*), `dlc.available`, plus the backend namespaces below.
 - **`wine-tuning.nix`** (as `wine = import ./wine-tuning.nix;`, or inline) — per-game knobs layered over
   the base layer in `lib/backends/wine/defaults.nix`: scalar knobs authored `{ value; reason; }` (the
   reason is enforced at eval), `galaxyStubDlls`, `extraSystem32`, `userReg`/`systemReg`/`userdefReg`,
@@ -305,6 +305,14 @@ report carrying the tool's own explanation, so the issue still opens and says wh
 **fails** does not abort the run either: it is recorded, every other game's work still lands, and a final
 step turns the run red afterwards. Every game it does update becomes its **own commit** in the PR
 (`pkgs/games/<game>: pin -> <version>`), so one bad pin can be reverted without touching the rest.
+
+A game that names `maintainers` (bare GitHub usernames, in its `default.nix`) has them tagged wherever
+its pin surfaces: **@mentioned** on their game's row of the weekly PR when it was refreshed, and **cc'd
+on its issue** when only a human can move it — on open and on a genuine upstream move, never on the
+weekly no-op re-check. A maintainer who is also a repository **collaborator** additionally gets a review
+request on the PR; GitHub refuses review requests to anyone else, so non-collaborators are reached by the
+mention alone. The lookup is one pure eval of `ci.<system>.maintainers` and is best-effort: if it fails,
+the refresh still runs, just without the tags.
 
 ### Opting a game out, or holding it at a version
 

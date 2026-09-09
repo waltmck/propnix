@@ -74,6 +74,7 @@ mkApp (
   { config, ... }:
   {
     pname = "space-engineers";
+    maintainers = [ "waltmck" ];
     appid = "space-engineers";
     name = "Space Engineers";
 

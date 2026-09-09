@@ -34,6 +34,7 @@ mkApp (
   { config, lib, ... }:
   {
     pname = "homeworld-rm";
+    maintainers = [ "waltmck" ];
     appid = "homeworld-rm";
     name = "Homeworld Remastered Collection";
     # GOG-Windows, 32-bit (i386).

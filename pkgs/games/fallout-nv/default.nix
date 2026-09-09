@@ -29,6 +29,7 @@
 }:
 mkApp {
   pname = "fallout-nv";
+  maintainers = [ "waltmck" ];
   appid = "fallout-nv";
   name = "Fallout: New Vegas";
 

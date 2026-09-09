@@ -99,6 +99,7 @@
 }:
 mkApp {
   pname = "witcher-3";
+  maintainers = [ "waltmck" ];
   appid = "witcher-3";
   name = "The Witcher 3: Wild Hunt";
 

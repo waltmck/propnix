@@ -34,6 +34,7 @@ mkApp (
   in
   {
     pname = "hollow-knight";
+    maintainers = [ "waltmck" ];
     appid = "hollow-knight";
     name = "Hollow Knight";
 

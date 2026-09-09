@@ -44,6 +44,7 @@ mkApp (
   { config, ... }:
   {
     pname = "victoria-3";
+    maintainers = [ "waltmck" ];
     appid = "victoria-3";
     name = "Victoria 3";
 

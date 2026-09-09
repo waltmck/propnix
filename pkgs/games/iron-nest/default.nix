@@ -24,6 +24,7 @@
 }:
 mkApp {
   pname = "iron-nest";
+  maintainers = [ "waltmck" ];
   appid = "iron-nest";
   name = "IRON NEST";
 

@@ -20,6 +20,7 @@
 }:
 mkApp {
   pname = "hollow-knight-silksong";
+  maintainers = [ "waltmck" ];
   appid = "hollow-knight-silksong";
   name = "Hollow Knight: Silksong";
 

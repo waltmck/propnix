@@ -11,6 +11,7 @@
 }:
 mkApp {
   pname = "prison-architect";
+  maintainers = [ "waltmck" ];
   appid = "prison-architect";
   name = "Prison Architect";
   fetchInfo = (lib.importJSON ./versions.json).fetchInfo;

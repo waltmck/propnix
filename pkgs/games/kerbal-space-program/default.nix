@@ -20,6 +20,7 @@ mkApp (
   { config, lib, ... }:
   {
     pname = "kerbal-space-program";
+    maintainers = [ "waltmck" ];
     appid = "kerbal-space-program";
     name = "Kerbal Space Program";
 

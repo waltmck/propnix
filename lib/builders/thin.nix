@@ -67,6 +67,8 @@
   splash ? true,
   singleInstance ? true,
   windowWatch ? true,
+  # Bare GitHub usernames → meta.maintainers (see mkLauncherPackage).
+  maintainers ? [ ],
   # `{ systems; reason; }` → meta.broken (see mkLauncherPackage).
   broken ? {
     systems = [ ];
@@ -221,6 +223,7 @@ mkLauncherPackage {
     configFile
     iconTree
     broken
+    maintainers
     ;
   iconSymbolic = icon.symbolic;
   description = "${name} — propnix native/${backend} app";

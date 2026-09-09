@@ -109,6 +109,7 @@ mkApp (
   in
   {
     pname = "shadow-of-mordor";
+    maintainers = [ "waltmck" ];
     appid = "shadow-of-mordor";
     name = "Middle-earth: Shadow of Mordor";
 

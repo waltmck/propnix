@@ -72,6 +72,8 @@
     systems = [ ];
     reason = null;
   },
+  # Bare GitHub usernames → meta.maintainers (see mkLauncherPackage).
+  maintainers ? [ ],
   # DLC framework: `dlc` = the AVAILABLE set (name → overlay-tree derivation); `enabledDlc` = the selected
   # derivations (mkApp resolves names). Enabling flips the game mount from a read-only bind to a read-only
   # multi-lower OVERLAY (DLC-first), merging the trees at mount time with NO store copy of the base.
@@ -435,6 +437,7 @@ mkLauncherPackage {
     configFile
     iconTree
     broken
+    maintainers
     ;
   iconSymbolic = icon.symbolic;
   description = "${name} — propnix wine app (${backend})";

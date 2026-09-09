@@ -12,6 +12,7 @@
 }:
 mkApp {
   pname = "dont-starve";
+  maintainers = [ "waltmck" ];
   appid = "dont-starve";
   name = "Don't Starve";
 

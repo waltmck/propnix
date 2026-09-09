@@ -468,6 +468,28 @@ in
       };
     };
 
+    # ── maintainers ──
+    maintainers = lib.mkOption {
+      type = knobTypes.dedupList lib.types.str;
+      # NOT a strMatching refinement: dedupList overrides `listOf`'s merge, and per-element type checks
+      # live in the merge it replaced — a refined element type is silently never checked. Validate on
+      # read instead. Bare usernames: alphanumeric with inner hyphens, ≤39 chars — refusing the two
+      # realistic authoring mistakes, "@name" and an email address.
+      apply = map (
+        handle:
+        lib.throwIfNot (builtins.match "[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?" handle != null)
+          "propnix maintainers: '${handle}' is not a bare GitHub username (drop any leading @ or email domain; alphanumeric with inner hyphens, at most 39 chars)."
+          handle
+      );
+      default = [ ];
+      description = ''
+        GitHub usernames of whoever answers for this game → `meta.maintainers`. The pin workflows read
+        these (through `ci.<system>.maintainers`) to @mention: the weekly PR tags them on the row that
+        refreshed their game, and a pin only a human can move cc's them on its issue. A maintainer who
+        is also a repository collaborator gets a review request on the PR as well.
+      '';
+    };
+
     # ── extra game-dir trees ──
     extraLowers = lib.mkOption {
       type = knobTypes.dedupList lib.types.raw;

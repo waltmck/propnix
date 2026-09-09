@@ -46,6 +46,7 @@
 }:
 mkApp {
   pname = "repo";
+  maintainers = [ "waltmck" ];
   appid = "repo";
   name = "R.E.P.O.";
 

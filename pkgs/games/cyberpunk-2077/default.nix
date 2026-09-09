@@ -50,6 +50,7 @@ let
 in
 mkApp {
   pname = "cyberpunk-2077";
+  maintainers = [ "waltmck" ];
   appid = "cyberpunk-2077";
   name = "Cyberpunk 2077";
 

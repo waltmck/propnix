@@ -115,6 +115,25 @@ mkApp (
 
     fetchInfo = versions.fetchInfo;
 
+    # ── aarch64 NEEDED A WINE PATCH, AND THIS FILE IS NOT WHERE THE FIX LIVES ──────────────────────────
+    # PLAYS on both arches (aarch64 verified 2026-09-11). Recorded here because the failure looked like a
+    # packaging problem and is not: on a host with 16k pages the loader refused the image outright —
+    #
+    #     err:virtual:map_file_into_view unaligned shared mapping 0x141b55000-0x141b56000 not supported
+    #     err:module:map_image_into_view Could not map …ShadowOfMordor.exe shared section .SHARED
+    #     wine: failed to start …: c000007b
+    #
+    # ShadowOfMordor.exe carries an EIGHT-BYTE `.SHARED` section (MEM_SHARED|MEM_WRITE) at 0x141b55000,
+    # which is 0 mod 4096 and 4096 mod 16384. A writable shared section must be mmap'ed MAP_SHARED and
+    # mmap only places shared mappings on whole host pages, so wine could not map it and rejected the
+    # whole 54 GB game over one cross-instance variable. x86_64 never sees it: 4k pages make the address
+    # aligned by construction. Fixed in emulators/wine-hangover/patches/0007 (host-page-aligned shared
+    # sections, with a private-mapping fallback); this title takes the FALLBACK, because its 16k page also
+    # holds the tail of `.pdata` and the head of an executable section. The fallback logs at ERR that
+    # cross-process sharing of that range is lost, which for 8 bytes of multi-instance bookkeeping under a
+    # single-instance launcher costs nothing — but note propnix defaults WINEDEBUG=-all, so seeing it
+    # needs `PROPNIX_WINEDEBUG="err+all"`. Nothing about this belongs in a per-game knob.
+
     # See the header: the sole play task, and the sole executable, in either payload.
     exe = "x64/ShadowOfMordor.exe";
     # REQUIRED, not cosmetic — x64/default.archcfg addresses every asset archive as `..\<name>.arch05`.

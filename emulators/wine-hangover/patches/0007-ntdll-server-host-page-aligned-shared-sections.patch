@@ -1,0 +1,273 @@
+ntdll,server: map a PE shared section on a host with larger pages than the image.
+
+A writable shared PE section (IMAGE_SCN_MEM_SHARED | IMAGE_SCN_MEM_WRITE) must be mapped MAP_SHARED, and
+mmap() can only place a shared mapping on a whole host page. On a host whose pages are LARGER than the
+image's section alignment the two granularities disagree, and wine gives up on the image entirely:
+
+    err:virtual:map_file_into_view unaligned shared mapping 0x141b55000-0x141b56000 not supported
+    err:module:map_image_into_view Could not map L"C:\\game\\x64\\ShadowOfMordor.exe" shared section .SHARED
+    wine: failed to start L"C:\\game\\x64\\ShadowOfMordor.exe": c000007b
+
+That is Middle-earth: Shadow of Mordor on a 16k-page aarch64 host. Its `.SHARED` section is EIGHT BYTES
+at 0x141b55000 — which is 0 mod 4096 and 4096 mod 16384 — so a 54 GB game does not start because of one
+8-byte cross-instance variable. The same image loads on any 4k host, where the address is aligned by
+construction. This is not a regression: before the host-page-size abstraction (2025-03-25) wine attempted
+the mmap, the kernel refused with EINVAL, and `if (flags & MAP_SHARED) return STATUS_INVALID_PARAMETER;`
+produced the same dead end. The abstraction only replaced the failed syscall with a predictive check, and
+added the diagnostic that makes the cause legible.
+
+Two changes, in order of preference at runtime.
+
+1. KEEP THE SECTION SHARED WHERE THAT IS POSSIBLE. The backing store for shared sections is a temp file
+   the SERVER creates and lays out itself (build_shared_mapping), so the file-offset side of the
+   congruence is ours to pick. Place every shared section at an offset congruent to its virtual address
+   modulo the host page size, and the client can round address and offset down together and map the
+   ENCLOSING host pages. On a 4k host the congruence already holds — addresses are multiples of the
+   (>= 4k) section alignment and every map_size is rounded to it — so no padding is emitted and the file
+   layout is byte-for-byte what it was.
+
+   The client only does this when the extra bytes belong to NOBODY ELSE (shared_section_is_page_isolated):
+   they come from the shared file, so another section sharing the host page would have its contents
+   replaced and its protection and cross-process semantics changed with them. Shadow of Mordor does not
+   qualify — `.pdata` ends and an executable `text` section begins inside the same 16k page — which is
+   exactly why the check is a check and not an assumption.
+
+2. OTHERWISE MAP IT PRIVATELY, AND SAY SO. When the shared mapping cannot be placed, prefer a loadable
+   image to a correct one: fall into the read() path that already serves every misaligned NON-shared
+   section on such a host. The section then silently stops being shared between processes, which is the
+   kind of defect that surfaces much later as inexplicable behaviour, so it is reported at ERR level with
+   the range, both page sizes, and what was given up. Games that use a shared section for multi-instance
+   coordination (Shadow of Mordor's 8 bytes) do not care; one that genuinely shares state across
+   processes would, and the log line is how that gets diagnosed rather than guessed.
+
+   Gated on host_page_mask > page_mask: where the two match, an unmappable shared section means the file
+   or the fd is unusable and the image must still be refused.
+diff --git i/dlls/ntdll/unix/virtual.c w/dlls/ntdll/unix/virtual.c
+index 78434fa4..bd86ba92 100644
+--- i/dlls/ntdll/unix/virtual.c
++++ w/dlls/ntdll/unix/virtual.c
+@@ -2345,9 +2345,15 @@ done:
+  *
+  * Wrapper for mmap() to map a file into a view, falling back to read if mmap fails.
+  * virtual_mutex must be held by caller.
++ *
++ * `enclose_host_pages` lets the caller state that the bytes between the requested range and the host
++ * page boundaries around it belong to nobody else, so a mapping that cannot be placed at the image's own
++ * granularity may be placed on the enclosing host pages instead. Only map_image_into_view's writable
++ * shared sections pass TRUE, and only after checking that (see shared_section_is_page_isolated).
+  */
+ static NTSTATUS map_file_into_view( struct file_view *view, int fd, size_t start, size_t size,
+-                                    off_t offset, unsigned int vprot, BOOL removable )
++                                    off_t offset, unsigned int vprot, BOOL removable,
++                                    BOOL enclose_host_pages )
+ {
+     char *map_addr, *host_addr;
+     size_t map_size, host_size;
+@@ -2408,10 +2414,38 @@ static NTSTATUS map_file_into_view( struct file_view *view, int fd, size_t start
+         }
+     }
+ 
++    /* The range is not host-page aligned. If the caller vouched that the surrounding bytes up to the
++     * host page boundaries are nobody else's, map those enclosing pages instead — the backing file is
++     * laid out congruent to the address (see the server's shared_section_pos) precisely so that the
++     * offset can be rounded down by the same amount. This keeps a shared section SHARED on a host whose
++     * pages are larger than the image's, which is the only way to preserve its semantics there. */
++    if (enclose_host_pages && (flags & MAP_SHARED) &&
++        ((UINT_PTR)((char *)view->base + start) & host_page_mask) == (offset & (off_t)host_page_mask))
++    {
++        size_t delta = (char *)view->base + start - host_addr;
++        size_t enclosed = ROUND_SIZE( 0, delta + size, host_page_mask );
++
++        if (offset >= (off_t)delta && host_addr + enclosed <= (char *)view->base + view->size &&
++            mmap( host_addr, enclosed, prot, flags, fd, offset - delta ) != MAP_FAILED)
++            return STATUS_SUCCESS;
++    }
++
+     if (vprot & VPROT_WRITE)
+     {
+-        ERR( "unaligned shared mapping %p-%p not supported\n", map_addr, map_addr + map_size );
+-        return STATUS_INVALID_PARAMETER;
++        /* A writable shared section that cannot be mapped shared at all. On a host whose pages match the
++         * image's this means the file or the fd is unusable, and the image must not load. On a host with
++         * larger pages it is a property of the image's layout that no amount of retrying will change, so
++         * prefer a loadable game to a correct one and map the section PRIVATELY — but say so loudly,
++         * because the section silently stops being shared between processes, and that is exactly the kind
++         * of thing that surfaces much later as inexplicable behaviour. */
++        if (host_page_mask <= page_mask)
++        {
++            ERR( "unaligned shared mapping %p-%p not supported\n", map_addr, map_addr + map_size );
++            return STATUS_INVALID_PARAMETER;
++        }
++        ERR( "unaligned shared mapping %p-%p cannot be shared with host page size %u (image page size %u):"
++             " mapping it PRIVATELY, cross-process sharing of this range is LOST\n",
++             map_addr, map_addr + map_size, (unsigned int)host_page_mask + 1, (unsigned int)page_mask + 1 );
+     }
+ 
+     mprotect( map_addr, map_size, PROT_READ | PROT_WRITE );
+@@ -3026,6 +3060,53 @@ static IMAGE_BASE_RELOCATION *process_relocation_block( char *page, IMAGE_BASE_R
+ }
+ 
+ 
++/* offset of a writable shared section inside the shared temp file
++ *
++ * MUST match the server's shared_section_pos() byte for byte — the server lays the file out and the
++ * client reads it back by recomputing the same offsets. See the comment there for why the layout is
++ * congruent to each section's virtual address. */
++static inline off_t shared_section_pos( off_t end_of_prev, const IMAGE_SECTION_HEADER *sec )
++{
++    return end_of_prev + ((sec->VirtualAddress - end_of_prev) & host_page_mask);
++}
++
++
++/* can a writable shared section be mapped on the enclosing HOST pages without disturbing anything else?
++ *
++ * Rounding a section's span out to whole host pages is only safe when those extra bytes belong to no
++ * other section: they will be served from the shared temp file, so any section sharing the host page
++ * would have its contents replaced (and its protection and cross-process semantics changed with them).
++ * A game whose shared section sits alone in its host page therefore keeps working sharing; one whose
++ * shared section shares a host page with, say, the tail of .pdata and the head of a code section does
++ * not, and map_file_into_view falls back to a private mapping. */
++static BOOL shared_section_is_page_isolated( const IMAGE_SECTION_HEADER *sec, unsigned int nb_sec,
++                                             unsigned int idx, SIZE_T align_mask, SIZE_T total_size )
++{
++    SIZE_T lo, hi, i;
++
++    if (host_page_mask <= page_mask) return FALSE;  /* nothing to round out to */
++
++    lo = sec[idx].VirtualAddress & ~(SIZE_T)host_page_mask;
++    hi = lo + ROUND_SIZE( sec[idx].VirtualAddress,
++                          sec[idx].Misc.VirtualSize ? sec[idx].Misc.VirtualSize : sec[idx].SizeOfRawData,
++                          host_page_mask );
++    if (hi > total_size) return FALSE;  /* would map outside the image view */
++
++    for (i = 0; i < nb_sec; i++)
++    {
++        SIZE_T start, end, size;
++
++        if (i == idx) continue;
++        size = sec[i].Misc.VirtualSize ? sec[i].Misc.VirtualSize : sec[i].SizeOfRawData;
++        if (!size) continue;
++        start = sec[i].VirtualAddress;
++        end = start + ROUND_SIZE( 0, size, align_mask );
++        if (start < hi && end > lo) return FALSE;
++    }
++    return TRUE;
++}
++
++
+ /***********************************************************************
+  *           map_image_into_view
+  *
+@@ -3087,7 +3168,7 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
+ 
+         total_size = min( total_size, ROUND_SIZE( 0, st.st_size, page_mask ));
+         if (map_file_into_view( view, fd, 0, total_size, 0, VPROT_COMMITTED | VPROT_READ | VPROT_WRITECOPY,
+-                                removable ) != STATUS_SUCCESS) goto done;
++                                removable, FALSE ) != STATUS_SUCCESS) goto done;
+ 
+         /* check that all sections are loaded at the right offset */
+         if (nt->OptionalHeader.FileAlignment != nt->OptionalHeader.SectionAlignment) goto done;
+@@ -3110,6 +3191,7 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
+ 
+     for (i = pos = 0; i < nt->FileHeader.NumberOfSections; i++)
+     {
++        BOOL isolated;
+         static const SIZE_T sector_align = 0x1ff;
+         SIZE_T map_size, file_start, file_size, end;
+ 
+@@ -3139,8 +3221,15 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
+                             debugstr_us(nt_name), sec[i].Name, ptr + sec[i].VirtualAddress,
+                             sec[i].PointerToRawData, (int)pos, file_size, map_size,
+                             sec[i].Characteristics );
++            /* The shared file is laid out congruent to each section's address (server/mapping.c), so a
++             * misaligned section can still be mapped shared by rounding out to whole host pages — but
++             * only where those extra bytes are nobody else's. */
++            pos = shared_section_pos( pos, &sec[i] );
++            isolated = shared_section_is_page_isolated( sec, nt->FileHeader.NumberOfSections, i,
++                                                        align_mask, total_size );
+             if (map_file_into_view( view, shared_fd, sec[i].VirtualAddress, map_size, pos,
+-                                    VPROT_COMMITTED | VPROT_READ | VPROT_WRITE, FALSE ) != STATUS_SUCCESS)
++                                    VPROT_COMMITTED | VPROT_READ | VPROT_WRITE, FALSE,
++                                    isolated ) != STATUS_SUCCESS)
+             {
+                 ERR_(module)( "Could not map %s shared section %.8s\n", debugstr_us(nt_name), sec[i].Name );
+                 goto done;
+@@ -3156,7 +3245,7 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
+                 if (end > base)
+                     map_file_into_view( view, shared_fd, base, end - base,
+                                         pos + (base - sec[i].VirtualAddress),
+-                                        VPROT_COMMITTED | VPROT_READ | VPROT_WRITECOPY, FALSE );
++                                        VPROT_COMMITTED | VPROT_READ | VPROT_WRITECOPY, FALSE, FALSE );
+             }
+             pos += map_size;
+             continue;
+@@ -3178,7 +3267,7 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
+             end < file_start ||
+             map_file_into_view( view, fd, sec[i].VirtualAddress, file_size, file_start,
+                                 VPROT_COMMITTED | VPROT_READ | VPROT_WRITECOPY,
+-                                removable ) != STATUS_SUCCESS)
++                                removable, FALSE ) != STATUS_SUCCESS)
+         {
+             ERR_(module)( "Could not map %s section %.8s, file probably truncated\n",
+                           debugstr_us(nt_name), sec[i].Name );
+@@ -3584,7 +3673,7 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
+     if (res) goto done;
+ 
+     TRACE( "handle=%p size=%lx offset=%s\n", handle, size, wine_dbgstr_longlong(offset.QuadPart) );
+-    res = map_file_into_view( view, unix_handle, 0, size, offset.QuadPart, vprot, needs_close );
++    res = map_file_into_view( view, unix_handle, 0, size, offset.QuadPart, vprot, needs_close, FALSE );
+     if (res == STATUS_SUCCESS)
+     {
+         /* file mappings must always be accessible */
+diff --git i/server/mapping.c w/server/mapping.c
+index d61132e9..054a218a 100644
+--- i/server/mapping.c
++++ w/server/mapping.c
+@@ -599,6 +599,22 @@ static int find_committed_range( struct memory_view *view, file_pos_t start, mem
+     return 0;
+ }
+ 
++/* offset of a shared section inside the temp file, given the offset the previous one ended at
++ *
++ * The layout is ours to choose (the temp file is created here), and a client on a host whose pages are
++ * larger than the image's cannot mmap() a section whose address and file offset are incongruent modulo
++ * the HOST page size: it can only round both down to a host page boundary, which requires
++ * offset % host_page == address % host_page. So place every section at an offset congruent to its
++ * virtual address, padding with the zeroes create_temp_file() already gives us.
++ *
++ * On a host whose pages are 4k this is a no-op: section addresses are multiples of the (>= 4k) section
++ * alignment and every map_size is rounded to it, so the congruence already holds and no padding is
++ * emitted. The file layout there stays byte-for-byte what it was. */
++static inline off_t shared_section_pos( off_t end_of_prev, const IMAGE_SECTION_HEADER *sec )
++{
++    return end_of_prev + ((sec->VirtualAddress - end_of_prev) & host_page_mask);
++}
++
+ /* allocate and fill the temp file for a shared PE image mapping */
+ static int build_shared_mapping( struct mapping *mapping, size_t align_mask, int fd,
+                                  IMAGE_SECTION_HEADER *sec, unsigned int nb_sec )
+@@ -623,10 +639,12 @@ static int build_shared_mapping( struct mapping *mapping, size_t align_mask, int
+         {
+             get_section_sizes( &sec[i], align_mask, &map_size, &read_pos, &file_size );
+             if (file_size > max_size) max_size = file_size;
+-            total_size += map_size;
++            total_size = shared_section_pos( total_size, &sec[i] ) + map_size;
+         }
+     }
+     if (!total_size) return 1;  /* nothing to do */
++    /* whole host pages: a client rounding the last section out to a host page must not map past EOF */
++    total_size = round_size( total_size, host_page_mask );
+ 
+     if ((mapping->shared = get_shared_file( mapping->fd ))) return 1;
+ 
+@@ -645,8 +663,8 @@ static int build_shared_mapping( struct mapping *mapping, size_t align_mask, int
+         if (!(sec[i].Characteristics & IMAGE_SCN_MEM_SHARED)) continue;
+         if (!(sec[i].Characteristics & IMAGE_SCN_MEM_WRITE)) continue;
+         get_section_sizes( &sec[i], align_mask, &map_size, &read_pos, &file_size );
+-        write_pos = shared_pos;
+-        shared_pos += map_size;
++        write_pos = shared_section_pos( shared_pos, &sec[i] );
++        shared_pos = write_pos + map_size;
+         if (!sec[i].PointerToRawData || !file_size) continue;
+         toread = file_size;
+         while (toread)

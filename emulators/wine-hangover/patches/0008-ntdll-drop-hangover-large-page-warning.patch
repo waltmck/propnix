@@ -1,0 +1,43 @@
+ntdll: drop hangover's large-page warning — propnix supports that configuration.
+
+Hangover prints this from setup_config_dir() on every launch whenever the host page size is not 4k:
+
+    You are running with the wrong page size, expect problems!
+    Please also consult https://github.com/AndreRH/hangover/wiki/Page-Size
+
+For hangover that is fair warning: 4k is its supported configuration and anything else is the user's
+problem. For propnix it is backwards. 16k IS the page size of the Apple Silicon hosts this tree targets,
+it is the configuration the emulator stack is built and tested for, and the patches that make it work are
+carried right here — the thread-stack guard headroom (0001), the host-page-aligned shared sections
+(0007), and FEX's own 4k-guard-page assumption, patched in emulators/fex.
+
+So the message reports our INTENDED configuration as a fault, on every single launch of every single
+game, above whatever output actually matters. The cost is not the two lines; it is that a reader who sees
+"expect problems!" before every game learns to skip wine's output, and then misses the diagnostic that is
+genuinely about their problem. Anything page-size related that is still broken must say so at its own
+call site, with its own range and numbers, the way 0007's fallback does.
+
+Dropped rather than silenced behind a flag: a warning nobody is ever meant to see is dead code, and the
+comment left in its place records why the configuration is deliberate for the next reader of this
+function.
+diff --git i/dlls/ntdll/unix/server.c w/dlls/ntdll/unix/server.c
+index 14b8bc77..a6f5e6e1 100644
+--- i/dlls/ntdll/unix/server.c
++++ w/dlls/ntdll/unix/server.c
+@@ -1325,10 +1325,12 @@ static int setup_config_dir(void)
+     struct stat st;
+     int fd_cwd = open( ".", O_RDONLY );
+ 
+-#ifdef _SC_PAGESIZE
+-    if (sysconf( _SC_PAGESIZE ) != 4096)
+-        MESSAGE("You are running with the wrong page size, expect problems!\nPlease also consult https://github.com/AndreRH/hangover/wiki/Page-Size\n");
+-#endif
++    /* Hangover warns here when the host page size is not 4k. propnix SUPPORTS that configuration
++     * deliberately — 16k is the page size of the Apple Silicon hosts this tree targets — and carries the
++     * patches that make it work (large-page stack guards, host-page-aligned shared sections, the FEX
++     * guard-page fix). A warning on every single launch of every game therefore reports our intended
++     * configuration as a fault, which trains the reader to ignore wine's output. Anything page-size
++     * related that is still genuinely broken must say so at its own call site instead. */
+ 
+     if (chdir( config_dir ) == -1)
+     {

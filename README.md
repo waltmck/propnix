@@ -54,10 +54,10 @@ that work there.
 | `fallout-nv` | **i386-windows** | **i386-windows** |
 | `hollow-knight` | **x86_64-linux**, x86_64-windows | **x86_64-linux**, x86_64-windows |
 | `hollow-knight-silksong` | **x86_64-windows** | **x86_64-windows** |
-| `homeworld-rm` | — | **i386-windows** |
-| `iron-lung` | — | **x86_64-windows** |
+| `homeworld-rm` | **i386-windows** | **i386-windows** |
+| `iron-lung` | **i386-windows** | **x86_64-windows** |
 | `iron-nest` | **x86_64-windows** | **x86_64-windows** |
-| `kerbal-space-program` | — | **x86_64-windows** |
+| `kerbal-space-program` | **i386-windows** | **x86_64-windows** |
 | `no-mans-sky` | **x86_64-windows** | **x86_64-windows** |
 | `outlast` | **x86_64-windows** | **x86_64-windows** |
 | `outlast-2` | **x86_64-windows** | **x86_64-windows** |

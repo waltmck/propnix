@@ -33,12 +33,6 @@ mkApp (
     # The GOG build ships a 64-bit-only tree: KSP_x64.exe is the goggame.info isPrimary FileTask (there is no
     # 32-bit KSP.exe at the root). Launcher.exe is the separate Private Division launcher, not the game.
     exe = "KSP_x64.exe";
-    # Broken on aarch64: the Unity/Mono payload gets past mscorlib (seeded writable Managed tmpfs) and renders
-    # the loading screen, but ~90% of launches the main thread dies at the main-menu canvas build via a FEX
-    # codegen bug (wild write → recursive AV). Needs an upstream FEX fix (see the ksp-fex-blockers note); native
-    # x86_64 wine is unaffected, so the package still builds and runs there.
-    broken.systems = [ "aarch64-linux" ];
-    broken.reason = "FEX codegen bug crashes the Unity/Mono menu build on aarch64 (renders loading screen, then dies); needs upstream FEX. Runs on native x86_64.";
 
     # Force FULLSCREEN at the compositor's mode by maintaining KSP's own settings.cfg (the game overrides
     # Unity's screen prefs from it, so the `presets.unity.fullscreen` preset cannot do this job here — see

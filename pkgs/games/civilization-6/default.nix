@@ -134,6 +134,8 @@ mkApp {
   # against this payload: nine sizes come out, 16px through 256px. Extraction runs at BUILD time against
   # `head payloads` = the binaries depot, which is the reason that depot leads the fetchInfo list.
   icon.auto = true;
+  # Symbolic vendored (CC BY-SA 4.0): the series' roman-numeral "VI" in a rounded frame.
+  icon.symbolic = ./civilization-6-symbolic.svg;
 
   # ── ONLINE: left at the schema default (true), deliberately ──────────────────────────────────────────
   # Stated rather than defaulted silently, because for a Steam title with an entitlement shim the reflex

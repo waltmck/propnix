@@ -61,28 +61,6 @@ mkApp (
     # swallows its own `galaxy::api::IError` C++ exceptions during init and the game proceeds to render.
     # Homeworld RM's single-player campaigns need no network; multiplayer does, and is out of scope here.
     online = false;
-    # BROKEN on aarch64 — but the DIAGNOSIS that produced this flag has been RETRACTED, so the flag is now a
-    # "not re-tested since the cause was found" marker, not a standing verdict. It read: with the full 32-bit
-    # enablement in place (wowbox64 + a populated syswow64 + the x86 WinSxS manifests in wine-prefix-lower,
-    # the writable game-dir overlay, graphics=x11 and the platform-default d3d=wined3d) HomeworldRM.exe gets
-    # deep into init and then dies with an EXCEPTION_ACCESS_VIOLATION on BOTH WoW64 i386 emulators at
-    # DIFFERENT sites — FEX (libwow64fex) on an EXECUTE at eip=0x008E6060 "a corrupted indirect-branch target
-    # in the exe", box64 (wowbox64) earlier on a near-null READ at eip=0x006E4E72 — and two different fault
-    # sites on two emulators was read as an x86-on-ARM64 codegen/SEH bug.
-    #
-    # 2026-09-03, x86_64-linux: the FEX signature reproduced EXACTLY — same eip 0x008E6060, same execute
-    # fault — on NATIVE WoW64, with no FEX and no box64 anywhere in the process. So it was never emulator
-    # codegen. eip 0x008E6060 is not a corrupted branch target: it is the address of the GOG client-ID
-    # string literal "48201844549712537" in .rdata, and the game reached it because the i386 galaxy-stub
-    # returned from a __thiscall vtable slot without popping its arguments (wine-tuning.nix has the
-    # disassembly). The stub row is gone now, and on x86_64 the game maps its window and runs.
-    #
-    # What is NOT yet known is whether aarch64 still fails: this host cannot test it, and box64's separate
-    # near-null read at eip=0x006E4E72 (which is inside the same setjmp-heavy init the stub crash sat in,
-    # `__regs__setjmp3 … eip=006e4e72`) has no independent explanation. Keep the flag until someone re-runs
-    # it on the ARM box WITHOUT the stub row and WITH `workingDir` set; expect it to want deleting.
-    broken.systems = [ "aarch64-linux" ];
-    broken.reason = "Not re-tested on aarch64 since the cause of its EXCEPTION_ACCESS_VIOLATION was found. The FEX evidence this flag rested on (execute-AV at exe eip 0x8E6060, blamed on x86-on-ARM64 codegen) reproduced identically under NATIVE x86_64 WoW64 and turned out to be the i386 galaxy-stub returning from a __thiscall vtable slot without popping its arguments — fixed by dropping the stub row. box64's separate near-null read at eip 0x6E4E72 is unexplained and may well be downstream of the same bug. Re-run on aarch64 and delete this if it renders; x86_64 does.";
 
     # Run setup.sh before launch: generate the engine's `commandLine.txt` options file carrying the live
     # display resolution (`w`/`h`) + `fullscreen`. WITHOUT IT the game starts at 1920x1080 — MEASURED, not

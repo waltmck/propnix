@@ -258,6 +258,8 @@ mkApp (
     # Full-colour icon from RustClient.exe's own PE resources — verified present with `wrestool -l`: a
     # group-icon (type 14, name 103) over nine raster sizes, the largest a 256px 270 KB entry.
     icon.auto = true;
+    # Symbolic vendored (CC BY-SA 4.0).
+    icon.symbolic = ./rust-symbolic.svg;
 
     # De-store-integration: the client ships `RustClient_Data/Plugins/x86_64/steam_api64.dll`, and steam.emu
     # union-replaces it with the gbe_fork shim (the settings tree ranks above the payload in the wine game

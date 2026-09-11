@@ -29,7 +29,8 @@
 #   * `workingDir` — debug.log opens with four `virtualfilesystem_physfs.cpp:460: Mounted Data:` lines
 #     (C:/game/{clausewitz,jomini,platform_specific_game_data,game}), i.e. the VFS candidate set resolved.
 #   * `saveBinds`  — the bound dir fills with `pdx_settings.json`, `logs/`, `shadercache/` (6840 files on a
-#     first run), `crashes/`, `dumps/`, `exceptions/`. Nothing landed in a sibling.
+#     first run), `crashes/`, `dumps/`, `exceptions/`. Nothing landed in a sibling. (The `shadercache/`
+#     subtree is now bound back out to `$PROPNIX_CACHE` — it is derived data; see the second saveBinds row.)
 #
 #   nix run .#victoria-3 --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64-linux or x86_64-linux
 {
@@ -120,11 +121,32 @@ mkApp (
     # VERIFIED at runtime (the check skyrim-se's cautionary tale calls for — there the GOG build used a
     # differently SUFFIXED folder and the first guess silently dropped saves). After a launch to the menu
     # the bound dir holds `pdx_settings.json`, `logs/` (the 21 Clausewitz logs), `shadercache/dx11/`,
-    # `crashes/`, `dumps/` and `exceptions/`; no sibling directory is created.
+    # `crashes/`, `dumps/` and `exceptions/`; no sibling directory is created. Of those, only
+    # `shadercache/` is routed elsewhere (the row below); the diagnostics stay here deliberately — the
+    # logs being host-visible beside the saves is what makes a regression debuggable (see the tail).
     saveBinds = [
       {
         src = "$PROPNIX_SAVE_DIR/$PROPNIX_APPID";
         dst = "Documents/Paradox Interactive/Victoria 3";
+      }
+      # …with the SHADER CACHE redirected back out of it. The engine compiles its ps_5_0 HLSL at runtime
+      # (see blocker 2) and caches the result under `shadercache/dx11/` — 6840 files on a first run, and
+      # every one of them DERIVED: delete the dir and the next launch rebuilds it from the payload, which
+      # is precisely what `$PROPNIX_CACHE` ($XDG_CACHE_HOME/propnix/victoria-3) is for. Left in the save
+      # row it would ride along in whatever the user backs up or syncs, next to the saves it has nothing
+      # to do with — and it is invalidated by a driver or DXVK bump anyway, so a restored copy is worth
+      # nothing. Same reasoning, and the same dir, as the DXVK/vkd3d caches the launcher already puts
+      # there, and as factorio's atlas/prototype caches (pkgs/games/factorio).
+      #
+      # A DIRECTORY row, not factorio's per-file shape: Clausewitz keeps its cache in a subtree of its own
+      # rather than interleaved with the saves, so one bind routes all of it and any future backend dir
+      # (the `dx11` sibling a D3D12/Vulkan build would add) lands in the cache too, with no second row.
+      # Nested under the row above ON PURPOSE and supported directly: propnix-mount sorts parent-first and
+      # stubs a missing child mountpoint into the parent's own child skeleton, so `shadercache` exists
+      # inside the view WITHOUT an empty stub dir appearing in the host save dir.
+      {
+        src = "$PROPNIX_CACHE/shadercache";
+        dst = "Documents/Paradox Interactive/Victoria 3/shadercache";
       }
     ];
 

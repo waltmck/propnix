@@ -100,7 +100,13 @@ pub fn materialize(config_path: &Path) -> Result<(), String> {
         .map_err(|e| format!("opening store root {}: {e}", cfg.root))?;
 
     // 2. The non-secret pointer, root-owned 0644.
-    soft!(write_root_file(root.as_raw_fd(), "credentials.toml", cfg.pointer_body.as_bytes(), uid, meta_gid));
+    soft!(write_root_file(
+        root.as_raw_fd(),
+        "credentials.toml",
+        cfg.pointer_body.as_bytes(),
+        uid,
+        meta_gid
+    ));
 
     // 3. Install every declared token, tracking which ones actually materialized. `declared` is the set the
     //    config NAMES; `installed` is the subset that reached disk as a real declarative (root-owned) token.
@@ -130,7 +136,12 @@ pub fn materialize(config_path: &Path) -> Result<(), String> {
     //    but NOT declared now; prune removes only those, and only from ROOT-OWNED account dirs, so a
     //    user-owned imperative token can never be deleted even if a manifest entry ever named its path.
     let old_manifest: BTreeSet<String> = std::fs::read_to_string(&cfg.manifest_path)
-        .map(|s| s.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
+        .map(|s| {
+            s.lines()
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default();
     let to_remove: Vec<String> = old_manifest.difference(&declared).cloned().collect();
     // `kept` MUST reach the manifest even when the prune reports failure — keeping the unremovable entry
@@ -149,8 +160,7 @@ pub fn materialize(config_path: &Path) -> Result<(), String> {
     // (kept even if this run's re-copy transiently failed) ∪ freshly installed ∪ entries we tried to drop
     // but could not remove (still on disk, still managed — retried next generation). A newly-declared entry
     // whose install failed is deliberately absent: nothing was materialized, so it is not yet declarative.
-    let mut manifest: BTreeSet<String> =
-        old_manifest.intersection(&declared).cloned().collect();
+    let mut manifest: BTreeSet<String> = old_manifest.intersection(&declared).cloned().collect();
     manifest.extend(installed);
     manifest.extend(kept_failed);
     soft!(write_manifest(&cfg.manifest_path, &manifest, uid, meta_gid));
@@ -177,7 +187,9 @@ pub fn materialize(config_path: &Path) -> Result<(), String> {
             failed = true;
             continue;
         }
-        soft!(ensure_type_dir(root.as_raw_fd(), t, uid, build_gid).map(|_| ()).map_err(|e| format!("{t}: {e}")));
+        soft!(ensure_type_dir(root.as_raw_fd(), t, uid, build_gid)
+            .map(|_| ())
+            .map_err(|e| format!("{t}: {e}")));
     }
     let type_dirs = match read_dir_names(root.as_raw_fd()) {
         Ok(names) => names,
@@ -246,13 +258,24 @@ fn ensure_root_dir(root: &str, uid: u32, gid: u32) -> Result<(), String> {
 
 /// Write a world-readable non-secret file directly under the (trusted) store root: atomic sibling temp +
 /// `renameat`, `O_NOFOLLOW` throughout, 0644 owner:meta_group.
-fn write_root_file(root_fd: RawFd, name: &str, body: &[u8], uid: u32, gid: u32) -> Result<(), String> {
+fn write_root_file(
+    root_fd: RawFd,
+    name: &str,
+    body: &[u8],
+    uid: u32,
+    gid: u32,
+) -> Result<(), String> {
     write_file_at(root_fd, name, body, 0o644, uid, gid).map_err(|e| format!("writing {name}: {e}"))
 }
 
 /// Write the declarative manifest (a SIBLING of the store root): one managed store-relative path per line,
 /// world-readable, root-owned. Its directory is root-controlled, so a same-dir temp + rename is enough.
-fn write_manifest(manifest_path: &str, managed: &BTreeSet<String>, uid: u32, gid: u32) -> Result<(), String> {
+fn write_manifest(
+    manifest_path: &str,
+    managed: &BTreeSet<String>,
+    uid: u32,
+    gid: u32,
+) -> Result<(), String> {
     let body: String = managed.iter().map(|l| format!("{l}\n")).collect();
     let path = Path::new(manifest_path);
     let dir = path
@@ -285,20 +308,25 @@ fn install_cred(root_fd: RawFd, c: &CredEntry, uid: u32, build_gid: u32) -> Resu
     check_component("username", &c.username)?;
     check_component("tokenFile", &c.file)?;
     if c.file.starts_with('.') && c.file.ends_with(".tmp") {
-        return Err(format!("{who}: tokenFile {:?} collides with the temp-reap pattern", c.file));
+        return Err(format!(
+            "{who}: tokenFile {:?} collides with the temp-reap pattern",
+            c.file
+        ));
     }
     // `cache` is the artifact-cache sibling with its own (world-writable, non-sticky, non-secret) contract;
     // installing a credential "type" there would re-stamp it to the token contract, break the cache's
     // self-heal semantics, and hide the account from `cred list` (which filters the name).
     if c.r#type == "cache" {
-        return Err(format!("{who}: 'cache' is the artifact cache, not a credential type"));
+        return Err(format!(
+            "{who}: 'cache' is the artifact cache, not a credential type"
+        ));
     }
 
     let token = std::fs::read(&c.source)
         .map_err(|e| format!("{who}: reading credential source {}: {e}", c.source))?;
 
-    let type_fd = ensure_type_dir(root_fd, &c.r#type, uid, build_gid)
-        .map_err(|e| format!("{who}: {e}"))?;
+    let type_fd =
+        ensure_type_dir(root_fd, &c.r#type, uid, build_gid).map_err(|e| format!("{who}: {e}"))?;
     let acct_fd = claim_account_dir(type_fd.as_raw_fd(), &c.username, uid, build_gid)
         .map_err(|e| format!("{who}: {e}"))?;
 
@@ -349,7 +377,9 @@ fn claim_account_dir(type_fd: RawFd, name: &str, uid: u32, gid: u32) -> io::Resu
         Err(e) => {
             return Err(io::Error::new(
                 e.kind(),
-                format!("account path is not a real directory ({e}) — refusing to install through it"),
+                format!(
+                    "account path is not a real directory ({e}) — refusing to install through it"
+                ),
             ))
         }
     };
@@ -377,9 +407,15 @@ fn prune(root: &OwnedFd, to_remove: &[String], owner_uid: u32) -> (Vec<String>, 
     let mut any_failed = false;
     for rel in to_remove {
         let parts: Vec<&str> = rel.split('/').collect();
-        if parts.len() != 3 || parts.iter().any(|p| p.is_empty() || *p == "." || *p == "..") {
+        if parts.len() != 3
+            || parts
+                .iter()
+                .any(|p| p.is_empty() || *p == "." || *p == "..")
+        {
             // The manifest is root-written, so this should never happen; refuse to act on a weird line.
-            eprintln!("propnix: prune: manifest line {rel:?} is not <type>/<username>/<file> — skipped");
+            eprintln!(
+                "propnix: prune: manifest line {rel:?} is not <type>/<username>/<file> — skipped"
+            );
             kept.push(rel.clone());
             any_failed = true;
             continue;
@@ -389,7 +425,9 @@ fn prune(root: &OwnedFd, to_remove: &[String], owner_uid: u32) -> (Vec<String>, 
             Ok(fd) => fd,
             Err(e) if e.raw_os_error() == Some(libc::ENOENT) => continue, // already gone
             Err(e) => {
-                eprintln!("propnix: prune: {rel}: type dir not a real directory ({e}) — left alone");
+                eprintln!(
+                    "propnix: prune: {rel}: type dir not a real directory ({e}) — left alone"
+                );
                 kept.push(rel.clone());
                 any_failed = true;
                 continue;
@@ -399,7 +437,9 @@ fn prune(root: &OwnedFd, to_remove: &[String], owner_uid: u32) -> (Vec<String>, 
             Ok(fd) => fd,
             Err(e) if e.raw_os_error() == Some(libc::ENOENT) => continue,
             Err(e) => {
-                eprintln!("propnix: prune: {rel}: account dir not a real directory ({e}) — left alone");
+                eprintln!(
+                    "propnix: prune: {rel}: account dir not a real directory ({e}) — left alone"
+                );
                 kept.push(rel.clone());
                 any_failed = true;
                 continue;
@@ -465,11 +505,14 @@ fn converge_type(root_fd: RawFd, ty: impl AsRef<OsStr>, build_gid: u32) -> Resul
         }
     };
     strip_acl(type_fd.as_raw_fd());
-    fchown(type_fd.as_raw_fd(), UID_UNCHANGED, build_gid).map_err(|e| format!("{tyd}: chgrp: {e}"))?;
+    fchown(type_fd.as_raw_fd(), UID_UNCHANGED, build_gid)
+        .map_err(|e| format!("{tyd}: chgrp: {e}"))?;
     fchmod_dir(type_fd.as_raw_fd(), 0o3777).map_err(|e| format!("{tyd}: chmod: {e}"))?;
 
     let mut any_failed = false;
-    for account in read_dir_names(type_fd.as_raw_fd()).map_err(|e| format!("{tyd}: listing: {e}"))? {
+    for account in
+        read_dir_names(type_fd.as_raw_fd()).map_err(|e| format!("{tyd}: listing: {e}"))?
+    {
         let acctd = account.to_string_lossy();
         let acct_fd = match open_child_dir_nofollow(type_fd.as_raw_fd(), &account) {
             Ok(fd) => fd,
@@ -487,7 +530,9 @@ fn converge_type(root_fd: RawFd, ty: impl AsRef<OsStr>, build_gid: u32) -> Resul
             any_failed = true;
             continue;
         }
-        for entry in read_dir_names(acct_fd.as_raw_fd()).map_err(|e| format!("{tyd}/{acctd}: listing: {e}"))? {
+        for entry in read_dir_names(acct_fd.as_raw_fd())
+            .map_err(|e| format!("{tyd}/{acctd}: listing: {e}"))?
+        {
             let named = entry.to_string_lossy();
             let is_tmp = named.starts_with('.') && named.ends_with(".tmp");
             match open_child_file_nofollow(acct_fd.as_raw_fd(), &entry) {
@@ -558,7 +603,12 @@ fn cname(s: impl AsRef<OsStr>) -> io::Result<CString> {
 fn open_dir_follow(path: &Path) -> io::Result<OwnedFd> {
     let c = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path has a NUL byte"))?;
-    let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -604,7 +654,10 @@ fn open_child_file_nofollow(dirfd: RawFd, name: impl AsRef<OsStr>) -> io::Result
     // Refuse anything that is not a regular file (a directory opens O_RDONLY; a FIFO/device opened above).
     let st = fstat(owned.as_raw_fd())?;
     if st.st_mode & libc::S_IFMT != libc::S_IFREG {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
     }
     Ok(owned)
 }
@@ -825,12 +878,16 @@ fn resolve_gid(spec: &str) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+    use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
     use std::path::PathBuf;
 
     fn tmp(tag: &str) -> PathBuf {
         let mut d = std::env::temp_dir();
-        d.push(format!("propnix-mat-{tag}-{}-{:?}", std::process::id(), std::thread::current().id()));
+        d.push(format!(
+            "propnix-mat-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -863,7 +920,11 @@ mod tests {
         });
         let cfg_path = base.join("cfg.json");
         std::fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).unwrap();
-        (materialize(&cfg_path), root, std::fs::read_to_string(&manifest).unwrap_or_default())
+        (
+            materialize(&cfg_path),
+            root,
+            std::fs::read_to_string(&manifest).unwrap_or_default(),
+        )
     }
 
     fn secret(base: &Path, name: &str, body: &str) -> String {
@@ -887,7 +948,13 @@ mod tests {
         let gid = unsafe { libc::getgid() };
         let (res, root, manifest) = run(
             &base,
-            vec![entry(&base, "gog", "alice", "galaxy_tokens.json", "{\"t\":1}")],
+            vec![entry(
+                &base,
+                "gog",
+                "alice",
+                "galaxy_tokens.json",
+                "{\"t\":1}",
+            )],
         );
         res.unwrap();
 
@@ -896,14 +963,27 @@ mod tests {
         // Mask to the permission bits: an unprivileged test env (the Nix build sandbox) may refuse the
         // setgid bit, which `fchmod_dir` tolerates — the low 9 bits are the contract that must always hold.
         assert_eq!(mode(&root) & 0o777, 0o775, "root dir");
-        assert_eq!(mode(&root.join("gog")) & 0o1777, 0o1777, "type dir sticky + world-rwx (setgid masked)");
+        assert_eq!(
+            mode(&root.join("gog")) & 0o1777,
+            0o1777,
+            "type dir sticky + world-rwx (setgid masked)"
+        );
         assert_eq!(mode(&acct) & 0o777, 0o750, "account dir 0750");
         assert_eq!(mode(&token), 0o640, "token 0640");
-        assert_eq!(std::fs::metadata(&token).unwrap().gid(), gid, "token group = build group");
+        assert_eq!(
+            std::fs::metadata(&token).unwrap().gid(),
+            gid,
+            "token group = build group"
+        );
         assert_eq!(std::fs::read_to_string(&token).unwrap(), "{\"t\":1}");
         assert_eq!(mode(&root.join("credentials.toml")), 0o644, "pointer 0644");
-        assert!(std::fs::read_to_string(root.join("credentials.toml")).unwrap().contains("/propnix"));
-        assert_eq!(manifest, "gog/alice/galaxy_tokens.json\n", "manifest lists the managed token");
+        assert!(std::fs::read_to_string(root.join("credentials.toml"))
+            .unwrap()
+            .contains("/propnix"));
+        assert_eq!(
+            manifest, "gog/alice/galaxy_tokens.json\n",
+            "manifest lists the managed token"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -911,18 +991,32 @@ mod tests {
     fn prunes_a_credential_the_config_stopped_declaring() {
         let base = tmp("prune");
         // Generation A: two accounts.
-        run(&base, vec![
-            entry(&base, "gog", "alice", "galaxy_tokens.json", "a"),
-            entry(&base, "gog", "bob", "galaxy_tokens.json", "b"),
-        ]).0.unwrap();
+        run(
+            &base,
+            vec![
+                entry(&base, "gog", "alice", "galaxy_tokens.json", "a"),
+                entry(&base, "gog", "bob", "galaxy_tokens.json", "b"),
+            ],
+        )
+        .0
+        .unwrap();
         let root = base.join("store");
         assert!(root.join("gog/bob/galaxy_tokens.json").exists());
 
         // Generation B: alice only. bob's token AND now-empty account dir must be pruned; alice stays.
-        let (res, _, manifest) = run(&base, vec![entry(&base, "gog", "alice", "galaxy_tokens.json", "a")]);
+        let (res, _, manifest) = run(
+            &base,
+            vec![entry(&base, "gog", "alice", "galaxy_tokens.json", "a")],
+        );
         res.unwrap();
-        assert!(root.join("gog/alice/galaxy_tokens.json").exists(), "alice survives");
-        assert!(!root.join("gog/bob").exists(), "bob's account dir tidied away");
+        assert!(
+            root.join("gog/alice/galaxy_tokens.json").exists(),
+            "alice survives"
+        );
+        assert!(
+            !root.join("gog/bob").exists(),
+            "bob's account dir tidied away"
+        );
         assert_eq!(manifest, "gog/alice/galaxy_tokens.json\n");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -939,13 +1033,29 @@ mod tests {
         std::fs::create_dir_all(root.join("gog")).unwrap();
         symlink(&outside, root.join("gog").join("mallory")).unwrap();
 
-        let (res, _, _) = run(&base, vec![entry(&base, "gog", "mallory", "galaxy_tokens.json", "x")]);
+        let (res, _, _) = run(
+            &base,
+            vec![entry(&base, "gog", "mallory", "galaxy_tokens.json", "x")],
+        );
         // The declared install is refused (soft failure), and NOTHING is written through the link.
-        assert!(res.is_err(), "installing through a symlinked account must fail the run");
-        assert!(!outside.join("galaxy_tokens.json").exists(), "no token written through the link");
-        assert_eq!(std::fs::read_to_string(outside.join("victim")).unwrap(), "precious");
+        assert!(
+            res.is_err(),
+            "installing through a symlinked account must fail the run"
+        );
+        assert!(
+            !outside.join("galaxy_tokens.json").exists(),
+            "no token written through the link"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.join("victim")).unwrap(),
+            "precious"
+        );
         // The symlink's target keeps its original (non-2750) mode — convergence never followed it.
-        assert_ne!(mode(&outside), 0o2750, "converge must not have re-moded the link target");
+        assert_ne!(
+            mode(&outside),
+            0o2750,
+            "converge must not have re-moded the link target"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -957,18 +1067,44 @@ mod tests {
         // a token copy + an ACL-era-ish extra file, none declared.
         let acct = root.join("steam").join("carol");
         std::fs::create_dir_all(&acct).unwrap();
-        std::fs::set_permissions(root.join("steam"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(root.join("steam"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
         std::fs::set_permissions(&acct, std::fs::Permissions::from_mode(0o777)).unwrap();
         std::fs::write(acct.join("depotdownloader-store.tar"), "tok").unwrap();
-        std::fs::set_permissions(acct.join("depotdownloader-store.tar"), std::fs::Permissions::from_mode(0o666)).unwrap();
-        std::fs::write(acct.join(".depotdownloader-store.tar.materialize.tmp"), "leaked").unwrap();
+        std::fs::set_permissions(
+            acct.join("depotdownloader-store.tar"),
+            std::fs::Permissions::from_mode(0o666),
+        )
+        .unwrap();
+        std::fs::write(
+            acct.join(".depotdownloader-store.tar.materialize.tmp"),
+            "leaked",
+        )
+        .unwrap();
 
         let (res, _, _) = run(&base, vec![]); // no declared creds — pure convergence
         res.unwrap();
-        assert_eq!(mode(root.join("steam").as_path()) & 0o1777, 0o1777, "type dir sticky + world-rwx converged");
-        assert_eq!(mode(&acct) & 0o777, 0o750, "account dir converged, group-write and other stripped");
-        assert_eq!(mode(acct.join("depotdownloader-store.tar").as_path()), 0o640, "token converged");
-        assert!(!acct.join(".depotdownloader-store.tar.materialize.tmp").exists(), "crashed temp reaped");
+        assert_eq!(
+            mode(root.join("steam").as_path()) & 0o1777,
+            0o1777,
+            "type dir sticky + world-rwx converged"
+        );
+        assert_eq!(
+            mode(&acct) & 0o777,
+            0o750,
+            "account dir converged, group-write and other stripped"
+        );
+        assert_eq!(
+            mode(acct.join("depotdownloader-store.tar").as_path()),
+            0o640,
+            "token converged"
+        );
+        assert!(
+            !acct
+                .join(".depotdownloader-store.tar.materialize.tmp")
+                .exists(),
+            "crashed temp reaped"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -983,12 +1119,21 @@ mod tests {
             source: base.join("does-not-exist").to_str().unwrap().to_string(),
         };
         let (res, root, manifest) = run(&base, vec![bad, good]);
-        assert!(res.is_err(), "a missing source makes the run report failure");
-        assert!(root.join("gog/alice/galaxy_tokens.json").exists(), "the good account still installed");
+        assert!(
+            res.is_err(),
+            "a missing source makes the run report failure"
+        );
+        assert!(
+            root.join("gog/alice/galaxy_tokens.json").exists(),
+            "the good account still installed"
+        );
         assert!(!root.join("gog/ghost/galaxy_tokens.json").exists());
         // The manifest reflects REALITY, not intent: the failed install is not recorded as declarative,
         // so `is_declarative` won't mislabel it and next generation's prune won't chase a phantom.
-        assert_eq!(manifest, "gog/alice/galaxy_tokens.json\n", "only the installed token is manifested");
+        assert_eq!(
+            manifest, "gog/alice/galaxy_tokens.json\n",
+            "only the installed token is manifested"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1023,7 +1168,10 @@ mod tests {
         let root = base.join("store");
         std::fs::create_dir_all(root.join("gog")).unwrap();
         std::fs::write(root.join("gog").join("junk"), "x").unwrap(); // a file where an account dir belongs
-        let (res, _, _) = run(&base, vec![entry(&base, "gog", "alice", "galaxy_tokens.json", "a")]);
+        let (res, _, _) = run(
+            &base,
+            vec![entry(&base, "gog", "alice", "galaxy_tokens.json", "a")],
+        );
         res.unwrap(); // the stray file is skipped, not a failure
         assert!(root.join("gog/alice/galaxy_tokens.json").exists());
         let _ = std::fs::remove_dir_all(&base);
@@ -1034,7 +1182,12 @@ mod tests {
         // The invariant a partial prune must keep: a dropped entry that could not be removed stays NAMED
         // in the manifest, so the next generation retries it instead of orphaning the token forever.
         let base = tmp("prune-retry");
-        run(&base, vec![entry(&base, "gog", "alice", "galaxy_tokens.json", "a")]).0.unwrap();
+        run(
+            &base,
+            vec![entry(&base, "gog", "alice", "galaxy_tokens.json", "a")],
+        )
+        .0
+        .unwrap();
         let root = base.join("store");
         // Make the account dir unremovable-from (no write on the dir → unlink fails).
         let acct = root.join("gog").join("alice");
@@ -1052,7 +1205,10 @@ mod tests {
         // but WRITABLE by owner, so the retry now succeeds): token gone, manifest empty.
         let (res, _, manifest) = run(&base, vec![]);
         res.unwrap();
-        assert!(!acct.exists(), "the retry prunes what generation B could not");
+        assert!(
+            !acct.exists(),
+            "the retry prunes what generation B could not"
+        );
         assert_eq!(manifest, "", "nothing declarative remains");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1068,15 +1224,30 @@ mod tests {
         std::fs::create_dir_all(&private).unwrap();
         std::fs::write(private.join("secret"), "s").unwrap();
         std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::set_permissions(private.join("secret"), std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(
+            private.join("secret"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
 
         // run() uses OUR gid as the build group, so `backup` carries the "build group" already — the gate
         // must still skip it because it is not world-writable (the second half of the type-dir signature).
-        let (res, _, _) = run(&base, vec![entry(&base, "gog", "alice", "galaxy_tokens.json", "a")]);
+        let (res, _, _) = run(
+            &base,
+            vec![entry(&base, "gog", "alice", "galaxy_tokens.json", "a")],
+        );
         res.unwrap();
         let m = mode(&private);
-        assert_eq!(m & 0o777, 0o700, "stray dir mode must be untouched, got {m:o}");
-        assert_eq!(mode(private.join("secret").as_path()), 0o600, "private file untouched");
+        assert_eq!(
+            m & 0o777,
+            0o700,
+            "stray dir mode must be untouched, got {m:o}"
+        );
+        assert_eq!(
+            mode(private.join("secret").as_path()),
+            0o600,
+            "private file untouched"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1091,7 +1262,10 @@ mod tests {
         };
         let (res, root, manifest) = run(&base, vec![cred]);
         assert!(res.is_err());
-        assert!(!root.join("cache").exists(), "nothing may be created under the cache name");
+        assert!(
+            !root.join("cache").exists(),
+            "nothing may be created under the cache name"
+        );
         assert_eq!(manifest, "", "the refused credential is not manifested");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1115,8 +1289,15 @@ mod tests {
         };
         let (res, root, _) = run(&base, vec![dot, tmpname]);
         assert!(res.is_err());
-        assert_eq!(mode(&root) & 0o777, 0o775, "store root must NOT have been stamped 3777 by a `.` type");
-        assert!(!root.join("gog/alice/.galaxy.tmp").exists(), "reap-colliding token refused");
+        assert_eq!(
+            mode(&root) & 0o777,
+            0o775,
+            "store root must NOT have been stamped 3777 by a `.` type"
+        );
+        assert!(
+            !root.join("gog/alice/.galaxy.tmp").exists(),
+            "reap-colliding token refused"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }

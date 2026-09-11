@@ -69,7 +69,10 @@ fn gog_is_not_owned(e: &GogError) -> bool {
 /// account could not authenticate, the walk is inconclusive about ownership → `LoginFailed` (a credential
 /// problem the human resolves with `cred add`), never a false `NotOwned`. Mirrors `steam::exhausted_steam`.
 fn exhausted_gog(msg: String, refusals: &[GogError]) -> GogError {
-    if refusals.iter().any(|e| matches!(e, GogError::LoginFailed(_))) {
+    if refusals
+        .iter()
+        .any(|e| matches!(e, GogError::LoginFailed(_)))
+    {
         GogError::LoginFailed(msg)
     } else {
         GogError::NotOwned(msg)
@@ -164,11 +167,13 @@ fn get_bytes_raw(url: &str, bearer: Option<&str>) -> Result<Vec<u8>, HttpFail> {
     match req.call() {
         Ok(resp) => {
             let mut buf = Vec::new();
-            resp.into_reader().read_to_end(&mut buf).map_err(|e| HttpFail {
-                // A body that ends early is the classic shape of a connection dropped mid-transfer.
-                status: None,
-                msg: format!("reading body: {e}"),
-            })?;
+            resp.into_reader()
+                .read_to_end(&mut buf)
+                .map_err(|e| HttpFail {
+                    // A body that ends early is the classic shape of a connection dropped mid-transfer.
+                    status: None,
+                    msg: format!("reading body: {e}"),
+                })?;
             Ok(buf)
         }
         Err(ureq::Error::Status(code, _)) => Err(HttpFail {
@@ -300,10 +305,7 @@ pub struct GogCredential {
 /// does (`hash_build`). `want` (from `--gog-account` / `PROPNIX_GOG_ACCOUNT`) narrows it to one, and a
 /// name the store does not hold is an error listing what it does — never a silent fall-through to
 /// somebody else's account.
-pub fn gog_credentials(
-    cred_dir: &std::path::Path,
-    want: Option<&str>,
-) -> R<Vec<GogCredential>> {
+pub fn gog_credentials(cred_dir: &std::path::Path, want: Option<&str>) -> R<Vec<GogCredential>> {
     // (account label, token path). The legacy single-file layout has no username in its path, so it
     // gets a synthetic label — it must still be selectable and reportable by name.
     let mut candidates: Vec<(String, std::path::PathBuf)> = Vec::new();
@@ -729,9 +731,12 @@ pub fn plan(
                         empty_dirs.insert(p);
                     }
                 }
-                "DepotLink" => {
-                    links.push(i.get("path").and_then(Value::as_str).unwrap_or("").to_string())
-                }
+                "DepotLink" => links.push(
+                    i.get("path")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                ),
                 other => {
                     return Err(GogError::Unsupported(format!(
                         "unknown depot item type {other:?}"
@@ -975,7 +980,8 @@ pub struct Cdn {
     /// Per product: the endpoints, and the pool that scores them. The pool is rebuilt whenever the
     /// endpoint list is (a `secure_link` re-resolution can change both the count and the order), so its
     /// indices always match the vector beside it.
-    endpoints: Mutex<BTreeMap<String, (Vec<Endpoint>, std::sync::Arc<crate::pin::hosts::HostPool>)>>,
+    endpoints:
+        Mutex<BTreeMap<String, (Vec<Endpoint>, std::sync::Arc<crate::pin::hosts::HostPool>)>>,
     /// Single-flight guard for `secure_link` resolution. An expired signature requeues EVERY in-flight
     /// chunk of a product at once, and each retry re-enters `endpoint()` against an empty cache — without
     /// this, every worker would issue its own resolution (and possibly its own token mint): a herd of
@@ -1048,7 +1054,10 @@ impl Cdn {
     /// An even split would give every endpoint the same share regardless of what it actually delivers, and
     /// keep feeding a degraded one that share while each of those requests fails first. `pin::hosts` scores
     /// them by observed throughput instead.
-    fn endpoint(&self, product: &str) -> R<(usize, Endpoint, std::sync::Arc<crate::pin::hosts::HostPool>)> {
+    fn endpoint(
+        &self,
+        product: &str,
+    ) -> R<(usize, Endpoint, std::sync::Arc<crate::pin::hosts::HostPool>)> {
         if let Some(hit) = self.pick_cached(product) {
             return Ok(hit);
         }
@@ -1068,7 +1077,10 @@ impl Cdn {
         let mut map = self.endpoints.lock().unwrap();
         let (v, pool) = map.entry(product.to_string()).or_insert_with(|| {
             let n = eps.len();
-            (eps, std::sync::Arc::new(crate::pin::hosts::HostPool::new(n)))
+            (
+                eps,
+                std::sync::Arc::new(crate::pin::hosts::HostPool::new(n)),
+            )
         });
         let i = pool.pick();
         Ok((i, v[i % v.len()].clone(), std::sync::Arc::clone(pool)))
@@ -1168,27 +1180,30 @@ impl Cdn {
         compressed_md5: &str,
     ) -> R<(String, usize, std::sync::Arc<crate::pin::hosts::HostPool>)> {
         let (idx, ep, pool) = self.endpoint(product)?;
-        Ok((match ep {
-            Endpoint::Plain(base) => format!("{base}/{}", galaxy_path(compressed_md5)?),
-            Endpoint::Format { url_format, params } => {
-                // task_executor: the `path` parameter gains the chunk's galaxy path, then every
-                // {placeholder} in url_format is substituted.
-                let mut out = url_format;
-                let mut p = params;
-                let joined = format!(
-                    "{}/{}",
-                    p.get("path").cloned().unwrap_or_default(),
-                    galaxy_path(compressed_md5)?
-                );
-                p.insert("path".into(), joined);
-                for (k, v) in p {
-                    out = out.replace(&format!("{{{k}}}"), &v);
+        Ok((
+            match ep {
+                Endpoint::Plain(base) => format!("{base}/{}", galaxy_path(compressed_md5)?),
+                Endpoint::Format { url_format, params } => {
+                    // task_executor: the `path` parameter gains the chunk's galaxy path, then every
+                    // {placeholder} in url_format is substituted.
+                    let mut out = url_format;
+                    let mut p = params;
+                    let joined = format!(
+                        "{}/{}",
+                        p.get("path").cloned().unwrap_or_default(),
+                        galaxy_path(compressed_md5)?
+                    );
+                    p.insert("path".into(), joined);
+                    for (k, v) in p {
+                        out = out.replace(&format!("{{{k}}}"), &v);
+                    }
+                    out
                 }
-                out
-            }
-        }, idx, pool))
+            },
+            idx,
+            pool,
+        ))
     }
-
 }
 
 /// The engine's view of a GOG product: which `secure_link` endpoint to ask, and how to verify a chunk.
@@ -1261,7 +1276,6 @@ fn md5_hex(b: &[u8]) -> String {
     d.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-
 /// One entry from a product's build list.
 #[derive(Clone, Debug)]
 pub struct BuildRef {
@@ -1287,8 +1301,16 @@ pub fn builds(product_id: &str, os: &str) -> R<Vec<BuildRef>> {
     Ok(items
         .iter()
         .map(|b| BuildRef {
-            build_id: b.get("build_id").and_then(Value::as_str).unwrap_or("").to_string(),
-            version_name: b.get("version_name").and_then(Value::as_str).unwrap_or("").to_string(),
+            build_id: b
+                .get("build_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            version_name: b
+                .get("version_name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
             branch: b.get("branch").and_then(Value::as_str).map(str::to_string),
             date_published: b
                 .get("date_published")
@@ -1307,7 +1329,11 @@ pub fn builds(product_id: &str, os: &str) -> R<Vec<BuildRef>> {
 /// 2.0.77 — so the naive rule would have silently DOWNGRADED it. A pin's branch is not recorded in
 /// versions.json, so it is inferred from the pinned build itself; if that build is no longer listed we
 /// refuse rather than guess which track it belonged to.
-pub fn newest_on_pinned_branch(product_id: &str, os: &str, pinned: &str) -> R<(BuildRef, BuildRef)> {
+pub fn newest_on_pinned_branch(
+    product_id: &str,
+    os: &str,
+    pinned: &str,
+) -> R<(BuildRef, BuildRef)> {
     let all = builds(product_id, os)?;
     let cur = all
         .iter()
@@ -1343,8 +1369,29 @@ pub struct HashOpts {
     pub gog_account: Option<String>,
     /// Which stored Steam account to use. Same semantics; consumed by `pin::steam`.
     pub steam_account: Option<String>,
-    /// Write a percentage line to stderr. Kept off stdout, which may be a machine-readable document.
+    /// Show download progress on stderr. Kept off stdout, which may be a machine-readable document.
     pub progress: bool,
+    /// Emit progress as `@nix` structured activities instead of a human bar — what the FODs set, so a
+    /// depot download renders as a real progress bar under `nix build` / `nom`. See `download::ProgressSink`.
+    pub nix_progress: bool,
+}
+
+impl HashOpts {
+    /// The progress sink for a download loop. `seed` is the pin's identity (unique per FOD, since a FOD
+    /// IS its content address) and becomes the activity id; `uri` is what the bar is labelled with.
+    pub fn progress_sink(&self, seed: &str, uri: String) -> crate::pin::download::ProgressSink {
+        use crate::pin::download::ProgressSink;
+        if self.nix_progress {
+            ProgressSink::Nix {
+                id: crate::pin::download::activity_id(seed),
+                uri,
+            }
+        } else if self.progress {
+            ProgressSink::Human
+        } else {
+            ProgressSink::Quiet
+        }
+    }
 }
 
 /// Resolve a build and stream it into a NAR hash. Nothing touches disk.
@@ -1432,7 +1479,12 @@ pub fn download_build(
         let mut offset = 0u64;
         for c in &f.chunks {
             occurrences += 1;
-            let key = (f.product.clone(), c.compressed_md5.clone(), c.md5.clone(), c.size);
+            let key = (
+                f.product.clone(),
+                c.compressed_md5.clone(),
+                c.md5.clone(),
+                c.size,
+            );
             match slot_of.entry(key) {
                 std::collections::hash_map::Entry::Occupied(e) => {
                     placement[*e.get()].push((slot, offset));
@@ -1485,7 +1537,13 @@ pub fn download_build(
     let fetch_total: u64 = sizes.iter().sum();
     let cdn = std::sync::Arc::new(cdn);
     let sink = std::sync::Arc::new(BuildSink { handles, placement });
-    let mut progress = download::Progress::new(fetch_total.max(1), opts.progress);
+    let mut progress = download::Progress::with_sink(
+        fetch_total.max(1),
+        opts.progress_sink(
+            &format!("gog:{product_id}:{build_id}"),
+            format!("gog://build/{build_id}"),
+        ),
+    );
     crate::pin::engine::unordered(
         cdn,
         crate::pin::engine::Work { items: work, sizes },
@@ -1530,7 +1588,14 @@ pub fn hash_build(
     // guarantees another product's link serves the same object path.
     let keys: Vec<(&str, &str, &str, u64)> = occ
         .iter()
-        .map(|(p, c)| (p.as_str(), c.compressed_md5.as_str(), c.md5.as_str(), c.size))
+        .map(|(p, c)| {
+            (
+                p.as_str(),
+                c.compressed_md5.as_str(),
+                c.md5.as_str(),
+                c.size,
+            )
+        })
         .collect();
     let occ_sizes: Vec<u64> = occ.iter().map(|(_, c)| c.size).collect();
     let (mut dedup, fetch) = crate::pin::dedup::plan(&keys, &occ_sizes, opts.window_bytes);
@@ -1597,12 +1662,17 @@ pub fn hash_build(
     let (sri, stats) = nar::nar_hash(&tree, |idx, w| {
         let f = &plan.files[*idx];
         for _ in 0..f.chunks.len() {
-            let data = dedup.next(|| pf.next_chunk()).map_err(nar::NarError::Fetch)?;
+            let data = dedup
+                .next(|| pf.next_chunk())
+                .map_err(nar::NarError::Fetch)?;
             seen += data.len() as u64;
             w.write_all(&data)?;
         }
         if progress {
-            let pct = seen.checked_mul(100).and_then(|n| n.checked_div(total)).unwrap_or(100);
+            let pct = seen
+                .checked_mul(100)
+                .and_then(|n| n.checked_div(total))
+                .unwrap_or(100);
             if pct > last_pct {
                 last_pct = pct;
                 eprint!("\r  {pct:3}%  {} / {} MiB", seen >> 20, total >> 20);
@@ -1643,8 +1713,10 @@ mod bench {
         let plain: Vec<u8> = all[(2 << 20)..(6 << 20)].to_vec();
         let mib = plain.len() as f64 / 1048576.0;
 
-        let mut enc =
-            flate2::read::ZlibEncoder::new(std::io::Cursor::new(plain.clone()), flate2::Compression::default());
+        let mut enc = flate2::read::ZlibEncoder::new(
+            std::io::Cursor::new(plain.clone()),
+            flate2::Compression::default(),
+        );
         let mut comp = Vec::new();
         enc.read_to_end(&mut comp).unwrap();
 
@@ -1683,7 +1755,9 @@ mod bench {
             let n = plain.len();
             Box::new(move || {
                 let mut out = Vec::with_capacity(n);
-                flate2::read::ZlibDecoder::new(&c[..]).read_to_end(&mut out).unwrap();
+                flate2::read::ZlibDecoder::new(&c[..])
+                    .read_to_end(&mut out)
+                    .unwrap();
                 std::hint::black_box(out);
             })
         });
@@ -1731,7 +1805,10 @@ mod tests {
         // NOTHING, silently dropping every localized file and emitting a hash that never verifies.
         let de = parse_language("de").expect("gogdl accepts the deprecated code");
         assert!(lang_matches(de, "de-DE"));
-        assert!(lang_matches(de, "DE-de"), "the comparison is case-insensitive");
+        assert!(
+            lang_matches(de, "DE-de"),
+            "the comparison is case-insensitive"
+        );
         assert!(!lang_matches(de, "en-US"));
 
         // A code, an English NAME and a deprecated alias all resolve to the same row.
@@ -1739,7 +1816,10 @@ mod tests {
             let l = parse_language(spelling).unwrap_or_else(|| panic!("{spelling} must resolve"));
             assert_eq!(l.0, "en-US", "{spelling}");
         }
-        assert!(parse_language("Simplified Chinese").is_none(), "no fuzzy naming");
+        assert!(
+            parse_language("Simplified Chinese").is_none(),
+            "no fuzzy naming"
+        );
         assert_eq!(parse_language("zh").map(|l| l.0), Some("zh-Hans"));
         assert_eq!(parse_language("cn").map(|l| l.0), Some("zh-Hans"));
         assert_eq!(parse_language("pt").map(|l| l.0), Some("pt-PT"));
@@ -1780,21 +1860,30 @@ mod tests {
         // A plain filename collision is still caught.
         assert!(case_collision(&plan_of(&[("A.dat", 1), ("a.dat", 1)], &[])).is_some());
         // …and a tree with no collision is not flagged, including repeated identical prefixes.
-        assert!(case_collision(&plan_of(&[("Data/a.dat", 1), ("Data/b.dat", 1)], &["Data"])).is_none());
+        assert!(
+            case_collision(&plan_of(&[("Data/a.dat", 1), ("Data/b.dat", 1)], &["Data"])).is_none()
+        );
         assert!(case_collision(&plan_of(&[("a", 1), ("b", 1)], &[])).is_none());
     }
 
     #[test]
     fn manifest_strictness_refuses_what_it_cannot_reproduce() {
         let md5 = "0123456789abcdef0123456789abcdef";
-        let ok: Value = serde_json::json!({ "chunks": [ { "compressedMd5": md5, "md5": md5, "size": 7 } ] });
+        let ok: Value =
+            serde_json::json!({ "chunks": [ { "compressedMd5": md5, "md5": md5, "size": 7 } ] });
         assert_eq!(chunks_of(&ok, "f").unwrap().len(), 1);
         // An empty ARRAY is a legal zero-byte file…
-        assert!(chunks_of(&serde_json::json!({ "chunks": [] }), "f").unwrap().is_empty());
+        assert!(chunks_of(&serde_json::json!({ "chunks": [] }), "f")
+            .unwrap()
+            .is_empty());
         // …but an ABSENT key is a shape we have never seen; it used to plan as an empty file.
         assert!(chunks_of(&serde_json::json!({}), "f").is_err());
         // A missing/short md5 used to become "" and then PANIC in galaxy_path inside a worker thread.
-        assert!(chunks_of(&serde_json::json!({ "chunks": [ { "md5": md5, "size": 7 } ] }), "f").is_err());
+        assert!(chunks_of(
+            &serde_json::json!({ "chunks": [ { "md5": md5, "size": 7 } ] }),
+            "f"
+        )
+        .is_err());
         assert!(chunks_of(
             &serde_json::json!({ "chunks": [ { "compressedMd5": "", "md5": md5, "size": 7 } ] }),
             "f"
@@ -1829,16 +1918,31 @@ mod tests {
             GogError::NotOwned("404".into()),
             GogError::LoginFailed("token rejected".into()),
         ];
-        assert!(matches!(exhausted_gog("m".into(), &both), GogError::LoginFailed(_)));
+        assert!(matches!(
+            exhausted_gog("m".into(), &both),
+            GogError::LoginFailed(_)
+        ));
         let all_login = [GogError::LoginFailed("rejected".into())];
-        assert!(matches!(exhausted_gog("m".into(), &all_login), GogError::LoginFailed(_)));
+        assert!(matches!(
+            exhausted_gog("m".into(), &all_login),
+            GogError::LoginFailed(_)
+        ));
         // Only when every account genuinely refused a title it could see is it truly NotOwned.
-        let owned = [GogError::NotOwned("404".into()), GogError::NotOwned("404".into())];
-        assert!(matches!(exhausted_gog("m".into(), &owned), GogError::NotOwned(_)));
+        let owned = [
+            GogError::NotOwned("404".into()),
+            GogError::NotOwned("404".into()),
+        ];
+        assert!(matches!(
+            exhausted_gog("m".into(), &owned),
+            GogError::NotOwned(_)
+        ));
         // …and the walk advances on both classes.
         assert!(gog_is_not_owned(&GogError::LoginFailed("x".into())));
         assert!(gog_is_not_owned(&GogError::NotOwned("x".into())));
-        assert!(!gog_is_not_owned(&GogError::Http("x".into())), "transport still aborts");
+        assert!(
+            !gog_is_not_owned(&GogError::Http("x".into())),
+            "transport still aborts"
+        );
     }
 
     #[test]
@@ -1901,11 +2005,14 @@ mod tests {
         ));
 
         // The legacy single-file layout still works, under a synthetic name so it stays selectable.
-        std::fs::write(empty.join("galaxy_tokens.json"), "{\"refresh_token\":\"old\"}").unwrap();
+        std::fs::write(
+            empty.join("galaxy_tokens.json"),
+            "{\"refresh_token\":\"old\"}",
+        )
+        .unwrap();
         let legacy = gog_credentials(&empty, None).unwrap();
         assert_eq!(legacy.len(), 1);
         assert_eq!(legacy[0].refresh_token, "old");
         let _ = std::fs::remove_dir_all(&root);
     }
-
 }

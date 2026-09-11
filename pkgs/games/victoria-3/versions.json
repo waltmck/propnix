@@ -1,0 +1,73 @@
+{
+  "fetchInfo": {
+    "steam": {
+      "x86_64-windows": [
+        {
+          "pname": "victoria-3-529341",
+          "appId": 529340,
+          "depotId": 529341,
+          "manifestId": "4498977168532327663",
+          "version": "1.13.11",
+          "outputHash": "sha256-6orjFSgrlsEy1vOSRhadB2DwqxLnHK26b6ZYUsedUFo=",
+          "title": "Victoria 3 (windows, Steam)"
+        },
+        {
+          "pname": "victoria-3-529342",
+          "appId": 529340,
+          "depotId": 529342,
+          "manifestId": "4691919316655930977",
+          "version": "1.13.11",
+          "outputHash": "sha256-phvBKcYMLAvFhCj2Z1gLY/wcTMEYK5teIbOqKWaPMZE=",
+          "title": "Victoria 3 (windows, Steam)"
+        },
+        {
+          "pname": "victoria-3-529345",
+          "appId": 529340,
+          "depotId": 529345,
+          "manifestId": "7414932565382460817",
+          "version": "1.13.11",
+          "outputHash": "sha256-K+0krwUhnEHVybauF8MVTjYdsEVYxfpgs909O7k0puI=",
+          "title": "Victoria 3 (windows, Steam)"
+        }
+      ]
+    }
+  },
+  "dlc": {
+    "american-buildings": {
+      "pname": "victoria-3-dlc-2071471-2071471",
+      "appId": 529340,
+      "depotId": 2071471,
+      "manifestId": "9120305042692556702",
+      "version": "1.13.11",
+      "outputHash": "sha256-GE8OJ/4gZIDBSQvi2ef0mR+m0UQDWlEkb7cTKyjqEaI=",
+      "title": "Victoria 3: American Buildings Pack (Steam)"
+    },
+    "voice-of-the-people-preorder": {
+      "pname": "victoria-3-dlc-2366580-2366580",
+      "appId": 529340,
+      "depotId": 2366580,
+      "manifestId": "4098566664589815689",
+      "version": "1.13.11",
+      "outputHash": "sha256-CCzJ38yxZnDDhxUfJtUQjdWX1gAmARglgQz8bHCnZI4=",
+      "title": "Victoria 3: Voice of the People Preorder (Steam)"
+    },
+    "colossus-of-the-south": {
+      "pname": "victoria-3-dlc-2591240-2591240",
+      "appId": 529340,
+      "depotId": 2591240,
+      "manifestId": "5896939596283282705",
+      "version": "1.13.11",
+      "outputHash": "sha256-BWJ8EE4E0L+A3hL3Nbl1FQPmo+yL9XYe1juvw6jOGxo=",
+      "title": "Victoria 3: Colossus of the South (Steam)"
+    },
+    "charters-of-commerce": {
+      "pname": "victoria-3-dlc-3450170-3450170",
+      "appId": 529340,
+      "depotId": 3450170,
+      "manifestId": "1859415655471258101",
+      "version": "1.13.11",
+      "outputHash": "sha256-w9pnvkhD7Qq5Y2+i67g5Io8Mrb6gjMNRvWhc8IrdxMM=",
+      "title": "Victoria 3: Charters of Commerce (Steam)"
+    }
+  }
+}

@@ -1,0 +1,219 @@
+{
+  "fetchInfo": {
+    "gog": {
+      "x86_64-windows": [
+        {
+          "pname": "shadow-of-mordor-win",
+          "productId": "1213504814",
+          "buildId": "55701555937600834",
+          "version": "RC2",
+          "outputHash": "sha256-RQiq2yHhjJ5ZrMeFQCONYd7btafgV5zQA9MLjb2qIBE=",
+          "outputHashMode": "recursive",
+          "os": "windows",
+          "lang": "en",
+          "kind": "game",
+          "generation": 2
+        }
+      ]
+    },
+    "steam": {
+      "x86_64-windows": [
+        {
+          "pname": "shadow-of-mordor-steam-241931",
+          "appId": 241930,
+          "depotId": 241931,
+          "manifestId": "7071254921839907484",
+          "version": "7348332",
+          "outputHash": "sha256-Gfnno6DBpfan7snCLtIlux+958KvUsa4tU8fkdPzbo0=",
+          "depotKeySha256": "5c0f4c5d935cbfe3056ea250c29cf2565290458e6664a0318ef4cfc5f435d7cb",
+          "manifestSha256": "3d411a316f475af553987516905e09e7c3fc77fd35d0441aceb28f80c1728213",
+          "title": "Middle-earth: Shadow of Mordor (windows, Steam)"
+        }
+      ]
+    }
+  },
+  "dlc": {
+    "hd-content": {
+      "pname": "shadow-of-mordor-dlc-311670-311670",
+      "appId": 241930,
+      "depotId": 311670,
+      "manifestId": "1812801919891248732",
+      "version": "7348332",
+      "outputHash": "sha256-b2Lmw6k/dlbE3OnJ++urK47iEKCeRBq+zBhWLyWZe+E=",
+      "depotKeySha256": "36cd72b03dff69402a00e421d6245120b17ed7dc744c95b702a14da15144c806",
+      "manifestSha256": "7a6f41858f2f4036ff21545af7ffe25cac4f43993d238c9bbcfd18c0cd778dda",
+      "title": "Middle-earth: Shadow of Mordor - HD Content (Steam)"
+    },
+    "test-of-power": {
+      "pname": "shadow-of-mordor-dlc-313372-313372",
+      "appId": 241930,
+      "depotId": 313372,
+      "manifestId": "4150298883702055089",
+      "version": "7348332",
+      "outputHash": "sha256-PB5obSmhXCjnm9KTsboM8lcC7z+Hu4EGqYJ+o3Lt3sY=",
+      "title": "Shadow of Mordor: Test of Power (Steam)"
+    },
+    "test-of-speed": {
+      "pname": "shadow-of-mordor-dlc-318400-318400",
+      "appId": 241930,
+      "depotId": 318400,
+      "manifestId": "7073419462418481756",
+      "version": "7348332",
+      "outputHash": "sha256-jFeIgVUh1fwCEO3ofrGJX4bCPRzZl5Wi0dd/nKtbXm0=",
+      "title": "Shadow of Mordor: Test of Speed (Steam)"
+    },
+    "test-of-wisdom": {
+      "pname": "shadow-of-mordor-dlc-318401-318401",
+      "appId": 241930,
+      "depotId": 318401,
+      "manifestId": "7582280970679003090",
+      "version": "7348332",
+      "outputHash": "sha256-zmlY/+TtF5iEyqW54ezflZCNdA0m963yMwdWwp6+ZIU=",
+      "title": "Shadow of Mordor: Test of Wisdom (Steam)"
+    },
+    "endless-challenge": {
+      "pname": "shadow-of-mordor-dlc-318402-318402",
+      "appId": 241930,
+      "depotId": 318402,
+      "manifestId": "1501748316290578442",
+      "version": "7348332",
+      "outputHash": "sha256-PKlckEulOISwswyowZ9Mje6wgJ/t8o2gpRdMyg49CIc=",
+      "title": "Shadow of Mordor: Endless Challenge (Steam)"
+    },
+    "dark-ranger": {
+      "pname": "shadow-of-mordor-dlc-313371-313371",
+      "appId": 241930,
+      "depotId": 313371,
+      "manifestId": "2673701849941391340",
+      "version": "7348332",
+      "outputHash": "sha256-iDtVWkqDOZMrbD2BSx8bdrTW7JnJhCQ4V9pU0bVEW1Q=",
+      "title": "Shadow of Mordor: Dark Ranger (Steam)"
+    },
+    "capt-black-gate": {
+      "pname": "shadow-of-mordor-dlc-313370-313370",
+      "appId": 241930,
+      "depotId": 313370,
+      "manifestId": "6785743772532095830",
+      "version": "7348332",
+      "outputHash": "sha256-s9aF35My/NtmmD5u7tyhsK4MMw7aDM82uUjN8IB+DgA=",
+      "title": "Shadow of Mordor: Captain of the Black Gate (Steam)"
+    },
+    "power-of-shadow": {
+      "pname": "shadow-of-mordor-dlc-322060-322060",
+      "appId": 241930,
+      "depotId": 322060,
+      "manifestId": "1356036462370594379",
+      "version": "7348332",
+      "outputHash": "sha256-SB0VTYgw6w3yEYK4ITYWeOm5zp0YIl5/txxhUFpeyQo=",
+      "title": "Shadow of Mordor: Power of Shadow (Steam)"
+    },
+    "hidden-blade": {
+      "pname": "shadow-of-mordor-dlc-313373-313373",
+      "appId": 241930,
+      "depotId": 313373,
+      "manifestId": "2100538871572823223",
+      "version": "7348332",
+      "outputHash": "sha256-4vfCXyzJMHFwXMg7I9bLSc/pb6z/GBT0WH0ouez2LpY=",
+      "title": "Shadow of Mordor: Hidden Blade (Steam)"
+    },
+    "deadly-archer": {
+      "pname": "shadow-of-mordor-dlc-313374-313374",
+      "appId": 241930,
+      "depotId": 313374,
+      "manifestId": "7782708720424048724",
+      "version": "7348332",
+      "outputHash": "sha256-NQjL6wiAm23AJB40zIiv6zH/bo/J56v9zgrm6FUKU78=",
+      "title": "Shadow of Mordor: Deadly Archer (Steam)"
+    },
+    "orc-slayer": {
+      "pname": "shadow-of-mordor-dlc-313380-313380",
+      "appId": 241930,
+      "depotId": 313380,
+      "manifestId": "324148619083483478",
+      "version": "7348332",
+      "outputHash": "sha256-AyI3Q5BH1Vb9bVcXPos1QD5+FrxsXcsKZF8Ct9bl8Ns=",
+      "title": "Shadow of Mordor: Orc Slayer (Steam)"
+    },
+    "flame-of-arnor": {
+      "pname": "shadow-of-mordor-dlc-313375-313375",
+      "appId": 241930,
+      "depotId": 313375,
+      "manifestId": "3626747238116382439",
+      "version": "7348332",
+      "outputHash": "sha256-H1POIrhZH87kpRkxYI5PxBq8FHzETxtT4HtzzFfEXug=",
+      "title": "Shadow of Mordor: Flame of Arnor (Steam)"
+    },
+    "rising-storm": {
+      "pname": "shadow-of-mordor-dlc-313381-313381",
+      "appId": 241930,
+      "depotId": 313381,
+      "manifestId": "1897900014090252580",
+      "version": "7348332",
+      "outputHash": "sha256-eL2Zn48CqxxYPITTyYjW7kkS+t3Abt7x9Rgj4OImQz0=",
+      "title": "Shadow of Mordor: Rising Storm (Steam)"
+    },
+    "guardians": {
+      "pname": "shadow-of-mordor-dlc-318413-318413",
+      "appId": 241930,
+      "depotId": 318413,
+      "manifestId": "982538916912193001",
+      "version": "7348332",
+      "outputHash": "sha256-XXCs33mBEuBwAz4+aml3Arc6a+Ed4xZnJBe6+jX5LE4=",
+      "title": "Shadow of Mordor: Guardians (Steam)"
+    },
+    "blood-hunters": {
+      "pname": "shadow-of-mordor-dlc-318411-318411",
+      "appId": 241930,
+      "depotId": 318411,
+      "manifestId": "7570495842780458661",
+      "version": "7348332",
+      "outputHash": "sha256-qCUYV+k3yaIQ8zpMcyli2PSggo8u/vmIqBSVrTWaj9o=",
+      "title": "Shadow of Mordor: Blood Hunters (Steam)"
+    },
+    "berserks": {
+      "pname": "shadow-of-mordor-dlc-318410-318410",
+      "appId": 241930,
+      "depotId": 318410,
+      "manifestId": "7721744647487988279",
+      "version": "7348332",
+      "outputHash": "sha256-KgOeENRS0+zAMoBz88MftXZm2YWa0O5CsGSALYfQY8Y=",
+      "title": "Shadow of Mordor: Berserks (Steam)"
+    },
+    "crushers": {
+      "pname": "shadow-of-mordor-dlc-318412-318412",
+      "appId": 241930,
+      "depotId": 318412,
+      "manifestId": "7896682710253848809",
+      "version": "7348332",
+      "outputHash": "sha256-+V+lgxp+i195TSBX8pT1ziZcggSmLKrxaI2P4DtCf38=",
+      "title": "Shadow of Mordor: Crushers (Steam)"
+    },
+    "flesh-burners": {
+      "pname": "shadow-of-mordor-dlc-318414-318414",
+      "appId": 241930,
+      "depotId": 318414,
+      "manifestId": "8828261464440646425",
+      "version": "7348332",
+      "outputHash": "sha256-a+WArSfbiQwekepmCcuM2Yh5+7Uh9zT0V4k2H5+Rhzs=",
+      "title": "Shadow of Mordor: Flesh Burners (Steam)"
+    },
+    "lord-of-the-hunt": {
+      "pname": "shadow-of-mordor-dlc-318390-318390",
+      "appId": 241930,
+      "depotId": 318390,
+      "manifestId": "2244672915508740651",
+      "version": "7348332",
+      "outputHash": "sha256-4+1CAO8UYV4SpJhLDzhx0HlxZEENeBWWD2AfvGvlwz4=",
+      "title": "Shadow of Mordor: Lord of the Hunt (Steam)"
+    },
+    "bright-lord": {
+      "pname": "shadow-of-mordor-dlc-318420-318420",
+      "appId": 241930,
+      "depotId": 318420,
+      "manifestId": "6342813387448459939",
+      "version": "7348332",
+      "outputHash": "sha256-LL40IXKruH6hHG27LUBz2g92USHjew73NzqvA970MVE=",
+      "title": "Shadow of Mordor: The Bright Lord (Steam)"
+    }
+  }
+}

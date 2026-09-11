@@ -50,6 +50,7 @@
         env
         icon
         broken
+        maintainers
         payloads
         extraLowers
         setupScript

@@ -23,12 +23,19 @@
     reason = "winewayland window creation crashes the FEX-hosted 64-bit explorer.exe (SEH cannot be dispatched — Exception frame not in stack limits) → nodrv_CreateWindow, game aborts windowless; winex11/XWayland brings the window up.";
   };
 
-  # HomeworldRM.exe STATICALLY imports Galaxy.dll (the 32-bit GOG Galaxy SDK, bundled beside the exe in
-  # HomeworldRM/Bin/Release), pulling in the GalaxyFactory statics (CreateInstance/GetInstance/ResetInstance/
-  # GetErrorManager — verified in the PE import table), so bind the no-op stub over it (aarch64) to keep
-  # the game fully offline with no cloud dependencies (see emulators/galaxy-stub). galaxy-stub builds a
-  # 32-bit Galaxy.dll matching the game's arch; a no-op on x86_64 native wine.
-  galaxyStubDlls = [ "HomeworldRM/Bin/Release/Galaxy.dll" ];
+  # NO `wine.galaxyStubDlls` — deliberately, and it is a finding rather than an omission. HomeworldRM.exe
+  # STATICALLY imports Galaxy.dll (the 32-bit GOG Galaxy SDK bundled beside the exe in
+  # HomeworldRM/Bin/Release), pulling in exactly the four GalaxyFactory statics CreateInstance /
+  # GetInstance / ResetInstance / GetErrorManager (dumped from the PE import table), so the row looks
+  # obviously right — and it is NOT. The stub's uniform zero-argument vtable is only ABI-valid where the
+  # CALLER cleans the stack; this is a 32-bit title, where the SDK's interfaces are __thiscall and the
+  # CALLEE pops. Bound here it crashed the game before it ever drew: `IGalaxy::Init(clientID,
+  # clientSecret, 0)` returned without popping its 12 bytes, so the caller's `ret` jumped to the clientID
+  # string and the game's own handler reported "Access Violation … at 0023:008e6060". The full
+  # disassembly + crash-log evidence is on the `galaxyMounts` derivation in
+  # lib/backends/wine/defaults.nix, which now REFUSES this knob on i386 rather than emitting the row.
+  # The offline guarantee is `online = false` in default.nix — kernel-enforced, so it does not depend on a
+  # stub being a faithful no-op.
 
   # The HWRM engine requires WRITE access to its own install folder — with a read-only game bind it aborts at
   # startup with a message box: "Unable to run Homeworld2, Administrative access to this folder is required."
@@ -40,6 +47,30 @@
     type = "overlay";
     lower = "${payload}";
     upper = "$PROPNIX_STATE/gamedir";
+    createIfNotExist = true;
+  };
+
+  # The engine's own command-line-options FILE, generated per launch by setup.sh (see there for the switches
+  # and why they cannot be `exeArgs`). This row is the only thing that knows WHERE the engine looks for it.
+  #
+  # THE PATH IS DERIVED, NOT GUESSED, and it is coupled to `workingDir`: HomeworldRM.exe opens the literal
+  # relative path `../commandLine.txt` with `fopen(…, "rt")` (VA 0x7a9822, reached from the option-map
+  # bootstrap at 0x7a9b6f which seeds `params = ../commandLine.txt` before argv is parsed). A relative fopen
+  # resolves against the CWD, and default.nix pins cwd to `HomeworldRM/Bin/Release` — hence
+  # HomeworldRM/Bin/commandLine.txt. (Corroborated by the same log the data-path finding came from: the engine
+  # reports its .big misses as `..\..\DATAUPDATES\…`, i.e. cwd-relative from Bin\Release.) If `workingDir`
+  # ever moves, this target moves with it.
+  #
+  # `type = "file"` because the source is a single regular file (`createIfNotExist` TOUCHES it rather than
+  # mkdir'ing it — a directory here would make the engine's fopen fail obscurely), and the source is created
+  # during mount-table resolution, which the launcher runs BEFORE the setup script, so setup.sh always writes
+  # into an existing file. `mode = "ro"`: the file is generated state, and the game only ever reads it.
+  # The file does NOT exist in the payload; the game-dir overlay above stubs EVERY declared child as a
+  # mountpoint (propnix-mount: "For an OVERLAY, stub EVERY child"), so it does not have to.
+  mounts."drive_c/game/HomeworldRM/Bin/commandLine.txt" = {
+    type = "file";
+    source = "$PROPNIX_STATE/commandLine.txt";
+    mode = "ro";
     createIfNotExist = true;
   };
 }

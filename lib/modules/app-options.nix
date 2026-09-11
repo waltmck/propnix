@@ -404,9 +404,18 @@ in
         A store-path executable the launcher runs in the OUTER phase, BEFORE the game's view exists — the
         escape hatch for per-game setup that no option can express, typically seeding a config file the
         engine reads from its save dir (factorio's cache/update settings, skyrim's SkyrimPrefs iSize).
-        Runs with the runtime env (PROPNIX_SAVE_DIR/APPID/WIDTH/HEIGHT/QUALITY + PROPNIX_PAYLOAD = the
-        game tree); a NON-ZERO exit ABORTS the launch, because a setup failure is a packaging bug or a
-        half-written config, not something to launch into. Build it with `mkSetupScript`.
+        Runs with the runtime env (PROPNIX_SAVE_DIR/APPID/WIDTH/HEIGHT/QUALITY); a NON-ZERO exit ABORTS
+        the launch, because a setup failure is a packaging bug or a half-written config, not something to
+        launch into. Build it with `mkSetupScript`.
+
+        THE GAME TREES reach it as TWO env vars, because they answer different questions:
+        `PROPNIX_PAYLOAD` = the PRIMARY tree (the launch cwd / exe+icon source), and `PROPNIX_PAYLOADS` =
+        EVERY game-content tree ':'-joined in mount-priority order (enabled DLC, the primary tree, then
+        the co-base depots — the order the game dir unions them, so the first hit is the file the game
+        itself opens). Read the list with the `payload_find` / `payload_require` helpers `mkSetupScript`
+        always supplies (lib/builders/payload-lib.sh), NOT `"$PROPNIX_PAYLOAD/<file>"` — a multi-depot
+        build routinely ships the asset outside the head tree (Skyrim SE's Steam arm: the exe, and hence
+        the head, is depot 489833; the quality-preset INIs are in 489832).
 
         TOP-LEVEL, not a backend knob: it runs before any prefix or view is assembled, so nothing about it
         is wine- or thin-specific. It used to live at `wine.setupScript`, where setting it on a thin game
@@ -457,6 +466,28 @@ in
         default = null;
         description = "Why (surfaced via meta for humans; does not affect the build).";
       };
+    };
+
+    # ── maintainers ──
+    maintainers = lib.mkOption {
+      type = knobTypes.dedupList lib.types.str;
+      # NOT a strMatching refinement: dedupList overrides `listOf`'s merge, and per-element type checks
+      # live in the merge it replaced — a refined element type is silently never checked. Validate on
+      # read instead. Bare usernames: alphanumeric with inner hyphens, ≤39 chars — refusing the two
+      # realistic authoring mistakes, "@name" and an email address.
+      apply = map (
+        handle:
+        lib.throwIfNot (builtins.match "[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?" handle != null)
+          "propnix maintainers: '${handle}' is not a bare GitHub username (drop any leading @ or email domain; alphanumeric with inner hyphens, at most 39 chars)."
+          handle
+      );
+      default = [ ];
+      description = ''
+        GitHub usernames of whoever answers for this game → `meta.maintainers`. The pin workflows read
+        these (through `ci.<system>.maintainers`) to @mention: the weekly PR tags them on the row that
+        refreshed their game, and a pin only a human can move cc's them on its issue. A maintainer who
+        is also a repository collaborator gets a review request on the PR as well.
+      '';
     };
 
     # ── extra game-dir trees ──

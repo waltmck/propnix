@@ -29,6 +29,7 @@
 }:
 mkApp {
   pname = "fallout-nv";
+  maintainers = [ "waltmck" ];
   appid = "fallout-nv";
   name = "Fallout: New Vegas";
 
@@ -45,6 +46,10 @@ mkApp {
   # is the Gamebryo binary; it resolves Data/, *.ini relative to its own location, so cwd = C:\game is correct.
   # (The setupScript pre-seeds FalloutPrefs.ini so the engine does not itself bounce to FalloutNVLauncher.exe.)
   exe = "FalloutNV.exe";
+  # Full-colour icon auto-extracted from the exe's PE resources (icon.auto default). Symbolic vendored
+  # (CC BY-SA 4.0): the winking Vault Boy — the series mascot rather than a New Vegas-specific mark (the
+  # upstream icon is catalogued under the slug "falloutshelter"; see the file header).
+  icon.symbolic = ./fallout-nv-symbolic.svg;
   # Save: the Gamebryo engine writes saves + Fallout.ini/FalloutPrefs.ini under Documents\My Games\FalloutNV.
   # Bind the whole folder (saves + config together) out to the app's host save dir
   # ($PROPNIX_SAVE_DIR/$PROPNIX_APPID, default …/propnix-saves/fallout-nv). The setupScript below seeds

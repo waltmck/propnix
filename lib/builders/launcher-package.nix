@@ -27,6 +27,10 @@
     systems = [ ];
     reason = null;
   },
+  # Bare GitHub usernames (the mkApp `maintainers` option) → nixpkgs-shaped `meta.maintainers`. For
+  # humans and stock tooling only: CI reads the option through `config` instead, because forcing `meta`
+  # forces the derivation (see lib/tests/eval-matrix.nix).
+  maintainers ? [ ],
   description,
   extraPassthru ? { },
   # Build-time ASSERTIONS the package must not be installable without: derivations that produce an empty
@@ -82,6 +86,7 @@ symlinkJoin {
     inherit description;
     mainProgram = pname;
     broken = isBroken;
+    maintainers = map (github: { inherit github; }) maintainers;
   }
   // lib.optionalAttrs (broken.reason != null) { brokenReason = broken.reason; };
 }

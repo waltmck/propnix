@@ -594,7 +594,8 @@ fn mount_overlay(
     // `target` already exists as a dir mountpoint — the parent entry's child skeleton (or the mkdtemp view,
     // for the root) provides it, laid parent-first before this overlay.
     // Resolve the lower stack. With a skeleton, extract its tar into a fresh ns-private tmpfs and stack it
-    // as a data-only metadata layer above the store `lower` (`<skel>::<lower>`); userxattr is mandatory
+    // as the single NORMAL layer above the store `lower`(s), each of which becomes a DATA-ONLY layer
+    // (`<skel>::<l1>::<l2>…` — see the `::`-per-layer note below); userxattr is mandatory
     // unprivileged (metacopy/redirect + whiteouts use the user.overlay.* namespace). The stubs are SPARSE
     // and sized to the originals, so copy-up on write pulls the full data from the store layer. Without a
     // skeleton, `lower` is used directly (a user-owned or ephemeral lower). A `child_skel` is appended at the
@@ -628,7 +629,16 @@ fn mount_overlay(
             if let Some(cs) = child_skel {
                 seed_dir(cs, &skel)?;
             }
-            (format!("{skel}::{lower}"), ",userxattr")
+            // `::` marks ONE data-only layer, PER LAYER — not a one-shot "everything after this" separator.
+            // A multi-tree `lower` (the union game dir: DLC + extraLowers + co-base depots, colon-joined by
+            // the builder) therefore has to become `<skel>::<l1>::<l2>::<l3>`; writing `<skel>::<l1>:<l2>`
+            // makes the kernel read l2 as a REGULAR lower and reject the whole mount with EINVAL and
+            // `overlayfs: regular lower layers cannot follow data lower layers` in dmesg (MEASURED — that
+            // exact EINVAL is what a two-depot writable game dir hit before this line).
+            // NB this is why propnix-mount calls mount(2) directly and not mount(8): util-linux normalises
+            // the option string and the `::`-per-layer form does not survive it (also measured).
+            let data_layers = lower.replace(':', "::");
+            (format!("{skel}::{data_layers}"), ",userxattr")
         }
         None => {
             // No metacopy/data-only layer → the child mountpoint stubs are simply another normal lowerdir.

@@ -56,6 +56,7 @@ mkApp (
   in
   {
     pname = "outlast";
+    maintainers = [ "waltmck" ];
     appid = "outlast";
     name = "Outlast";
 

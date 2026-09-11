@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Civilization VI symbolic icon (monochrome line-art 'VI' in a rounded frame; uses currentColor so it
+  follows the theme's symbolic-icon color). Vendored into propnix as the -symbolic variant.
+
+  Source:  https://svgicons.com/icon/227444/civ-vi
+  License: CC BY-SA 4.0  (https://creativecommons.org/licenses/by-sa/4.0/)
+           This icon file remains under CC BY-SA 4.0 (attribution + share-alike); the rest of the
+           repository is not affected. "Civilization VI" and its marks are property of Take-Two Interactive / Firaxis Games.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="800" viewBox="0 0 48 48">
+<rect width="37" height="37" x="5.5" y="5.5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" rx="4" ry="4"/><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" d="M32.66 16.641v14.718m-7.569-14.718l-4.876 14.718l-4.875-14.718m15.48 0h3.68m-3.68 14.718h3.68M23.251 16.641h3.68m-13.431 0h3.68"/>
+</svg>

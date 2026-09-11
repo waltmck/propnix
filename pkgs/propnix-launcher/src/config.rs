@@ -26,6 +26,29 @@ pub const THIN_GAME_DIR: &str = "game";
 /// before `game`, so they are laid before the overlay that references them.
 pub const THIN_BINFIX_DIR: &str = ".propnix-binfixed";
 
+/// Build the `PROPNIX_PAYLOADS` value handed to a setup / userReg script: every game-content tree, ':'-joined,
+/// HIGHEST MOUNT PRIORITY FIRST — the same order the launcher unions them into the game dir, so the first hit
+/// when a script searches the list is the file the game itself will open.
+///
+/// Two vars, not one, because they answer different questions and both have callers. `PROPNIX_PAYLOAD` (the
+/// head) is "where the game runs from" — the launch cwd, the exe/icon source; a script that wants the primary
+/// tree specifically must still get exactly that, and every setup script written before this existed reads it.
+/// `PROPNIX_PAYLOADS` is "where the shipped assets are", which on a multi-depot build is NOT the head: Skyrim
+/// SE's Steam arm puts the exe (hence the head) in depot 489833 and the Low/Medium/High/Ultra.ini quality
+/// presets in 489832, so `$PROPNIX_PAYLOAD/High.ini` does not exist there. Repurposing `PROPNIX_PAYLOAD` into
+/// a list would have silently broken every existing `"$PROPNIX_PAYLOAD/file"` read instead.
+///
+/// EMPTY `payloads` → `[payload]`. The field is `#[serde(default)]` so a config baked before it existed still
+/// loads, and such a config degenerates to exactly the old single-tree behaviour rather than an empty search
+/// path (which would make `payload_require` fail on a file that is right there in the head tree).
+pub fn payload_search_path(payload: &str, payloads: &[String]) -> String {
+    if payloads.is_empty() {
+        payload.to_string()
+    } else {
+        payloads.join(":")
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -48,6 +71,11 @@ pub struct Config {
     pub backend: String,
     /// The game tree (a store path); also the launch cwd.
     pub payload: String,
+    /// EVERY game-content tree unioned into `drive_c/game`, highest mount priority first (enabled DLC, the
+    /// primary tree, then the co-base depots) — the setup/userReg hooks' `PROPNIX_PAYLOADS` search path.
+    /// See `payload_search_path` for why this is separate from `payload` and why it defaults to empty.
+    #[serde(default)]
+    pub payloads: Vec<String>,
     /// The executable to run, relative to `payload` (e.g. "Hollow Knight.exe").
     pub exe: String,
     /// Optional launch working directory, RELATIVE to the game dir (drive_c/game). Some engines resolve
@@ -88,11 +116,11 @@ pub struct Config {
     #[serde(rename = "vsyncUserReg", default)]
     pub vsync_user_reg: Vec<RegOverride>,
     /// Optional escape hatch: a store-path executable the launcher runs (INNER, prefix view live) with the
-    /// runtime env (incl. `PROPNIX_FPS`, `PROPNIX_PAYLOAD`) whose STDOUT is a JSON array of HKCU overrides
-    /// (`[{ "key": "<HKCU-relative>", "name", "value", "type"? }]`, `type` default REG_SZ) applied this
-    /// launch via the same three-way merge. For dynamic per-launch registry customization the static
-    /// `userReg`/`fpsUserReg` can't express. A non-zero exit or unparseable stdout ABORTS the launch (like
-    /// `setupScript` — a failure is a packaging bug that must surface).
+    /// runtime env (incl. `PROPNIX_FPS`, `PROPNIX_PAYLOAD`/`PROPNIX_PAYLOADS`) whose STDOUT is a JSON array
+    /// of HKCU overrides (`[{ "key": "<HKCU-relative>", "name", "value", "type"? }]`, `type` default REG_SZ)
+    /// applied this launch via the same three-way merge. For dynamic per-launch registry customization the
+    /// static `userReg`/`fpsUserReg` can't express. A non-zero exit or unparseable stdout ABORTS the launch
+    /// (like `setupScript` — a failure is a packaging bug that must surface).
     #[serde(rename = "userRegScript", default)]
     pub user_reg_script: Option<String>,
     /// The WINEPREFIX mount table: target (relative to the prefix root) → mount spec. The launcher resolves
@@ -103,8 +131,9 @@ pub struct Config {
     /// Optional per-game SETUP SCRIPT (a store-path executable) the launcher runs in the OUTER phase, before
     /// wine — the escape hatch for game-specific prefix setup that doesn't belong in the launcher itself
     /// (e.g. Skyrim seeding SkyrimPrefs.ini `iSize` + a quality preset). Runs with the runtime env available
-    /// (PROPNIX_SAVE_DIR/APPID/WIDTH/HEIGHT/QUALITY + PROPNIX_PAYLOAD = the game tree). A NON-ZERO exit ABORTS
-    /// the launch: a setup failure means a packaging bug or a would-be-corrupted prefix, which must surface.
+    /// (PROPNIX_SAVE_DIR/APPID/WIDTH/HEIGHT/QUALITY + PROPNIX_PAYLOAD = the primary game tree, PROPNIX_PAYLOADS
+    /// = all of them). A NON-ZERO exit ABORTS the launch: a setup failure means a packaging bug or a
+    /// would-be-corrupted prefix, which must surface.
     #[serde(rename = "setupScript", default)]
     pub setup_script: Option<String>,
     /// Whether this build carries the gbe_fork offline Steam-entitlement shim (steam.emu.enable).
@@ -382,11 +411,17 @@ pub struct ThinConfig {
     /// it can read shipped assets. Not derivable from `gameLowers`/`gameModeFixes`, whose heads are the
     /// backend's own overlays (patched exe, entitlement settings) rather than game content.
     pub payload: String,
+    /// ALL of them, highest mount priority first (enabled DLC, then the payload depots) — the setup hook's
+    /// `PROPNIX_PAYLOADS` search path; `payload` is its head. Same not-derivable-from-`gameLowers` reason as
+    /// above. See `payload_search_path` for why it defaults to empty.
+    #[serde(default)]
+    pub payloads: Vec<String>,
     /// Optional per-game SETUP SCRIPT (a store-path executable) run in the OUTER phase, before the view is
     /// assembled — the same hook the wine path has (`Config::setup_script`), because it is not wine-specific:
     /// it seeds a config file in the game's own save dir, which exists on the host either way. Runs with the
-    /// runtime env (PROPNIX_SAVE_DIR/APPID/WIDTH/HEIGHT/QUALITY + PROPNIX_PAYLOAD). A NON-ZERO exit ABORTS
-    /// the launch: a setup failure is a packaging bug or a half-written config, not something to launch into.
+    /// runtime env (PROPNIX_SAVE_DIR/APPID/WIDTH/HEIGHT/QUALITY + PROPNIX_PAYLOAD/PAYLOADS). A NON-ZERO exit
+    /// ABORTS the launch: a setup failure is a packaging bug or a half-written config, not something to
+    /// launch into.
     #[serde(rename = "setupScript", default)]
     pub setup_script: Option<String>,
     #[serde(rename = "maskFiles", default)]

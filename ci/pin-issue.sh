@@ -29,6 +29,8 @@
 #   ci/pin-issue.sh list-open                          # one line per game that has an open issue
 #
 # Requires: gh (authenticated via GH_TOKEN), jq. GH_REPO may name the repo when not run from a checkout.
+# Optional env, injected by the workflow so this script never evaluates nix itself: PIN_DETAIL (the
+# updater's own message) and PIN_MAINTAINERS (ready-to-render "@handle …" maintainer mentions).
 set -euo pipefail
 
 LABEL="${PROPNIX_PIN_LABEL:-pin-outdated}"
@@ -158,6 +160,13 @@ render_body() {
   printf 'The weekly job could not refresh it automatically. Anyone who owns it can produce the new pin in\n'
   printf 'a couple of commands; **no disk space for the game is needed**, because the hash is computed by\n'
   printf 'streaming.\n\n'
+  # Space-separated "@handle"s from the workflow (the game's `maintainers` option). Plain text, never
+  # backticked — a code span suppresses the mention. Because this renders only when the body is
+  # (re)written, the unchanged-target guard below still means "no writes, no notifications" on the
+  # weekly no-op: maintainers are pinged on open and on a genuine upstream move, not every Monday.
+  if [ -n "${PIN_MAINTAINERS:-}" ]; then
+    printf 'Cc %s — listed as maintainer(s) of this game.\n\n' "$PIN_MAINTAINERS"
+  fi
   # The tool's own message, verbatim — an expired credential and an unowned title are different problems
   # and guessing between them wastes the reader's time.
   local detail=${PIN_DETAIL:-}

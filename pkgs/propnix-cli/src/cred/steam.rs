@@ -124,10 +124,9 @@ fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
                     return Some(found);
                 }
             }
-            Ok(t) if t.is_file()
-                && p.file_name().map(|n| n == name).unwrap_or(false) => {
-                    return Some(p);
-                }
+            Ok(t) if t.is_file() && p.file_name().map(|n| n == name).unwrap_or(false) => {
+                return Some(p);
+            }
             _ => {}
         }
     }

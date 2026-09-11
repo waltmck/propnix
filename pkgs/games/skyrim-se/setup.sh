@@ -9,12 +9,22 @@
 #
 # Env provided by the launcher:
 #   PROPNIX_SAVE_DIR, PROPNIX_APPID  — host save dir = $PROPNIX_SAVE_DIR/$PROPNIX_APPID (bound into the prefix
-#                                      at Documents\My Games\Skyrim Special Edition GOG; the saveBinds row in
-#                                      default.nix)
+#                                      under Documents\My Games\ by the saveBinds row in default.nix; the
+#                                      folder name there is FETCHER-dependent — the GOG build uses the
+#                                      " GOG"-suffixed one — which is exactly why this script writes to the
+#                                      HOST dir and lets the bind place it)
 #   PROPNIX_WIDTH, PROPNIX_HEIGHT    — the compositor's primary-output mode, physical px (may be unset if the
 #                                      launcher couldn't read the display — then iSize is left as-is)
 #   PROPNIX_QUALITY                  — low|medium|high|ultra|default (validated by the launcher; may be unset)
-#   PROPNIX_PAYLOAD                  — the game tree (ships Low/Medium/High/Ultra.ini quality presets at root)
+#   PROPNIX_PAYLOAD                  — the PRIMARY game tree (the launch cwd / exe+icon source)
+#   PROPNIX_PAYLOADS                 — EVERY game tree, ':'-joined in mount-priority order. The quality
+#                                      presets are read from THIS, via `payload_require` (mkSetupScript's
+#                                      payload-lib.sh), never as "$PROPNIX_PAYLOAD/<file>": Low/Medium/High/
+#                                      Ultra.ini are not always in the head tree. On GOG the build is one
+#                                      tree and they sit at its root; on Steam the title is split across
+#                                      depots, with SkyrimSE.exe — and hence the head, since `icon.auto`
+#                                      runs wrestool on ${head}/${exe} — in one and the presets in another.
+#                                      Searching every tree makes ONE line correct on both arms.
 
 prefs="$PROPNIX_SAVE_DIR/$PROPNIX_APPID/SkyrimPrefs.ini"
 mkdir -p "$(dirname "$prefs")"
@@ -27,11 +37,11 @@ mkdir -p "$(dirname "$prefs")"
 case "${PROPNIX_QUALITY:-}" in
   low | medium | high | ultra)
     cap="$(printf '%s' "${PROPNIX_QUALITY:0:1}" | tr '[:lower:]' '[:upper:]')${PROPNIX_QUALITY:1}"
-    preset="$PROPNIX_PAYLOAD/$cap.ini"
-    [ -f "$preset" ] || {
-      echo "skyrim-setup: quality preset not found: $preset" >&2
-      exit 1
-    }
+    # `payload_require` searches every payload tree in mount-priority order and, on a miss, prints the trees
+    # it searched before failing — under `set -e` the failed command substitution aborts the script, which
+    # aborts the launch. A miss here IS a packaging bug (a preset depot missing from this arm's pin), and
+    # silently launching at the engine baseline would just look like PROPNIX_QUALITY being ignored.
+    preset="$(payload_require "$cap.ini")"
     sec=""
     while IFS= read -r line; do
       line="${line%$'\r'}" # the shipped preset INIs are Windows CRLF — strip the trailing CR

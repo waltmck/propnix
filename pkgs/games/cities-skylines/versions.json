@@ -1,0 +1,59 @@
+{
+  "fetchInfo": {
+    "steam": {
+      "x86_64-windows": [
+        {
+          "pname": "cities-skylines-255711",
+          "appId": 255710,
+          "depotId": 255711,
+          "manifestId": "2922595189637474747",
+          "version": "22724702",
+          "outputHash": "sha256-UFblKJONo/OLkM9MjKbpfES7s+E4KCHGX2XRIYoUKDg=",
+          "title": "Cities: Skylines (windows, Steam)"
+        }
+      ]
+    }
+  },
+  "dlc": {
+    "relaxation-station": {
+      "pname": "cities-skylines-dlc-255714-255714",
+      "appId": 255710,
+      "depotId": 255714,
+      "dlcAppId": 547501,
+      "manifestId": "1134142675767592641",
+      "version": "22724702",
+      "outputHash": "sha256-KYJM4LBgmh4U2xMYjPsh0TQYv2OFa8DyVdtuHTi6pPI=",
+      "title": "Cities: Skylines - Relaxation Station (Steam)"
+    },
+    "concerts": {
+      "pname": "cities-skylines-dlc-255720-255720",
+      "appId": 255710,
+      "depotId": 255720,
+      "dlcAppId": 614581,
+      "manifestId": "852385160178766697",
+      "version": "22724702",
+      "outputHash": "sha256-tgx1Z5WdehA59CHxjLE5S0irr2FpEF3d5rPYJrEutm4=",
+      "title": "Cities: Skylines - Concerts (Steam)"
+    },
+    "rock-city-radio": {
+      "pname": "cities-skylines-dlc-255717-255717",
+      "appId": 255710,
+      "depotId": 255717,
+      "dlcAppId": 614582,
+      "manifestId": "457366953280935037",
+      "version": "22724702",
+      "outputHash": "sha256-aT9M1tDmV0e5n3RimDY1vow/lLCCDiupFmwPChJoxtI=",
+      "title": "Cities: Skylines - Rock City Radio (Steam)"
+    },
+    "all-that-jazz": {
+      "pname": "cities-skylines-dlc-255726-255726",
+      "appId": 255710,
+      "depotId": 255726,
+      "dlcAppId": 715193,
+      "manifestId": "7459269725805026117",
+      "version": "22724702",
+      "outputHash": "sha256-uuFEwC9eyhDMoo11CsEYtcjYjzzg1yDbNEj2fvHgKN0=",
+      "title": "Cities: Skylines - All That Jazz (Steam)"
+    }
+  }
+}

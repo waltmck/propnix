@@ -30,6 +30,7 @@ mkApp (
   { config, ... }:
   {
     pname = "stellaris";
+    maintainers = [ "waltmck" ];
     appid = "stellaris";
     name = "Stellaris";
 

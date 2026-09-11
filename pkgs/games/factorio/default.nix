@@ -64,6 +64,7 @@ mkApp (
   in
   {
     pname = "factorio";
+    maintainers = [ "waltmck" ];
     appid = "factorio";
     name = "Factorio";
 

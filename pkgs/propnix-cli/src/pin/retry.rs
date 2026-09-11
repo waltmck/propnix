@@ -114,48 +114,79 @@ mod tests {
     #[test]
     fn a_transient_failure_is_survived() {
         let n = Cell::new(0);
-        let got: Result<u32, String> = with_retry("chunk", &FAST, |_| true, || {
-            n.set(n.get() + 1);
-            if n.get() < 3 {
-                Err("response body closed before all bytes were read".to_string())
-            } else {
-                Ok(7)
-            }
-        });
+        let got: Result<u32, String> = with_retry(
+            "chunk",
+            &FAST,
+            |_| true,
+            || {
+                n.set(n.get() + 1);
+                if n.get() < 3 {
+                    Err("response body closed before all bytes were read".to_string())
+                } else {
+                    Ok(7)
+                }
+            },
+        );
         assert_eq!(got.unwrap(), 7);
-        assert_eq!(n.get(), 3, "it must actually have retried, not succeeded first time");
+        assert_eq!(
+            n.get(),
+            3,
+            "it must actually have retried, not succeeded first time"
+        );
     }
 
     #[test]
     fn a_deliberate_refusal_is_not_retried() {
         // Retrying a 403 would turn a clear ownership answer into a slow one.
         let n = Cell::new(0);
-        let got: Result<u32, String> = with_retry("chunk", &FAST, |e: &String| !e.contains("403"), || {
-            n.set(n.get() + 1);
-            Err("HTTP 403".to_string())
-        });
+        let got: Result<u32, String> = with_retry(
+            "chunk",
+            &FAST,
+            |e: &String| !e.contains("403"),
+            || {
+                n.set(n.get() + 1);
+                Err("HTTP 403".to_string())
+            },
+        );
         assert!(got.is_err());
-        assert_eq!(n.get(), 1, "a non-retryable error must be returned on the first try");
+        assert_eq!(
+            n.get(),
+            1,
+            "a non-retryable error must be returned on the first try"
+        );
     }
 
     #[test]
     fn the_attempt_count_is_the_only_stopping_rule() {
         // No wall-clock deadline anywhere: a laptop asleep between attempts must not lose its chances.
         let n = Cell::new(0);
-        let got: Result<u32, String> = with_retry("chunk", &FAST, |_| true, || {
-            n.set(n.get() + 1);
-            Err("connection reset".to_string())
-        });
+        let got: Result<u32, String> = with_retry(
+            "chunk",
+            &FAST,
+            |_| true,
+            || {
+                n.set(n.get() + 1);
+                Err("connection reset".to_string())
+            },
+        );
         assert!(got.is_err());
         assert_eq!(n.get(), FAST.attempts as usize);
 
         // attempts = 1 means "do not retry at all".
-        let once = Policy { attempts: 1, ..FAST };
+        let once = Policy {
+            attempts: 1,
+            ..FAST
+        };
         let n = Cell::new(0);
-        let _: Result<u32, String> = with_retry("chunk", &once, |_| true, || {
-            n.set(n.get() + 1);
-            Err("connection reset".to_string())
-        });
+        let _: Result<u32, String> = with_retry(
+            "chunk",
+            &once,
+            |_| true,
+            || {
+                n.set(n.get() + 1);
+                Err("connection reset".to_string())
+            },
+        );
         assert_eq!(n.get(), 1);
     }
 
@@ -164,10 +195,13 @@ mod tests {
         assert_eq!(METADATA.interval(1), Duration::from_secs(1));
         assert_eq!(METADATA.interval(2), Duration::from_secs(2));
         assert_eq!(METADATA.interval(6), Duration::from_secs(32));
-        assert_eq!(METADATA.interval(7), Duration::from_secs(32), "capped, never unbounded");
+        assert_eq!(
+            METADATA.interval(7),
+            Duration::from_secs(32),
+            "capped, never unbounded"
+        );
         // …and no shift or multiply can overflow, however large the attempt number.
         assert_eq!(METADATA.interval(u32::MAX), Duration::from_secs(32));
         assert_eq!(METADATA.total_wait(), Duration::from_secs(95)); // ~1.5 min
-
     }
 }

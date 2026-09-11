@@ -72,6 +72,8 @@
     systems = [ ];
     reason = null;
   },
+  # Bare GitHub usernames → meta.maintainers (see mkLauncherPackage).
+  maintainers ? [ ],
   # DLC framework: `dlc` = the AVAILABLE set (name → overlay-tree derivation); `enabledDlc` = the selected
   # derivations (mkApp resolves names). Enabling flips the game mount from a read-only bind to a read-only
   # multi-lower OVERLAY (DLC-first), merging the trees at mount time with NO store copy of the base.
@@ -230,14 +232,26 @@ let
   # a game just writes `type = "overlay"` and gets writable CoW-from-store for free (no seeding, shared
   # store inode/page-cache). An explicit `skeleton` is honoured: a path uses that tar; `null` opts OUT to
   # a plain overlay (nothing ever copied up — ephemeral/read-only overlays).
+  #
+  # `lower` MAY BE A COLON-JOINED UNION (the multi-tree game dir: DLC + `extraLowers` + co-base depots), and
+  # the default skeleton spans the WHOLE stack — mkStoreSkeleton takes the lowers as a LIST, first tree wins
+  # per path. That is what makes a WRITABLE multi-depot game dir expressible at all: propnix-mount composes
+  # `lowerdir=<skel>::<l1>::<l2>…` (the `::` is PER data layer — see the note at that `format!`), i.e. ONE
+  # normal metadata layer over N data-only layers, so a path the skeleton fails to stub is a path the merged
+  # tree cannot copy up. Before this the builder handed the whole colon-joined string to a single `cd`, and
+  # pkgs/games/rust carried the resulting gap as a KNOWN GAP.
   withDefaultSkeletons = lib.mapAttrs (
     target: m:
+    let
+      lowers = lib.splitString ":" m.lower;
+      nonStore = lib.filter (l: !(lib.hasPrefix (builtins.storeDir + "/") l)) lowers;
+    in
     if (m.type or "mount") == "overlay" && !(m ? skeleton) then
-      if lib.hasPrefix (builtins.storeDir + "/") m.lower then
+      if nonStore == [ ] then
         m
         // {
           skeleton = "${mkStoreSkeleton {
-            payload = m.lower;
+            payloads = lowers;
             # replaceStrings keeps the historical names for existing targets; sanitizeDerivationName then
             # guarantees validity for any target character it doesn't cover (e.g. parentheses).
             name = lib.strings.sanitizeDerivationName "${appid}-${
@@ -247,9 +261,9 @@ let
         }
       else
         throw ''
-          propnix: overlay mount "${target}" (game "${appid}") has lower "${m.lower}", which is not in
-          ${builtins.storeDir}. A default CoW-from-store skeleton can only be built from a store path (it is
-          built at eval time, so the lower must exist in the store). Either:
+          propnix: overlay mount "${target}" (game "${appid}") has lower "${m.lower}", whose component(s)
+          ${toString nonStore} are not in ${builtins.storeDir}. A default CoW-from-store skeleton can only be
+          built from store paths (it is built at eval time, so every lower must exist in the store). Either:
             • set `skeleton = null` for a plain overlay (a user-owned or ephemeral lower — e.g. Temp), or
             • provide `skeleton` explicitly.''
     else
@@ -363,6 +377,13 @@ let
       online = online;
       icon = splashIcon; # largest extracted icon (for the splash), or null
       payload = "${payload}"; # the primary game tree; the launch cwd (store DLLs are stubbed/whited-out via mount rows)
+      # EVERY game-content tree, in the order `drive_c/game` unions them (leftmost wins) — the setup hook's
+      # `PROPNIX_PAYLOADS` search path, so a script can read an asset that a multi-depot build put outside
+      # the primary tree. Mirrors `gameMount`'s lower order MINUS `extraLowers` (content that is, by that
+      # param's own contract, "neither payload nor DLC"): enabled DLC, then the primary tree, then the
+      # co-base depots. NB with DLC enabled the head here is a DLC tree, NOT `payload` — deliberately: a
+      # complete-tree DLC is what the game actually opens, and that is what a setup script must seed from.
+      payloads = map (d: "${d}") enabledDlc ++ [ "${payload}" ] ++ map (d: "${d}") coBaseTrees;
       emulators = {
         wine = "${wine}";
         # No `prefixLower`: the read-only system tree is referenced only by the `mounts` rows above
@@ -416,6 +437,7 @@ mkLauncherPackage {
     configFile
     iconTree
     broken
+    maintainers
     ;
   iconSymbolic = icon.symbolic;
   description = "${name} — propnix wine app (${backend})";

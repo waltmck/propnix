@@ -13,20 +13,28 @@
 # native WoW64. The renderer is OpenGL (static OPENGL32 import) → wine builtin opengl32 → host GL; the
 # i386-windows platform default d3d = wined3d applies (DXVK is ARM64EC-only, unusable by a 32-bit process).
 #
+# DISPLAY: the engine NEVER asks the display how big it is — its resolution comes from the player profile,
+# whose fallback is a hardcoded 1920x1080, so any larger monitor got a small window. `setupScript` below fixes
+# it by generating the engine's own `commandLine.txt` options file (`-w`/`-h`/`-fullscreen`) from the live
+# compositor mode on every launch; see setup.sh for the switches and wine-tuning.nix for where the file lands.
+#
 #   nix run .#homeworld-rm --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64-linux or x86_64-linux
 {
   lib,
   mkApp,
+  mkSetupScript,
 }:
 let
   # tuning is a FUNCTION of `payload` (its writable game-dir overlay references the payload store path);
-  # applied to the resolved payload below. It carries graphics, the Galaxy stub, and the game-dir overlay.
+  # applied to the resolved payload below. It carries graphics and the writable game-dir overlay (and the
+  # record of why this title binds NO Galaxy stub — see wine-tuning.nix).
   tuning = import ./wine-tuning.nix;
 in
 mkApp (
   { config, lib, ... }:
   {
     pname = "homeworld-rm";
+    maintainers = [ "waltmck" ];
     appid = "homeworld-rm";
     name = "Homeworld Remastered Collection";
     # GOG-Windows, 32-bit (i386).
@@ -34,26 +42,39 @@ mkApp (
     # Launch the REAL game binary DIRECTLY, NOT the goggame.info isPrimary "HWRStart.exe" — HWRStart is the
     # collection's chooser/launcher (it lets the user pick HW1/HW2 Remastered or the Classics, then SPAWNS the
     # picked game and EXITS; a launcher-that-exits trips the propnix launcher's primary-child teardown, same as
-    # Outlast's OutlastLauncher / Stellaris' dowser). HomeworldRM.exe is the Homeworld Remastered game binary;
-    # the HW2/HWRM engine resolves its data root (HomeworldRM/Data/*.big) from the module path (two dirs up
-    # from Bin/Release), so launching from cwd = C:\game (the payload root) is fine.
+    # Outlast's OutlastLauncher / Stellaris' dowser). HomeworldRM.exe is the Homeworld Remastered game binary.
     exe = "HomeworldRM/Bin/Release/HomeworldRM.exe";
-    # BROKEN on aarch64 (runtime-diagnosed). With the full 32-bit enablement in place — wowbox64 + a populated
-    # syswow64 + the x86 WinSxS manifests in wine-prefix-lower, plus the writable game-dir overlay, graphics=x11
-    # and the platform-default d3d=wined3d — HomeworldRM.exe (a 32-bit/i386 PE) gets DEEP into init: it clears
-    # the DLL loads, the Galaxy stub, the "Administrative access" folder-write check, the comctl32 v6 activation
-    # context, and (on the FEX i386 backend) even MAPS its "Homeworld Remastered" top-level window. Then it dies
-    # in its SEH/setjmp-heavy early-init code with an EXCEPTION_ACCESS_VIOLATION — reproducibly, on BOTH WoW64
-    # i386 emulators, at DIFFERENT points: FEX (libwow64fex) faults on an EXECUTE at eip=0x008E6060 (a corrupted
-    # indirect-branch target in the exe) → the game's crash handler shows its multilingual "Access Violation"
-    # box; box64 (wowbox64, the default) faults earlier on a near-null READ (info addr ~0x3733) at guest
-    # eip=0x006E4E72, before the main window, then wedges. Two DIFFERENT fault sites/types on the two backends
-    # = an x86-on-ARM64 codegen/SEH-translation bug in the emulator, NOT a fixable prefix/config issue (same
-    # CLASS as the KSP FEX-codegen blocker). Every propnix/wine/prefix lever was exhausted (both emulators, the
-    # winsxs actctx fix, x11/wayland, wined3d). Needs an upstream FEX/box64 fix. Native x86_64 wine runs i386
-    # via native WoW64 (no FEX/box64), so it is unaffected there — the package still builds and runs on x86_64.
-    broken.systems = [ "aarch64-linux" ];
-    broken.reason = "HomeworldRM.exe (32-bit i386) reaches deep init and maps its window under FEX, then hits a reproducible EXCEPTION_ACCESS_VIOLATION in its SEH/setjmp-heavy early init on BOTH WoW64 i386 backends at different sites (FEX: execute-AV at exe eip 0x8E6060; box64: near-null read at eip 0x6E4E72) — an x86-on-ARM64 emulator codegen/SEH bug, not fixable at the propnix/wine layer (needs upstream FEX/box64). Runs on native x86_64 (native WoW64, no emulator).";
+    # cwd = the exe's own directory, NOT the payload root. This spec used to assert the opposite — that the
+    # HW2/HWRM engine resolves its data root from the module path, "so launching from cwd = C:\game is fine"
+    # — and that was never tested, because the game had always died in Galaxy init before it looked for its
+    # data (see wine-tuning.nix). With the crash gone it turns out to be false: from cwd = C:\game the
+    # engine writes `HwRM.log` with " Error starting up Data path. " and exits WITHOUT a window, while from
+    # cwd = HomeworldRM\Bin\Release it maps its "Homeworld Remastered" window within ~12 s and stays up.
+    # GOG's own goggame-2114871440.info says the same thing: the hidden "Homeworld Remastered" playTask
+    # carries `"workingDir": "HomeworldRM/Bin/Release"`. (Measured 2026-09-03 on x86_64-linux.)
+    workingDir = "HomeworldRM/Bin/Release";
+    # Fully offline, enforced by the kernel (loopback-only netns) rather than by neutering the bundled SDK:
+    # the usual mechanism — a no-op `wine.galaxyStubDlls` bind over the game's Galaxy.dll — is UNUSABLE for
+    # a 32-bit title (the stub's uniform zero-argument vtable violates __thiscall's callee-pops rule and
+    # crashed the game; the evidence is in wine-tuning.nix and lib/backends/wine/defaults.nix). The real
+    # 32-bit Galaxy SDK therefore loads, and with no route out it takes its offline path: it throws and
+    # swallows its own `galaxy::api::IError` C++ exceptions during init and the game proceeds to render.
+    # Homeworld RM's single-player campaigns need no network; multiplayer does, and is out of scope here.
+    online = false;
+
+    # Run setup.sh before launch: generate the engine's `commandLine.txt` options file carrying the live
+    # display resolution (`w`/`h`) + `fullscreen`. WITHOUT IT the game starts at 1920x1080 — MEASURED, not
+    # inferred: on a 3840x2160 output HwRM.log reported `Switching to a 1920x1080 32bit mode` and
+    # `Display: (0, 0, 1920, 1080)` with an empty `CmdLine:`, i.e. a quarter-area window. 1920x1080 is the
+    # engine's own hardcoded profile default (pushed as the fallback to the profile getter at VA 0x41503a /
+    # 0x415051) — the game NEVER asks the display what size it is, so a big monitor always gets a small window.
+    # No `withIniLib`: this file is not INI, it is the engine's own one-option-per-line format (setup.sh).
+    # Top-level, not a wine knob: the hook runs in the OUTER phase before any prefix exists.
+    setupScript = mkSetupScript {
+      name = "homeworld-rm-setup";
+      script = ./setup.sh;
+    };
+
     wine = tuning { payload = lib.head config.payloads; }; # function-tuning: applied to the payload store path
   }
 )

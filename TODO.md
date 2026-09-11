@@ -1,0 +1,5 @@
+- Make sure easily buildable things (e.g. overlay skeleton, entitlement, wrapper) have `allowSubstituters=false` set; currently checking all fetchers takes significant time.
+- Silksong doesn't run, just stalls forever at loading screen.
+- KSP also crashes, while loading assets; a subsequent run showed only a white screen. This is actually very similar to the crash observed on ARM (assumed to be a FEX incompatibility), which gives me hope that maybe the problem there wasn't FEX-related after all.
+- Add DXVK_HDR=1 to no-mans-sky (this is sufficient to make HDR work)
+- SDR-only games have a very high min brightness when in fullscreen; they look reasonable when windowed. This is probably a hyprland problem, but are there any DXVK knobs to adjust tonemapping strategy for SDR games? Or, alternatively, how is this best fixed in Hyprland?

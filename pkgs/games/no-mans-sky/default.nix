@@ -15,6 +15,7 @@ mkApp (
   { config, lib, ... }:
   {
     pname = "no-mans-sky";
+    maintainers = [ "waltmck" ];
     appid = "no-mans-sky";
     name = "No Man's Sky";
     # the fetcher takes the NUMERIC productId (not the slug); pins verified reproducible (fetchGogGalaxyBuild hdr).

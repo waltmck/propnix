@@ -12,6 +12,7 @@
 }:
 mkApp {
   pname = "dont-starve";
+  maintainers = [ "waltmck" ];
   appid = "dont-starve";
   name = "Don't Starve";
 
@@ -33,6 +34,9 @@ mkApp {
   # finding assets at ..\data — the goggame workingDir "bin". Without this the default cwd (C:\game root) makes
   # it look for ..\data = C:\data and it dies at startup (`Missing Shader 'shaders/font.ksh'` — verified).
   workingDir = "bin";
+  # Full-colour icon auto-extracted from the exe's PE resources (icon.auto default). Symbolic vendored
+  # (CC BY-SA 4.0): line-art of Wilson, the default survivor.
+  icon.symbolic = ./dont-starve-symbolic.svg;
   # Save: the GOG install script (goggame-1207659210.script → savePath "{userdocs}/Klei/DoNotStarve")
   # redirects saves to Documents\Klei\DoNotStarve. Bind the whole folder (saves + settings.ini together) out
   # to the app's host save dir ($PROPNIX_SAVE_DIR/$PROPNIX_APPID, default …/propnix-saves/dont-starve).

@@ -15,6 +15,7 @@
 }:
 mkApp {
   pname = "papers-please";
+  maintainers = [ "waltmck" ];
   appid = "papers-please";
   name = "Papers, Please";
 

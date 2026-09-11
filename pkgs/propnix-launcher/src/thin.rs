@@ -17,7 +17,7 @@
 //!   * A native SDL/GL game emits none of wine's D3D first-present stderr markers, so the splash dismiss
 //!     relies on the window-watcher (game window MAPs → dismiss; window DESTROYED → force teardown).
 
-use crate::config::{ThinConfig, THIN_BINFIX_DIR, THIN_GAME_DIR};
+use crate::config::{payload_search_path, ThinConfig, THIN_BINFIX_DIR, THIN_GAME_DIR};
 use crate::settings::{Paths, Settings};
 use crate::{focus, mount, run, settings, signals, splash, util};
 use propnix_mount::Entry;
@@ -150,6 +150,12 @@ fn run_outer(
     if let Some(script) = &cfg.setup_script {
         let mut cmd = std::process::Command::new(script);
         cmd.env("PROPNIX_PAYLOAD", &cfg.payload);
+        // ALL the game trees, ':'-joined in mount-priority order — the head alone is not where a multi-depot
+        // build necessarily ships the asset the script reads (config::payload_search_path).
+        cmd.env(
+            "PROPNIX_PAYLOADS",
+            payload_search_path(&cfg.payload, &cfg.payloads),
+        );
         match cmd.status() {
             Ok(s) if s.success() => {}
             Ok(s) => {

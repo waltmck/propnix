@@ -23,6 +23,7 @@
 }:
 mkApp {
   pname = "outlast-2";
+  maintainers = [ "waltmck" ];
   appid = "outlast-2";
   name = "Outlast 2";
 

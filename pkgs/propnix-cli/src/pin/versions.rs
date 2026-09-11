@@ -155,9 +155,9 @@ impl VersionsFile {
             // BTreeMap for a deterministic fetcher/platform walk regardless of file key order.
             let fetchers: BTreeMap<_, _> = fi.iter().collect();
             for (fetcher, plats) in fetchers {
-                let plats = plats
-                    .as_object()
-                    .ok_or_else(|| Error::Schema(format!("fetchInfo.{fetcher} is not an object")))?;
+                let plats = plats.as_object().ok_or_else(|| {
+                    Error::Schema(format!("fetchInfo.{fetcher} is not an object"))
+                })?;
                 let plats: BTreeMap<_, _> = plats.iter().collect();
                 for (platform, arr) in plats {
                     let arr = arr.as_array().ok_or_else(|| {
@@ -267,7 +267,10 @@ impl VersionsFile {
 
     /// `pin.version`, normalized to fetcher -> version. Returns the map plus whether the file used the
     /// one-store SHORTHAND (a bare string), which the report renders back verbatim.
-    fn parse_pin_version(&self, v: Option<&Value>) -> Result<(BTreeMap<String, String>, bool), Error> {
+    fn parse_pin_version(
+        &self,
+        v: Option<&Value>,
+    ) -> Result<(BTreeMap<String, String>, bool), Error> {
         let Some(v) = v else {
             return Ok((BTreeMap::new(), false));
         };
@@ -344,7 +347,10 @@ impl VersionsFile {
             freeze: obj.get("freeze").and_then(Value::as_bool).unwrap_or(false),
             version,
             shorthand,
-            reason: obj.get("reason").and_then(Value::as_str).map(str::to_string),
+            reason: obj
+                .get("reason")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         };
         if !p.is_default() && p.reason.as_deref().unwrap_or("").trim().is_empty() {
             return Err(Error::Schema(
@@ -369,7 +375,6 @@ impl VersionsFile {
         s.push('\n');
         s
     }
-
 }
 
 /// Keys the tool may INSERT (not just update): each is declared (with a null default) in ITS OWN store's
@@ -486,7 +491,10 @@ impl Policy {
     pub fn for_test(version: &[(&str, &str)], reason: &str) -> Policy {
         Policy {
             freeze: false,
-            version: version.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            version: version
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             shorthand: false,
             reason: Some(reason.to_string()),
         }
@@ -614,7 +622,10 @@ mod tests {
         let out = f.render();
         // `generation` must stay a JSON number and `productId` a JSON string: the fetcher signatures are
         // closed and typed, so coercing either breaks evaluation.
-        assert!(out.contains("\"generation\": 2\n"), "numbers must stay numbers");
+        assert!(
+            out.contains("\"generation\": 2\n"),
+            "numbers must stay numbers"
+        );
         assert!(!out.contains("\"generation\": \"2\""));
         assert!(out.contains("\"productId\": \"1238653230\""));
         assert!(out.contains("\"outputHash\": \"sha256-ZZZ=\""));
@@ -648,15 +659,25 @@ mod tests {
         // A DLC edit naming a key that does not exist must abort the WHOLE batch, leaving the base edit
         // unwritten — otherwise the game would move without its DLC.
         let bad = vec![
-            (base.clone(), "outputHash".to_string(), "sha256-NEW=".to_string()),
             (
-                PinLoc::Dlc { name: "space-age".into() },
+                base.clone(),
+                "outputHash".to_string(),
+                "sha256-NEW=".to_string(),
+            ),
+            (
+                PinLoc::Dlc {
+                    name: "space-age".into(),
+                },
                 "nope".to_string(),
                 "x".to_string(),
             ),
         ];
         assert!(f.apply_all(&bad).is_err());
-        assert_eq!(f.render(), FACTORIO, "a rejected batch must change nothing at all");
+        assert_eq!(
+            f.render(),
+            FACTORIO,
+            "a rejected batch must change nothing at all"
+        );
 
         // The same batch minus the bad edit goes through.
         let good = vec![(base, "outputHash".to_string(), "sha256-NEW=".to_string())];
@@ -669,13 +690,20 @@ mod tests {
     #[test]
     fn policy_defaults_to_following_upstream() {
         let p = write_tmp(FACTORIO);
-        assert!(VersionsFile::load(&p).unwrap().policy().unwrap().is_default());
+        assert!(VersionsFile::load(&p)
+            .unwrap()
+            .policy()
+            .unwrap()
+            .is_default());
     }
 
     #[test]
     fn policy_is_parsed_and_validated() {
         let with = |pin: &str| {
-            let body = FACTORIO.replace("{\n  \"fetchInfo\"", &format!("{{\n  \"pin\": {pin},\n  \"fetchInfo\""));
+            let body = FACTORIO.replace(
+                "{\n  \"fetchInfo\"",
+                &format!("{{\n  \"pin\": {pin},\n  \"fetchInfo\""),
+            );
             VersionsFile::load(&write_tmp(&body)).unwrap().policy()
         };
         let ok = with(r#"{ "freeze": true, "reason": "mods" }"#).unwrap();
@@ -684,7 +712,11 @@ mod tests {
         // Factorio pins exactly one fetcher, so the bare-string shorthand is legal and means `gog`.
         let ver = with(r#"{ "version": "2.0.77", "reason": "regression" }"#).unwrap();
         assert_eq!(ver.version.get("gog").map(String::as_str), Some("2.0.77"));
-        assert_eq!(ver.pinned_to().as_deref(), Some("2.0.77"), "shorthand renders as written");
+        assert_eq!(
+            ver.pinned_to().as_deref(),
+            Some("2.0.77"),
+            "shorthand renders as written"
+        );
         assert!(!ver.freeze);
 
         // …and the explicit object form is equivalent, but renders store-qualified.
@@ -732,25 +764,46 @@ mod tests {
     #[test]
     fn a_mixed_store_game_must_say_which_store_a_version_pins() {
         let with = |pin: &str| {
-            let body = TWO_STORE.replace("{\n  \"fetchInfo\"", &format!("{{\n  \"pin\": {pin},\n  \"fetchInfo\""));
+            let body = TWO_STORE.replace(
+                "{\n  \"fetchInfo\"",
+                &format!("{{\n  \"pin\": {pin},\n  \"fetchInfo\""),
+            );
             VersionsFile::load(&write_tmp(&body)).unwrap().policy()
         };
         // The shorthand is ambiguous here — "1.5.12620" is a GOG version_name and means nothing to
         // Steam — so it must be refused, and the error must show the shape that works.
-        let err = with(r#"{ "version": "1.5.12620", "reason": "r" }"#).unwrap_err().to_string();
-        assert!(err.contains("\"gog\""), "the error must show the object form; got: {err}");
-        assert!(err.contains("\"steam\""), "…naming every store this game pins; got: {err}");
+        let err = with(r#"{ "version": "1.5.12620", "reason": "r" }"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("\"gog\""),
+            "the error must show the object form; got: {err}"
+        );
+        assert!(
+            err.contains("\"steam\""),
+            "…naming every store this game pins; got: {err}"
+        );
 
-        let p = with(r#"{ "version": { "gog": "1.5.12620", "steam": "1.5.78.11" }, "reason": "r" }"#)
-            .unwrap();
+        let p =
+            with(r#"{ "version": { "gog": "1.5.12620", "steam": "1.5.78.11" }, "reason": "r" }"#)
+                .unwrap();
         assert_eq!(p.version.get("gog").map(String::as_str), Some("1.5.12620"));
-        assert_eq!(p.version.get("steam").map(String::as_str), Some("1.5.78.11"));
-        assert_eq!(p.pinned_to().as_deref(), Some("gog=1.5.12620 steam=1.5.78.11"));
+        assert_eq!(
+            p.version.get("steam").map(String::as_str),
+            Some("1.5.78.11")
+        );
+        assert_eq!(
+            p.pinned_to().as_deref(),
+            Some("gog=1.5.12620 steam=1.5.78.11")
+        );
 
         // Per-store pinning is independent: one store held, the other following upstream.
         let one = with(r#"{ "version": { "steam": "1.5.78.11" }, "reason": "r" }"#).unwrap();
         assert_eq!(one.version.len(), 1);
-        assert!(!one.version.contains_key("gog"), "an absent store follows upstream");
+        assert!(
+            !one.version.contains_key("gog"),
+            "an absent store follows upstream"
+        );
     }
 
     #[test]
@@ -772,9 +825,18 @@ mod tests {
         // A row under a fetcher this binary predates must NOT be duck-typed into GogGalaxy and then die
         // on a misleading "missing productId".
         let body = TWO_STORE.replace("\"gog\": {", "\"epic\": {");
-        let e = VersionsFile::load(&write_tmp(&body)).unwrap().pins().unwrap_err();
-        assert!(matches!(e, Error::UnknownFetcher(_)), "must be its own type, got {e:?}");
-        assert!(e.to_string().contains("epic"), "the error must name the key: {e}");
+        let e = VersionsFile::load(&write_tmp(&body))
+            .unwrap()
+            .pins()
+            .unwrap_err();
+        assert!(
+            matches!(e, Error::UnknownFetcher(_)),
+            "must be its own type, got {e:?}"
+        );
+        assert!(
+            e.to_string().contains("epic"),
+            "the error must name the key: {e}"
+        );
     }
 
     #[test]
@@ -800,10 +862,16 @@ mod tests {
                 (base.clone(), "somethingElse".into(), "x".into()),
             ])
             .is_err());
-        assert_eq!(f.render(), before, "a rejected batch must change nothing at all");
+        assert_eq!(
+            f.render(),
+            before,
+            "a rejected batch must change nothing at all"
+        );
         // A batch that only inserts an allowlisted key goes through.
         f.apply_all(&[(
-            PinLoc::Dlc { name: "space-age".into() },
+            PinLoc::Dlc {
+                name: "space-age".into(),
+            },
             "depsBuildId".into(),
             "777".into(),
         )])
@@ -820,7 +888,11 @@ mod tests {
         let p = write_tmp(&body);
         let mut f = VersionsFile::load(&p).unwrap();
         f.set_existing(
-            &PinLoc::Payload { fetcher: "gog".into(), platform: "x86_64-windows".into(), index: 0 },
+            &PinLoc::Payload {
+                fetcher: "gog".into(),
+                platform: "x86_64-windows".into(),
+                index: 0,
+            },
             "outputHash",
             "sha256-ZZZ=",
         )

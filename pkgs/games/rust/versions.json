@@ -1,0 +1,26 @@
+{
+  "fetchInfo": {
+    "steam": {
+      "x86_64-windows": [
+        {
+          "pname": "rust-252495",
+          "appId": 252490,
+          "depotId": 252495,
+          "manifestId": "8060947126917076371",
+          "version": "24840484",
+          "outputHash": "sha256-gtTeDD+iH4njqa2b4wYHRsmu4f0MAG0nli+nDtmcBow=",
+          "title": "Rust (windows, Steam)"
+        },
+        {
+          "pname": "rust-252494",
+          "appId": 252490,
+          "depotId": 252494,
+          "manifestId": "6427649005279007065",
+          "version": "24840484",
+          "outputHash": "sha256-6i2fPzOhKcZ78GFKZjrmLFvRkeszJgAjcmVYd0exEnw=",
+          "title": "Rust (content, Steam)"
+        }
+      ]
+    }
+  }
+}

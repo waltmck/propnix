@@ -115,6 +115,15 @@ jobs:
       - name: Discover what moved (anonymous)
         run: ci/pin-refresh.sh check "$RUNNER_TEMP/pins" x86_64-linux
 
+      # game → GitHub maintainer handles for the @mentions in the PR and the issues, evaluated ONCE
+      # (pure eval, still anonymous). Through the `ci` scope's config surface, so broken titles resolve
+      # too. Tagging is best-effort by design: an eval regression here must degrade to "no mentions",
+      # never block the refresh — hence the fallback to an empty map.
+      - name: Look up game maintainers
+        run: |
+          nix eval --json '.#ci.x86_64-linux.maintainers' > "$RUNNER_TEMP/pins/maintainers.json" \
+            || echo '{}' > "$RUNNER_TEMP/pins/maintainers.json"
+
       # Missing secrets are a SKIP, not a failure: a repo with only the GOG credential set should still
       # refresh its GOG games every week and quietly leave the Steam ones alone.
       - name: Materialize credentials
@@ -163,8 +172,10 @@ jobs:
           jq -r '.[] | select(.status == "blocked") | .game' "$out/summary.json" | while read -r game; do
             echo "::group::issue for $game"
             # Hand the tool's own message to the body: "the token expired" and "you do not own this" are
-            # different problems, and the issue should say which.
+            # different problems, and the issue should say which. Maintainers ride along the same way,
+            # as ready-to-render "@handle"s — pin-issue.sh stays free of any nix evaluation.
             PIN_DETAIL=$(jq -r --arg g "$game" '.[] | select(.game == $g) | .detail' "$out/summary.json") \
+            PIN_MAINTAINERS=$(jq -r --arg g "$game" '.[$g] // [] | map("@" + .) | join(" ")' "$out/maintainers.json") \
               ci/pin-issue.sh open-or-edit "$game" "$out/$game.check.json"
             echo "::endgroup::"
           done
@@ -264,9 +275,14 @@ jobs:
             echo "Automated weekly pin refresh — **one commit per game**, so any single pin can be"
             echo "reverted on its own."
             echo
-            echo "| game | outcome | version |"
-            echo "|---|---|---|"
-            jq -r '.[] | select(.status != "up-to-date") | "| \(.game) | \(.status) | \(.version // "") |"' \
+            echo "| game | outcome | version | maintainers |"
+            echo "|---|---|---|---|"
+            # Maintainers are @mentioned only on `updated` rows: a blocked game pings its maintainer on
+            # its issue instead, and pinging both channels about the same event is noise.
+            jq -r --slurpfile m "$out/maintainers.json" '
+              .[] | select(.status != "up-to-date")
+              | (if .status == "updated" then ($m[0][.game] // [] | map("@" + .) | join(" ")) else "" end) as $who
+              | "| \(.game) | \(.status) | \(.version // "") | \($who) |"' \
               "$out/summary.json"
             echo
             echo "Each game is re-pinned as a unit — base payloads and every DLC together, or not at all."
@@ -324,6 +340,34 @@ jobs:
           fi
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "PR: $url"
+
+      # Review requests go only to maintainers who are repository COLLABORATORS — GitHub hard-rejects
+      # (422) a request naming anyone else, and the @mention in the body already reaches everyone. One
+      # request per user, so a single bad handle cannot sink the rest, and best-effort throughout: the
+      # PR exists by now, and no tagging problem is worth failing the run over. On the weekly edit path
+      # this re-requests from a maintainer who already reviewed — intended, because the force-push
+      # changed what they approved.
+      - name: Request review from collaborator maintainers
+        if: ${{ steps.pr.outputs.url != '' }}
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/pins"
+          jq -r --slurpfile m "$out/maintainers.json" \
+            '[.[] | select(.status == "updated") | $m[0][.game] // []] | add // [] | unique | .[]' \
+            "$out/summary.json" \
+          | while read -r user; do
+              [ -n "$user" ] || continue
+              # 204 = collaborator, 404 = not one (or invisible to this token — same treatment).
+              if gh api --silent "repos/$GH_REPO/collaborators/$user" 2>/dev/null; then
+                gh pr edit "${{ steps.pr.outputs.url }}" --add-reviewer "$user" \
+                  || echo "::notice::could not request a review from $user (the PR author, or a token limitation)"
+              else
+                echo "  $user: not a collaborator — @mentioned in the PR body only"
+              fi
+            done
 
       # Games this run DID refresh: close their issue and point at the PR. Closing before the PR merges is
       # safe precisely because a closed issue is never reopened — if the PR is abandoned, the next weekly

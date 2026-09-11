@@ -134,6 +134,12 @@ fn entry_from(o: &RegOverride, value: String) -> RegEntry {
 fn run_user_reg_script(script: &str, cfg: &Config) -> Result<Vec<RegOverride>, String> {
     let out = Command::new(script)
         .env("PROPNIX_PAYLOAD", &cfg.payload)
+        // Same payload contract as the setup hook (both are mkSetupScript-built store executables, so both
+        // carry payload-lib.sh): the head tree AND the full mount-priority search path.
+        .env(
+            "PROPNIX_PAYLOADS",
+            crate::config::payload_search_path(&cfg.payload, &cfg.payloads),
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .output()

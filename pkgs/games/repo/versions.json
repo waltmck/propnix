@@ -1,0 +1,17 @@
+{
+  "fetchInfo": {
+    "steam": {
+      "x86_64-windows": [
+        {
+          "pname": "repo-3241661",
+          "appId": 3241660,
+          "depotId": 3241661,
+          "manifestId": "8225435692675993447",
+          "version": "23363152",
+          "outputHash": "sha256-/tue1px3NtIl2JYv0Bo0iw95ZpBIqu4GlDTsXXJK+SU=",
+          "title": "R.E.P.O. (windows, Steam)"
+        }
+      ]
+    }
+  }
+}

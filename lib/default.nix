@@ -59,8 +59,24 @@ pkgs.lib.makeScope pkgs.newScope (
   {
     # ── wine + graphics (arch-aware INTERNALLY: same source, arch-appropriate archs/DLL flavor) ──
     wine = callPackage ../emulators/wine-hangover { }; # Hangover fork; arm64ec archs on aarch64, plain on x86_64
-    gbeFork = callPackage ../emulators/gbe-fork { inherit pkgs; }; # per-ABI Steam-API reimplementation (the steam-emu shim): Linux from source, Windows PE prebuilt
-    prefixLower = callPackage ../emulators/wine-prefix-lower.nix { }; # RO system tree; FEX DLLs only on aarch64 (fexdlls ? null)
+    # Per-ABI Steam-API reimplementation (the steam-emu shim): Linux from source, Windows PE prebuilt. The
+    # mingw args serve ONLY its lazy `steamStubProxy` passthru (a from-source PE for SteamStub-wrapped
+    # exes) and follow galaxyStub's toolchain split verbatim — llvm-mingw on aarch64, nixpkgs' cached
+    # cross-GCC on x86_64, where that prebuilt does not exist. Nothing is forced unless a game sets
+    # `steam.emu.steamStub`.
+    gbeFork = callPackage ../emulators/gbe-fork {
+      inherit pkgs;
+      llvmMingw = if isAarch64 then llvmMingw else null;
+      mingwGccW64 = pkgs.pkgsCross.mingwW64.stdenv.cc;
+      mingwGcc32 = pkgs.pkgsCross.mingw32.stdenv.cc;
+      mingwThreads64 = pkgs.pkgsCross.mingwW64.windows.mcfgthreads;
+      mingwThreads32 = pkgs.pkgsCross.mingw32.windows.mcfgthreads;
+    };
+    # The .NET CLR every MANAGED (pure .NET) Windows title needs before it can execute a single
+    # instruction. ARCH-AGNOSTIC: one package serves both hosts (its header explains why the x86-family
+    # tarball is the right — and only — choice on aarch64 too). Wired into `prefixLower` by argument name.
+    wineMono = callPackage ../emulators/wine-mono.nix { };
+    prefixLower = callPackage ../emulators/wine-prefix-lower.nix { }; # RO system tree; FEX DLLs only on aarch64 (fexdlls ? null); CLR from wineMono
     dxvk =
       if isAarch64 then
         callPackage ../emulators/dxvk-arm64ec.nix { } # native ARM64EC PE
@@ -191,6 +207,22 @@ pkgs.lib.makeScope pkgs.newScope (
     # The subset whose axes RESOLVE under this scope's preferredFetchers (pure eval probe, no payload
     # forced) — for consumers that enumerate/build everything under a restrictive config.
     resolvableGames = lib.filterAttrs (_: g: g.resolvable) games;
+
+    # Graceful no-op GOG Galaxy SDK DLLs (Galaxy64/Galaxy/pops_api), bound over a game's bundled copies so a
+    # statically-imported online SDK never reaches GOG's services — the same offline policy as masking
+    # Steam's steam_api64.dll. ARCH-INDEPENDENT: the stubs are x86_64/i386 PEs matching the GAME, so both
+    # hosts want them. On aarch64 they build with the ARM64EC toolchain that leg already carries; on x86_64
+    # that toolchain does not exist (it is a prebuilt pinned to the aarch64-hosted release), so the stub
+    # falls back to nixpkgs' ordinary cross-mingw GCC — see emulators/galaxy-stub for the whole argument.
+    galaxyStub = callPackage ../emulators/galaxy-stub {
+      llvmMingw = if isAarch64 then llvmMingw else null;
+      mingwGccW64 = pkgs.pkgsCross.mingwW64.stdenv.cc;
+      mingwGcc32 = pkgs.pkgsCross.mingw32.stdenv.cc;
+      # nixpkgs' cross-mingw GCC is configured with the mcfgthread threading model, so its driver adds a
+      # bare `-lmcfgthread` that the bare cc wrapper cannot resolve on its own. Hand the lib dirs in.
+      mingwThreads64 = pkgs.pkgsCross.mingwW64.windows.mcfgthreads;
+      mingwThreads32 = pkgs.pkgsCross.mingw32.windows.mcfgthreads;
+    };
   }
   // games # spread each game top-level as scope.<name> (so `inherit (scope) <name>` + cross-refs resolve)
   # ── aarch64-only: the ARM64EC toolchain + FEX/box64 emulators. Absent on x86_64, where wine is native,
@@ -219,7 +251,10 @@ pkgs.lib.makeScope pkgs.newScope (
     # Graceful no-op GOG Galaxy SDK DLLs (Galaxy64/Galaxy/pops_api): bound over a game's bundled copies so a
     # statically-imported online SDK never reaches GOG's services — propnix games run fully offline, the
     # same policy as masking Steam's steam_api64.dll (winefex path; x86_64 = native wine, no stub).
-    galaxyStub = callPackage ../emulators/galaxy-stub { }; # uses llvmMingw
+    # (galaxyStub is NOT here — it is arch-independent and lives in the common block above, because its
+    # output DLLs are x86_64/i386 PEs matching the GAME, never the host. It used to sit in this aarch64
+    # block only because it happened to build with llvmMingw, which made `galaxyStubDlls` a silent no-op
+    # on x86_64.)
     # box64 re-export: pass nixpkgs' box64 explicitly (else callPackage resolves `box64` from this scope →
     # itself → infinite recursion).
     box64 = callPackage ../emulators/box64-latest.nix { box64 = pkgs.box64; };

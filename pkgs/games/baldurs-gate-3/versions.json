@@ -15,6 +15,54 @@
           "generation": 2
         }
       ]
+    },
+    "steam": {
+      "x86_64-windows": [
+        {
+          "pname": "baldurs-gate-3-1419652",
+          "appId": 1086940,
+          "depotId": 1419652,
+          "manifestId": "7005275183208636774",
+          "version": "24532579",
+          "outputHash": "sha256-ir/Ab9Y+4nbKZZGLqOMqWmiHKlty7S0gDWdR/XmPc2k=",
+          "depotKeySha256": "ba36799f8454cf9a3e0becc169d5a120b8c2350a59533e56d4f2f156169c3cc0",
+          "manifestSha256": "d4d65a709fbcbb8cff39d66bc7e45f762b4367947a472aac04f036e796449b06",
+          "title": "Baldur's Gate 3 (windows binaries, Steam)"
+        },
+        {
+          "pname": "baldurs-gate-3-1419653",
+          "appId": 1086940,
+          "depotId": 1419653,
+          "manifestId": "2098612237190800348",
+          "version": "24532579",
+          "outputHash": "sha256-ob/Bmox/kjyNxFTVSolzVUK2V3UI9n7MHi3F5/PgVyc=",
+          "depotKeySha256": "e9abc980babdbe39160a20fb491f41e9f3365f0d10965f4f594a89f31c163770",
+          "manifestSha256": "94e300dd48aa9b153669e87cba6d39b0fd4d9c583dbc3455855fa28249c43757",
+          "title": "Baldur's Gate 3 (launcher, Steam)"
+        },
+        {
+          "pname": "baldurs-gate-3-1086941",
+          "appId": 1086940,
+          "depotId": 1086941,
+          "manifestId": "4288948197859959444",
+          "version": "24532579",
+          "outputHash": "sha256-c8oi7Cqi5kmrAxQpTUsgnEq+UKOfj+u/zx4kk15M8sw=",
+          "depotKeySha256": "886e61a853ce717a66a1b7754f57dc90273b21aa5f25e55e7009d532b20a9924",
+          "manifestSha256": "12bef9153e2e56c607871ec01c0bdc8c06fbc82665030a88bc7611c83f0f943b",
+          "title": "Baldur's Gate 3 (content, Steam)"
+        },
+        {
+          "pname": "baldurs-gate-3-1086942",
+          "appId": 1086940,
+          "depotId": 1086942,
+          "manifestId": "17875152607970122",
+          "version": "24532579",
+          "outputHash": "sha256-Ldm1lmd5zenAgrv7hprkD+seUgPiyHBTOffcfZNilu4=",
+          "depotKeySha256": "442cd052181ef8796434b252f89aa5e62606717f3972166f2276f61772ad3365",
+          "manifestSha256": "c341f6e8c0d9151c6009562d61618d58d20dc10bad322d7cd96ab45be4b64317",
+          "title": "Baldur's Gate 3 (language, Steam)"
+        }
+      ]
     }
   }
 }

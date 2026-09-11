@@ -67,6 +67,8 @@
   splash ? true,
   singleInstance ? true,
   windowWatch ? true,
+  # Bare GitHub usernames → meta.maintainers (see mkLauncherPackage).
+  maintainers ? [ ],
   # `{ systems; reason; }` → meta.broken (see mkLauncherPackage).
   broken ? {
     systems = [ ];
@@ -113,7 +115,7 @@ let
   # per (tree, executables) exists once and is shared by every selection that mounts it.
   modeFixes = map (tree: {
     skeleton = "${mkStoreSkeleton {
-      payload = tree;
+      payloads = [ tree ]; # one skeleton PER tree here (each is its own lower); see the comment above
       name = "${appid}-exe-${lib.substring 0 8 (baseNameOf "${tree}")}";
       inherit executables;
     }}";
@@ -126,20 +128,19 @@ let
   # `-f`, matching the skeleton's own chmod test. `-e` would pass a directory-valued entry (a path with the
   # leaf omitted) that every skeleton then skips — build green, launcher execve's a directory, bare EACCES
   # at launch. Before the per-tree split this was a hard build error, and it stays one.
-  executablesPresent =
-    runCommandLocal "${appid}-executables-present" { } ''
-      ${lib.concatMapStrings (e: ''
-        found=
-        for tree in ${lib.escapeShellArgs (map (p: "${p}") payloads)}; do
-          if [ -f "$tree"/${lib.escapeShellArg e} ]; then found=1; break; fi
-        done
-        if [ -z "$found" ]; then
-          echo "propnix (${pname}): declared executable '${e}' is not a regular file in any game tree" >&2
-          exit 1
-        fi
-      '') executables}
-      mkdir -p "$out"
-    '';
+  executablesPresent = runCommandLocal "${appid}-executables-present" { } ''
+    ${lib.concatMapStrings (e: ''
+      found=
+      for tree in ${lib.escapeShellArgs (map (p: "${p}") payloads)}; do
+        if [ -f "$tree"/${lib.escapeShellArg e} ]; then found=1; break; fi
+      done
+      if [ -z "$found" ]; then
+        echo "propnix (${pname}): declared executable '${e}' is not a regular file in any game tree" >&2
+        exit 1
+      fi
+    '') executables}
+    mkdir -p "$out"
+  '';
   gameModeFix = lib.optionalAttrs usesSkeleton {
     gameModeFixes = modeFixes;
   };
@@ -179,6 +180,12 @@ let
         workingDir = workingDir;
         exeArgs = exeArgs;
         payload = "${builtins.head payloads}";
+        # EVERY game-content tree, highest mount priority first (= `payloads`, which mk-thin-build already
+        # leads with the enabled DLC) — the setup hook's `PROPNIX_PAYLOADS` search path. The head is
+        # `payload` above, so the legacy single-tree contract is a prefix of this one. Excludes
+        # `extraLowers`: those are the backend's patched-exe overlay and the entitlement settings tree —
+        # framework artifacts, not shipped game assets, and nothing a setup script should read a preset from.
+        payloads = map (d: "${d}") payloads;
         online = online;
         ldLibraryPath = ldLibraryPath;
         inherit scrubPrefixes;
@@ -216,6 +223,7 @@ mkLauncherPackage {
     configFile
     iconTree
     broken
+    maintainers
     ;
   iconSymbolic = icon.symbolic;
   description = "${name} — propnix native/${backend} app";

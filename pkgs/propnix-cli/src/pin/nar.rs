@@ -57,7 +57,11 @@ pub enum NarError {
     /// this would yield a plausible but WRONG hash, so it is fatal.
     Conflict(String),
     /// The fetcher produced a different number of bytes than the manifest declared.
-    Size { path: String, want: u64, got: u64 },
+    Size {
+        path: String,
+        want: u64,
+        got: u64,
+    },
     Io(io::Error),
     Fetch(String),
 }
@@ -454,14 +458,28 @@ mod tests {
         let mut root: Node<u32> = Node::dir();
         // The legitimate case: an explicit EMPTY directory entry landing on one already created as
         // somebody's parent.
-        root.insert(&[b"a".to_vec(), b"b".to_vec()], Node::Reg { executable: false, size: 0, payload: 1 })
-            .unwrap();
+        root.insert(
+            &[b"a".to_vec(), b"b".to_vec()],
+            Node::Reg {
+                executable: false,
+                size: 0,
+                payload: 1,
+            },
+        )
+        .unwrap();
         root.insert(&[b"a".to_vec()], Node::dir()).unwrap();
 
         // …but a POPULATED directory inserted over an existing one would have its children discarded.
         let mut populated: Node<u32> = Node::dir();
         populated
-            .insert(&[b"child".to_vec()], Node::Reg { executable: false, size: 0, payload: 2 })
+            .insert(
+                &[b"child".to_vec()],
+                Node::Reg {
+                    executable: false,
+                    size: 0,
+                    payload: 2,
+                },
+            )
             .unwrap();
         assert!(
             root.insert(&[b"a".to_vec()], populated).is_err(),
@@ -472,9 +490,16 @@ mod tests {
     #[test]
     fn unusable_path_components_are_rejected() {
         let mut root: Node<u32> = Node::dir();
-        let reg = || Node::Reg { executable: false, size: 0, payload: 0 };
+        let reg = || Node::Reg {
+            executable: false,
+            size: 0,
+            payload: 0,
+        };
         for bad in [b"".to_vec(), b".".to_vec(), b"..".to_vec()] {
-            assert!(root.insert(&[b"a".to_vec(), bad.clone()], reg()).is_err(), "{bad:?}");
+            assert!(
+                root.insert(&[b"a".to_vec(), bad.clone()], reg()).is_err(),
+                "{bad:?}"
+            );
             assert!(root.insert(&[bad, b"a".to_vec()], reg()).is_err());
         }
         root.insert(&[b"a".to_vec(), b"b".to_vec()], reg()).unwrap();

@@ -127,7 +127,9 @@ pub enum Blocked {
 impl std::fmt::Display for Blocked {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Blocked::NoCredential(m) | Blocked::NotOwned(m) | Blocked::Refused(m) => write!(f, "{m}"),
+            Blocked::NoCredential(m) | Blocked::NotOwned(m) | Blocked::Refused(m) => {
+                write!(f, "{m}")
+            }
         }
     }
 }
@@ -193,7 +195,6 @@ impl Report {
         }))
         .unwrap_or_default()
     }
-
 }
 
 /// The report a `--check` still owes CI when it could not resolve upstream at all.
@@ -236,7 +237,11 @@ fn check_inner(opts: &Opts) -> Result<(Report, VersionsFile), Box<dyn std::error
             policy.reason.as_deref().unwrap_or("no reason recorded")
         );
         return Ok((
-            Report { game: opts.game.clone(), changes: Vec::new(), policy },
+            Report {
+                game: opts.game.clone(),
+                changes: Vec::new(),
+                policy,
+            },
             file,
         ));
     }
@@ -342,7 +347,8 @@ fn check_inner(opts: &Opts) -> Result<(Report, VersionsFile), Box<dyn std::error
                             ))
                             .into());
                         }
-                        gogbuild.insert(key, (newest.build_id.clone(), newest.version_name.clone()));
+                        gogbuild
+                            .insert(key, (newest.build_id.clone(), newest.version_name.clone()));
                         (newest.build_id, newest.version_name)
                     }
                 };
@@ -454,7 +460,11 @@ pub fn emit(opts: &Opts) -> Result<String, Box<dyn std::error::Error>> {
             eprintln!(
                 "  {}: frozen — {}",
                 opts.game,
-                report.policy.reason.as_deref().unwrap_or("no reason recorded")
+                report
+                    .policy
+                    .reason
+                    .as_deref()
+                    .unwrap_or("no reason recorded")
             );
         } else if let Some(v) = report.policy.pinned_to() {
             eprintln!("  {}: already at its pinned version {v}", opts.game);
@@ -472,6 +482,7 @@ pub fn emit(opts: &Opts) -> Result<String, Box<dyn std::error::Error>> {
         steam_account: opts.steam_account.clone(),
         // stdout is a document here; keep the noise on stderr but make it useful.
         progress: true,
+        nix_progress: false,
     };
 
     // Stage every recomputation first; only touch the file once all of them succeeded.
@@ -544,7 +555,10 @@ pub fn emit(opts: &Opts) -> Result<String, Box<dyn std::error::Error>> {
 fn previous_manifest(mode: Mode, pin: &Pin) -> Option<u64> {
     match mode {
         Mode::Latest => None,
-        _ => pin.str_field("manifestId").ok().and_then(|m| m.parse().ok()),
+        _ => pin
+            .str_field("manifestId")
+            .ok()
+            .and_then(|m| m.parse().ok()),
     }
 }
 
@@ -593,7 +607,9 @@ fn hash_pin(
 ) -> Result<Hashed, Box<dyn std::error::Error>> {
     let game = &opts.game;
     match pin.store {
-        Store::GogInstaller => Err(format!("{}: the GOG installer path has no version pin", pin.loc).into()),
+        Store::GogInstaller => {
+            Err(format!("{}: the GOG installer path has no version pin", pin.loc).into())
+        }
         Store::GogGalaxy => {
             let product = pin.str_field("productId")?;
             let os = pin.opt_str("os").unwrap_or("windows");
@@ -602,8 +618,15 @@ fn hash_pin(
             // UseCurrent, never Expect: `propnix pin` MAINTAINS `depsBuildId` rather than asserting it,
             // so a repository that has moved on is recorded, not refused. (`propnix hash gog` keeps the
             // explicit contract — that is the regression harness, where being told is the point.)
-            match gog::hash_build(product, new_id, os, lang, dlc, Some(&gog::DepsPin::UseCurrent), hopts)
-            {
+            match gog::hash_build(
+                product,
+                new_id,
+                os,
+                lang,
+                dlc,
+                Some(&gog::DepsPin::UseCurrent),
+                hopts,
+            ) {
                 Ok((sri, _, plan)) => Ok(Hashed {
                     sri,
                     deps_build_id: plan.deps_build_id,
@@ -762,7 +785,10 @@ pub fn all_games(repo: &std::path::Path) -> std::io::Result<Vec<String>> {
     let entries = std::fs::read_dir(&games).map_err(|e| {
         std::io::Error::new(
             e.kind(),
-            format!("{}: {e} (run from a propnix checkout, or pass --repo)", games.display()),
+            format!(
+                "{}: {e} (run from a propnix checkout, or pass --repo)",
+                games.display()
+            ),
         )
     })?;
     let mut out = Vec::new();
@@ -804,6 +830,7 @@ pub fn scaffold(opts: &Opts, spec: &NewSpec) -> Result<String, Box<dyn std::erro
         gog_account: opts.gog_account.clone(),
         steam_account: opts.steam_account.clone(),
         progress: true,
+        nix_progress: false,
     };
     let mut root = serde_json::Map::new();
     let mut fetch_info = serde_json::Map::new();
@@ -908,7 +935,9 @@ pub fn scaffold(opts: &Opts, spec: &NewSpec) -> Result<String, Box<dyn std::erro
             let mut by_platform: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
             for depot in depots {
                 let d = info.depots.get(depot).ok_or_else(|| {
-                    format!("depot {depot} is not listed among app {app}'s depots on branch {branch:?}")
+                    format!(
+                        "depot {depot} is not listed among app {app}'s depots on branch {branch:?}"
+                    )
                 })?;
                 let manifest: u64 = d.gid.parse()?;
                 let plat = platform
@@ -1047,8 +1076,14 @@ mod tests {
             .iter()
             .map(|p| content_key(p, p.opt_str("manifestId").unwrap(), &opts))
             .collect();
-        assert_eq!(keys[0], keys[1], "the two Linux rows name the same depot: {keys:?}");
-        assert_ne!(keys[0], keys[2], "the Windows depot is different content: {keys:?}");
+        assert_eq!(
+            keys[0], keys[1],
+            "the two Linux rows name the same depot: {keys:?}"
+        );
+        assert_ne!(
+            keys[0], keys[2],
+            "the Windows depot is different content: {keys:?}"
+        );
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -1058,7 +1093,9 @@ mod tests {
             game: "factorio".into(),
             policy: Policy::default(),
             changes: vec![Change {
-                loc: PinLoc::Dlc { name: "space-age".into() },
+                loc: PinLoc::Dlc {
+                    name: "space-age".into(),
+                },
                 pname: "factorio-space-age-win".into(),
                 key: "buildId",
                 from: "111".into(),
@@ -1081,15 +1118,25 @@ mod tests {
             policy: Policy::frozen_for_test("1.12.5 is the last build the mod stack supports"),
         };
         assert!(r.up_to_date());
-        assert!(r.held(), "CI must be able to tell 'held' from 'nothing to do'");
+        assert!(
+            r.held(),
+            "CI must be able to tell 'held' from 'nothing to do'"
+        );
         let j: serde_json::Value = serde_json::from_str(&r.to_json()).unwrap();
         assert_eq!(j["frozen"], true);
-        assert_eq!(j["policyReason"], "1.12.5 is the last build the mod stack supports");
+        assert_eq!(
+            j["policyReason"],
+            "1.12.5 is the last build the mod stack supports"
+        );
     }
 
     #[test]
     fn an_empty_report_is_up_to_date() {
-        let r = Report { game: "x".into(), changes: vec![], policy: Policy::default() };
+        let r = Report {
+            game: "x".into(),
+            changes: vec![],
+            policy: Policy::default(),
+        };
         assert!(r.up_to_date());
         let j: serde_json::Value = serde_json::from_str(&r.to_json()).unwrap();
         assert_eq!(j["upToDate"], true);
@@ -1115,9 +1162,11 @@ mod tests {
     fn a_blocked_check_still_emits_a_report() {
         // Exiting 4 with empty stdout used to take the whole weekly run down (zero-byte check.json →
         // pin-issue.sh dies under set -e → no issues, no commits, no PR).
-        let j: serde_json::Value =
-            serde_json::from_str(&blocked_report_json("no-mans-sky", "aged out of the builds list"))
-                .unwrap();
+        let j: serde_json::Value = serde_json::from_str(&blocked_report_json(
+            "no-mans-sky",
+            "aged out of the builds list",
+        ))
+        .unwrap();
         assert_eq!(j["game"], "no-mans-sky");
         assert_eq!(j["blocked"], true);
         assert_eq!(j["upToDate"], false);
@@ -1136,31 +1185,70 @@ mod tests {
                 Blocked::Refused(_) => "refused",
             })
         };
-        assert_eq!(ck(Box::new(gog::GogError::NoCredential("x".into()))), Some("cred"));
-        assert_eq!(ck(Box::new(gog::GogError::NotOwned("x".into()))), Some("owned"));
-        assert_eq!(ck(Box::new(gog::GogError::Unsupported("x".into()))), Some("refused"));
-        assert_eq!(ck(Box::new(steam::SteamError::NoCredential("x".into()))), Some("cred"));
-        assert_eq!(ck(Box::new(steam::SteamError::Unsupported("x".into()))), Some("refused"));
+        assert_eq!(
+            ck(Box::new(gog::GogError::NoCredential("x".into()))),
+            Some("cred")
+        );
+        assert_eq!(
+            ck(Box::new(gog::GogError::NotOwned("x".into()))),
+            Some("owned")
+        );
+        assert_eq!(
+            ck(Box::new(gog::GogError::Unsupported("x".into()))),
+            Some("refused")
+        );
+        assert_eq!(
+            ck(Box::new(steam::SteamError::NoCredential("x".into()))),
+            Some("cred")
+        );
+        assert_eq!(
+            ck(Box::new(steam::SteamError::Unsupported("x".into()))),
+            Some("refused")
+        );
         // A refused/expired LOGIN is a credential problem for BOTH stores — never a false "not owned",
         // which is how throttled walks once filed bogus ownership issues.
-        assert_eq!(ck(Box::new(steam::SteamError::LoginFailed("throttled".into()))), Some("cred"));
-        assert_eq!(ck(Box::new(gog::GogError::LoginFailed("rejected".into()))), Some("cred"));
+        assert_eq!(
+            ck(Box::new(steam::SteamError::LoginFailed("throttled".into()))),
+            Some("cred")
+        );
+        assert_eq!(
+            ck(Box::new(gog::GogError::LoginFailed("rejected".into()))),
+            Some("cred")
+        );
         // A fetcher key this binary predates is a human/upgrade problem, not a tool bug.
         assert_eq!(
-            ck(Box::new(versions::Error::UnknownFetcher("unknown fetcher \"epic\"".into()))),
+            ck(Box::new(versions::Error::UnknownFetcher(
+                "unknown fetcher \"epic\"".into()
+            ))),
             Some("refused")
         );
         // Transport and parse failures stay RED — including ones whose text mentions ownership, which
         // is exactly what the old substring classifier got wrong.
-        assert_eq!(ck(Box::new(gog::GogError::Http("503 for a product not owned by …".into()))), None);
-        assert_eq!(ck(Box::new(steam::SteamError::Parse("truncated".into()))), None);
-        assert_eq!(ck(Box::new(versions::Error::Schema("missing productId".into()))), None);
+        assert_eq!(
+            ck(Box::new(gog::GogError::Http(
+                "503 for a product not owned by …".into()
+            ))),
+            None
+        );
+        assert_eq!(
+            ck(Box::new(steam::SteamError::Parse("truncated".into()))),
+            None
+        );
+        assert_eq!(
+            ck(Box::new(versions::Error::Schema(
+                "missing productId".into()
+            ))),
+            None
+        );
     }
 
     #[test]
     fn only_latest_bypasses_the_never_backwards_guard() {
         let mut obj = serde_json::Map::new();
-        obj.insert("manifestId".into(), serde_json::Value::String("12345".into()));
+        obj.insert(
+            "manifestId".into(),
+            serde_json::Value::String("12345".into()),
+        );
         let pin = Pin {
             loc: PinLoc::Payload {
                 fetcher: "steam".into(),
@@ -1208,7 +1296,14 @@ mod tests {
 }
 "#;
         std::fs::write(dir.join("versions.json"), body).unwrap();
-        let repo = dir.parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+        let repo = dir
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
         let opts = Opts {
             repo,
             game: "heldgame".into(),
@@ -1228,7 +1323,10 @@ mod tests {
         // One row moved out from under the hold: Blocked, with the manual fix spelled out.
         std::fs::write(
             dir.join("versions.json"),
-            body.replace("\"version\": \"4.4.6\", \"outputHash\": \"sha256-B=\"", "\"version\": \"4.5.0\", \"outputHash\": \"sha256-B=\""),
+            body.replace(
+                "\"version\": \"4.4.6\", \"outputHash\": \"sha256-B=\"",
+                "\"version\": \"4.5.0\", \"outputHash\": \"sha256-B=\"",
+            ),
         )
         .unwrap();
         let Err(e) = check(&opts) else {
@@ -1239,7 +1337,13 @@ mod tests {
             "a hold mismatch is a human's job, not a red run: {e}"
         );
         let msg = e.to_string();
-        assert!(msg.contains("--recompute"), "must say what to do; got: {msg}");
-        assert!(msg.contains("manifestId"), "must name the field to edit; got: {msg}");
+        assert!(
+            msg.contains("--recompute"),
+            "must say what to do; got: {msg}"
+        );
+        assert!(
+            msg.contains("manifestId"),
+            "must name the field to edit; got: {msg}"
+        );
     }
 }

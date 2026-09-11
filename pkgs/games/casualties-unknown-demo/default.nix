@@ -9,6 +9,7 @@
 }:
 mkApp {
   pname = "casualties-unknown-demo";
+  maintainers = [ "OriCat101" ];
   appid = "casualties-unknown-demo";
   name = "Casualties: Unknown Demo";
 

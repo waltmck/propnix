@@ -8,6 +8,7 @@
 }:
 mkApp {
   pname = "potionomics";
+  maintainers = [ "OriCat101" ];
   appid = "potionomics";
   name = "Potionomics";
 

@@ -1,0 +1,19 @@
+{
+  "fetchInfo": {
+    "steam": {
+      "x86_64-windows": [
+        {
+          "pname": "potionomics-win-steam",
+          "appId": 1874490,
+          "depotId": 1874491,
+          "manifestId": "2106479728032234621",
+          "version": "21042632",
+          "outputHash": "sha256-4yp64s5Hv0QshUcBAM0Bxu/JgNkiDwRKjew35UYMNH4=",
+          "depotKeySha256": "aabfd6b3379947038dd1dfef6405fad481bb71b3d0a44976f084bb5e7e99a4eb",
+          "manifestSha256": "1f73c76957a977621839f89d65c9fee295dc61231a9925326d43934e6e8cb355",
+          "title": "Potionomics (windows, Steam)"
+        }
+      ]
+    }
+  }
+}

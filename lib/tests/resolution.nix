@@ -26,6 +26,7 @@ let
   expected = {
     baby-steps = "gog/x86_64-windows/${wineB}";
     baldurs-gate-3 = "gog/x86_64-windows/${wineB}";
+    casualties-unknown-demo = "steam/x86_64-windows/${wineB}";
     # Steam-only, Windows-only pins (Steam publishes macOS/Linux depots for this app too, but they are
     # deliberately not pinned) → the single pair resolves itself.
     cities-skylines = "steam/x86_64-windows/${wineB}";

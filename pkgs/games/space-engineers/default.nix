@@ -18,7 +18,7 @@
 # was expected to exit at CLR startup before reaching the renderer.
 #
 # That gap is closed one level down, where it belongs (every managed title benefits, not just this one):
-# emulators/wine-mono.nix pins Wine Mono 11.2.0 — the exact `WINE_MONO_VERSION` the pinned wine 11.15
+# emulators/wine-mono pins Wine Mono 11.2.0 — the exact `WINE_MONO_VERSION` the pinned wine 11.15
 # hardcodes — and emulators/wine-prefix-lower.nix drops it at `C:\windows\mono\mono-2.0`, the first path
 # `mscoree`'s `get_mono_path()` probes, plus the .NET 4.x NDP version-detection keys that satisfy this
 # exe's v4.6.1 `supportedRuntime`. Verified in the built prefix by compiling and RUNNING a managed exe
@@ -69,8 +69,6 @@
 {
   lib,
   mkApp,
-  # Host arch only, for the aarch64-only GC mitigation below — nothing about the CONTENT differs.
-  stdenv,
 }:
 mkApp (
   { config, ... }:
@@ -112,43 +110,23 @@ mkApp (
     # intro. NOT `-nosplash`: the WinForms splash works fine here.
     exeArgs = [ "-skipintro" ];
 
-    # ── aarch64: SGEN MOVES AN OBJECT THAT A NATIVE CALLBACK IS STILL HOLDING ─────────────────────────
-    # MEASURED: 0/4 launches survive without this setting, 4/4 with it (interleaved A/B, so machine load
-    # cannot explain it), and a 4-minute run then sits on the rendering main menu — `GUI Stats: Update …
-    # Draw …` every 30 s, zero exceptions — the same milestone x86_64 reaches above.
+    # ── aarch64: FIXED IN THE RUNTIME, NOT HERE ───────────────────────────────────────────────────────
+    # This title did not start on aarch64, and the cause was not in the game: Wine Mono kept a
+    # native-callable INSTANCE delegate alive with only a WEAK reference, so under ARM64EC+FEX — where the
+    # collector does not find managed roots in the frames of a thread sitting in a native call that
+    # re-enters managed code — the delegate was collected mid-callback and the callback ran with a null
+    # `this`. The fix is emulators/wine-mono/patches/0001, which rebuilds the x86_64 runtime from source;
+    # its header carries the measurements. Nothing is needed in this file, and nothing should be added
+    # here for it: a per-game workaround would hide the same defect in the next managed title.
     #
-    # WHAT IS ACTUALLY WRONG, reproduced in ~60 lines outside the game (scratch MonTest3.cs: pass a
-    # managed delegate to user32!EnumDisplayMonitors while allocating): the callback is entered with a
-    # NULL `this`, so its first field read faults. 200/200 iterations fail under allocation churn and
-    # 0/200 without it. Rooting the target with a GCHandle does NOT help (197/200 still fail), which is
-    # the decisive datum: the object is not being COLLECTED, it is being MOVED. SGen's nursery collector
-    # copies survivors, and the native→managed thunk is left holding the pre-move pointer — i.e. while a
-    # thread sits in a native callback with FEX-translated x86_64 frames under ARM64EC wine, the GC moves
-    # objects without fixing up the references those frames hold. That is a wine/FEX/Mono interaction
-    # bug, not a Space Engineers bug, and it is why the game's own failure looked like a random NRE in
-    # different static ctors from run to run (MyRender11, VRage.Render11.Common.MyManagers) while the
-    # innermost frame was always a WinForms monitor-enumeration callback.
-    #
-    # WHY THIS SETTING HELPS, AND WHAT IT DOES NOT DO. A 64 MB nursery is large enough that the game's
-    # render-init allocations do not trigger a nursery collection inside that callback window. It does
-    # NOT fix the bug: the repro still fails with the same setting when it deliberately churns megabytes
-    # per iteration (and a LARGER nursery does not monotonically help there — 64m/128m/256m measured at
-    # 75/119/123 failures per 200 — so do not "tune" this upward expecting more safety). Treat it as a
-    # measured mitigation for startup, keep the residual risk in mind for long sessions, and prefer a
-    # real fix if one appears: a non-moving GC would close it outright, but the pinned Wine Mono ships
-    # only the SGen build (`bin/libmono-2.0-x86_64.dll`), with no Boehm variant to select.
-    #
-    # `MONO_GC_PARAMS` is read by the Mono RUNTIME, so it works from the environment; propnix's env scrub
-    # only strips WINE*/FEX_*/BOX64_*/LD_*. (`MONO_ENV_OPTIONS`, by contrast, is parsed only by the
-    # standalone `mono` driver and is silently ignored by this embedded host — do not reach for it.)
-    # Scoped to aarch64: x86_64 does not need it, and a 64 MB nursery is a real memory and pause-time
-    # choice to impose on a host that is already working.
-    env = lib.optionalAttrs stdenv.hostPlatform.isAarch64 {
-      MONO_GC_PARAMS = "nursery-size=64m";
-    };
+    # A `MONO_GC_PARAMS = "nursery-size=64m"` setting used to live here and is GONE deliberately. It made
+    # startup pass (0/4 → 4/4) by making a nursery collection unlikely inside the callback window, but it
+    # was probabilistic, not a fix — the standalone probe still failed with it under heavier allocation,
+    # and a larger nursery did not monotonically help (64m/128m/256m → 75/119/123 failures per 200). With
+    # the runtime patch the probe is clean at 200/200 and the game starts 3/3 with no GC tuning at all.
 
     # ── aarch64: HOW THAT WAS FOUND, AND WHAT WAS RULED OUT ───────────────────────────────────────────────────
-    # Without the setting above the process dies ~2.5 s in, before any window, with the CLR up and
+    # On the UNPATCHED runtime the process dies ~2.5 s in, before any window, with the CLR up and
     # managed `Main` already running. The failure, precisely:
     #
     #   TypeInitializationException: type initializer for 'VRageRender.MyRender11' threw
@@ -175,10 +153,13 @@ mkApp (
     #
     # RULED OUT, each by an isolated run on this host rather than by argument:
     #   * Wine Mono itself — a managed exe runs fine (Environment.Version = 4.0.30319.42000).
-    #   * The frame the managed trace blames (System.Windows.Forms.Screen's monitor-enumeration callback):
-    #     a probe exercising plain P/Invoke, a managed callback invoked from native EnumDisplayMonitors,
-    #     Screen.AllScreens and PrimaryScreen all pass. The trace is misattributed — expected, since traces
-    #     through ARM64EC transitions are unreliable (see the exit-thunk unwind note in the notes).
+    #   * WRONGLY ruled out at first, and kept as the lesson: the frame the managed trace blamed
+    #     (System.Windows.Forms.Screen's monitor-enumeration callback) passed a probe exercising plain
+    #     P/Invoke, a managed callback invoked from native EnumDisplayMonitors, Screen.AllScreens and
+    #     PrimaryScreen — but only because that probe did not ALLOCATE while the callback was pending.
+    #     With allocation churn added, the same callback fails 138/150 on the upstream runtime, which is
+    #     exactly the defect patches/0001 fixes. The trace had pointed at the right place all along; a
+    #     probe rules a frame out only if it reproduces the workload around it.
     #   * Runtime expression compilation: `Expression.Lambda(...).Compile()` and the whole
     #     ExpressionExtension.Factory → ExpressionBaseActivatorFactory shape reproduce fine in isolation.
     #   * The display backend: identical failure under PROPNIX_WINE_GRAPHICS=x11.
@@ -189,21 +170,29 @@ mkApp (
     #     (`MONO_DEBUG` IS honoured from the environment, unlike `MONO_ENV_OPTIONS`, which only the
     #     standalone `mono` driver parses and which this embedded host silently ignores.)
     #
-    # NEXT: the race angle is untouched. Mono exposes `MONO_DEBUG=weak-memory-model` / `init-stacks` /
-    # `check-pinvoke-callconv`, and `suspend-on-sigsegv` would allow attaching at the fault instead of
-    # reading a reconstructed trace; FEX's HW-TSO (verified active on this host) is what makes x86-ordered
-    # racy publication work at all here, so anything that weakens it is a suspect.
+    # RESOLVED: the "race" was the collector clearing Wine Mono's weakly-held delegate while a thread sat
+    # inside a native call that re-enters managed code — intermittent because it needs a nursery
+    # collection to land inside that window. Mechanism, probe and measurements live in
+    # emulators/wine-mono/patches/0001.
 
     # Full-colour icon auto-extracted from the exe's PE resources (the `icon.auto` default): the resource
     # directory of SpaceEngineers.exe carries RT_ICON (0x3) + RT_GROUP_ICON (0xe) in a ~52 KB .rsrc, which
     # matches the 48 KB `Bin64/SpaceEngineers.ico` shipped beside it, so extraction has something to find.
     icon.auto = true;
 
-    # NOT `online = false`. Space Engineers is a multiplayer game and the depot ships the whole online
-    # stack: Steamworks.NET.dll + steam_api64.dll, VRage.EOS.dll + EOSSDK-Shipping.dll (Epic Online
-    # Services — the exe's string table even carries https://retail.epicgames.com/), VRage.Mod.Io.dll and a
-    # workshop browser. Unsharing the network namespace would break all of it, which is the case the
-    # option's default is written for. A single-player-only user can opt in: `.apply { online = false; }`.
+    # NO NETWORK: THIS TITLE'S ONLINE STACK CANNOT AUTHENTICATE HERE, so the namespace takes away nothing
+    # that works. The depot ships all of it — Steamworks.NET.dll + steam_api64.dll, VRage.EOS.dll +
+    # EOSSDK-Shipping.dll (Epic Online Services; the exe's string table carries
+    # https://retail.epicgames.com/), VRage.Mod.Io.dll and a workshop browser — and every path through it
+    # needs a genuine Steam session, which is precisely what a local emulator cannot mint. MEASURED in the
+    # game's own log, both halves:
+    #   Service.IsOnline: False                    (Steam: gbe_fork is a LAN emulator, there is no session)
+    #   EOS Networking: Error: Failed to connect the user: ConnectExternalTokenValidationFailed
+    # The second is the load-bearing one. EOS Connect bootstraps its identity by validating an EXTERNAL
+    # token — here a Steam auth-session ticket — against Epic's servers, so it is rejected by design: the
+    # ticket would have to be signed by Valve. Multiplayer, the workshop and mod.io downloads are therefore
+    # unreachable whether or not the game can open a socket, and cutting the network only stops it retrying.
+    online = false;
 
     # The game's shipped Steamworks copy sits beside the exe at `Bin64/steam_api64.dll`, and the managed
     # side reaches it by P/Invoke through Steamworks.NET.dll — which resolves the library by NAME through

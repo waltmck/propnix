@@ -1,0 +1,75 @@
+marshal: hold a native-callable INSTANCE delegate with a strong reference.
+
+`delegate_hash_table_add` keeps a marshalled delegate alive differently depending on whether it has a
+target, and only one of the two survives a collector that cannot see the calling thread's managed roots:
+
+    if (has_target) {                                             /* instance method */
+            gchandle = mono_gchandle_new_weakref_from_handle (…);  /* WEAK  */
+    } else {                                                      /* static method   */
+            gchandle = mono_gchandle_from_handle (…, FALSE);       /* STRONG, and deliberately leaked:
+                                                                     "we don't free this delegate object
+                                                                      because it is too expensive to keep
+                                                                      track of these pairs" */
+    }
+
+The weak reference is sound only while something else keeps the delegate reachable — in managed code, the
+frame that passed it to native code. On wine ARM64EC with FEX-emulated x86_64 guest code that does not
+hold: while a thread sits in a native call that re-enters managed code (user32!EnumDisplayMonitors
+invoking a MonitorEnumProc), the managed roots in those frames are not found, so the delegate is collected
+MID-CALLBACK. Its finalizer then frees the native-to-managed wrapper together with the wrapper's target
+handle, and because `emit_managed_wrapper_ilgen` pushes `this` by reading that handle and never checks the
+result, the callback is entered with a NULL `this` and faults on its first field access.
+
+MEASURED on aarch64 (16k pages, wine 11.15 ARM64EC + FEX), with a standalone probe that passes a delegate
+to EnumDisplayMonitors under allocation churn:
+
+    instance callback, upstream runtime   138/150 iterations fail, `this` null in 128
+    instance callback, this patch             0/150 fail
+    STATIC callback (already strong above)    0/150 fail, before and after
+
+The static-vs-instance split is the tell: the two differ in nothing but which branch above they take. In a
+real title (Space Engineers, a managed VRage game) the same defect appears as a NullReferenceException in
+whichever static constructor first touches System.Windows.Forms.Screen — its monitor enumeration is the
+callback that gets collected — and the game does not start: 0 of 3 launches survive on the upstream
+runtime, 3 of 3 with this patch.
+
+Make the instance branch hold the delegate the way the static branch already does. This cannot extend a
+lifetime the program was not already required to guarantee: .NET requires an application to keep a
+marshalled delegate alive for as long as native code may invoke it, so a runtime that also holds it can
+only mask application bugs, never create one. The cost is the same one the static branch already accepts —
+the delegate is not freed while its trampoline exists.
+
+Scope: the x86_64 runtime is the one propnix builds from source and therefore the one this patch reaches;
+the 32-bit `libmono-2.0-x86.dll` still comes from the upstream release and still has the bug (no 32-bit
+managed title is packaged here — see emulators/wine-mono/default.nix).
+
+--- a/mono/metadata/marshal.c
++++ b/mono/metadata/marshal.c
+@@ -466,7 +466,26 @@
+ 			// Somehow, some other thread beat us to it ?
+ 			g_assert (mono_gchandle_target_equal (gchandle, MONO_HANDLE_CAST (MonoObject, d)));
+ 		} else {
+-			gchandle = mono_gchandle_new_weakref_from_handle (MONO_HANDLE_CAST (MonoObject, d));
++			/*
++			 * STRONG, not a weakref — the same tradeoff this function already makes for a
++			 * target-less delegate a few lines below ("we don't free this delegate object because
++			 * it is too expensive to keep track of these pairs").
++			 *
++			 * A weakref here means the delegate survives only as long as the collector can see
++			 * some other root for it. Under wine ARM64EC with FEX-emulated x86_64 code it cannot:
++			 * while a thread sits in a native call that re-enters managed code (user32!
++			 * EnumDisplayMonitors invoking a MonitorEnumProc), the managed roots in those frames
++			 * are not found, the delegate is collected mid-callback, its finalizer frees the
++			 * native-to-managed wrapper and the wrapper's target handle, and the callback then runs
++			 * with a NULL `this` — faulting on its first field access. Measured: an instance
++			 * callback fails 138/150 iterations under allocation churn, while a STATIC callback
++			 * (already strongly held here) fails 0/150.
++			 *
++			 * .NET requires the application to keep a marshalled delegate alive for as long as
++			 * native code may invoke it, so holding it cannot extend a lifetime the program was not
++			 * already obliged to guarantee.
++			 */
++			gchandle = mono_gchandle_from_handle (MONO_HANDLE_CAST (MonoObject, d), FALSE);
+ 			g_hash_table_insert (delegate_hash_table, delegate_trampoline, gchandle);
+ 		}
+ 	} else {

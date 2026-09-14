@@ -75,7 +75,11 @@ pkgs.lib.makeScope pkgs.newScope (
     # The .NET CLR every MANAGED (pure .NET) Windows title needs before it can execute a single
     # instruction. ARCH-AGNOSTIC: one package serves both hosts (its header explains why the x86-family
     # tarball is the right — and only — choice on aarch64 too). Wired into `prefixLower` by argument name.
-    wineMono = callPackage ../emulators/wine-mono.nix { };
+    # Hybrid: upstream's release tarball for the class libraries, x86_64 runtime rebuilt from source with
+    # emulators/wine-mono/patches (the native→managed callback fix managed titles need on ARM64EC+FEX).
+    wineMono = callPackage ../emulators/wine-mono {
+      mingwGccW64 = pkgs.pkgsCross.mingwW64.stdenv.cc;
+    };
     prefixLower = callPackage ../emulators/wine-prefix-lower.nix { }; # RO system tree; FEX DLLs only on aarch64 (fexdlls ? null); CLR from wineMono
     dxvk =
       if isAarch64 then

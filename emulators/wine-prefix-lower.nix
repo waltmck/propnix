@@ -50,7 +50,7 @@
   gnused,
   wine,
   fexdlls ? null, # aarch64: the FEX emulator DLLs to install as the WoW64 backends. x86_64: null (native).
-  # The .NET CLR (emulators/wine-mono.nix), symlinked in at C:\windows\mono\mono-2.0 — see the "MANAGED
+  # The .NET CLR (emulators/wine-mono), symlinked in at C:\windows\mono\mono-2.0 — see the "MANAGED
   # .NET" step below. `null` = ship NO CLR, which is what this tree did before and is the one-line global
   # opt-out (`prefixLower.override { wineMono = null; }`) if the ~219 MiB is ever unwanted; every MANAGED
   # title then dies at process start, before its first instruction.

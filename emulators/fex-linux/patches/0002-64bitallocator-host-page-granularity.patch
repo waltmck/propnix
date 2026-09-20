@@ -1,0 +1,127 @@
+64BitAllocator: pick allocation addresses at HOST page granularity, not guest.
+
+Fixes i386 guests, which before this patch ran correctly only about two times in five on a 16 KiB host and
+otherwise killed FEXInterpreter with a SIGSEGV.
+
+64BitAllocator is the allocator FEX installs when the guest is 32-bit — its job is to take the host's
+UPPER address space so the guest can own the low 4 GB (`InitAllocator(Loader.Is64BitMode())`). Only 32-bit
+guests take this path, which is why the large-host-page work in patches/0001 never touched it: only x86_64
+guests were ever run against that patch.
+
+It tracks a per-page bitmap indexed in GUEST pages, then hands the chosen index to mmap with MAP_FIXED
+forced on:
+
+    AllocatedOffset = Region->SlabInfo->Base + AllocatedPage * FEXCore::Utils::FEX_PAGE_SIZE;
+    ::mmap((void*)AllocatedOffset, length, prot, (flags & ~MAP_FIXED_NOREPLACE) | MAP_FIXED, fd, offset);
+
+A MAP_FIXED whose address is not host-page-aligned fails with EINVAL, so on a 16 KiB host three of every
+four page indices are unusable. FEX does not treat that mmap as fatal; it carries on and then faults
+walking into the PROT_NONE tail of its own reservation. Captured with
+`strace -f -e trace=mmap,mprotect`:
+
+    mmap(0x7ffff67c4000, 159629312, PROT_NONE, ...MAP_FIXED_NOREPLACE) = 0x7ffff67c4000   reserve, aligned
+    mprotect(0x7ffff67c4000, 12288, PROT_READ|PROT_WRITE) = 0                             commit 3 x 4 KiB
+    mmap(0x7ffff67c7000, 16384, RWX, ...MAP_FIXED)        = -1 EINVAL                     base+12288
+    --- SIGSEGV {si_code=SEGV_ACCERR, si_addr=0x7ffff67c8000} ---
+
+Which index comes up depends on ASLR, hence the flakiness; with `setarch -R` it fails every time.
+
+The fix keeps the bitmap in guest pages — nothing about its layout, the `alignas` on the bitset or the
+`static_assert(sizeof(LiveVMARegion) == FEX_PAGE_SIZE)` changes — and only makes the ADDRESSES it hands
+out host-page-aligned:
+
+  * round `length` up to the host page, so an allocation owns whole host pages and the next one cannot
+    start inside a page this one already holds;
+  * ask the free-range scan for `PagesPerHostPage - 1` extra pages, then round the found start up. The
+    slack is what makes the rounding safe: the start moves by less than the slack, so the range actually
+    mapped is still wholly inside the free run the scan found.
+
+A caller-supplied StartingPosition is left exactly alone: that path is MAP_FIXED_NOREPLACE, the caller
+compares the result against the address it asked for, and a host-aligned request rounds to itself anyway.
+
+Verified on a 16 KiB aarch64 host with static test guests (emulators/fex-linux/tests/mk_hello.py): i386
+and x86_64 both run correctly and repeatably, where i386 was ~2/5 before.
+
+--- a/FEXCore/Source/Utils/Allocator/64BitAllocator.cpp
++++ b/FEXCore/Source/Utils/Allocator/64BitAllocator.cpp
+@@ -27,6 +27,7 @@
+ #include <sys/mman.h>
+ #include <sys/utsname.h>
+ #include <sys/user.h>
++#include <unistd.h>
+ #include <type_traits>
+ #include <utility>
+
+@@ -34,6 +35,20 @@
+
+ thread_local FEXCore::Core::InternalThreadState* TLSThread {};
+
++// The size of a page as the KERNEL sees it, which is not FEX_PAGE_SIZE.
++//
++// FEX_PAGE_SIZE is the GUEST page size and is correctly 4 KiB for an x86 guest. This allocator, however,
++// hands out addresses that it then mmap()s with MAP_FIXED, so its granularity has to be the HOST's — a
++// MAP_FIXED request whose address is not host-page-aligned fails with EINVAL, which on a 16 KiB host
++// rejects three out of every four otherwise-valid page indices.
++static size_t HostPageSize() {
++  static const size_t Size = [] {
++    const long Result = ::sysconf(_SC_PAGESIZE);
++    return Result > 0 ? static_cast<size_t>(Result) : static_cast<size_t>(FEXCore::Utils::FEX_PAGE_SIZE);
++  }();
++  return Size;
++}
++
+ class OSAllocator_64Bit final : public Alloc::HostAllocator {
+ public:
+   OSAllocator_64Bit();
+@@ -257,7 +272,9 @@
+   }
+
+   bool Fixed = (flags & MAP_FIXED) || (flags & MAP_FIXED_NOREPLACE);
+-  length = FEXCore::AlignUp(length, FEXCore::Utils::FEX_PAGE_SIZE);
++  // Whole host pages: a mapping is the kernel's minimum unit, so rounding to the guest page here would
++  // leave the next allocation starting inside a page this one already owns.
++  length = FEXCore::AlignUp(length, HostPageSize());
+
+   uint64_t AddrEnd = Addr + length;
+   size_t NumberOfPages = length / FEXCore::Utils::FEX_PAGE_SIZE;
+@@ -284,6 +301,15 @@
+     uint64_t AllocatedPage {~0ULL};
+     uint64_t NumberOfPages = length >> FEXCore::Utils::FEX_PAGE_SHIFT;
+
++    // The used-page bitmap is indexed in GUEST pages and stays that way — but the address this lambda
++    // picks is passed straight to mmap(MAP_FIXED), so the START has to be host-page-aligned. Ask the scan
++    // for enough extra pages to absorb that alignment, so that after rounding the start up the requested
++    // range is still wholly inside the free run the scan found. With a caller-supplied StartingPosition
++    // there is nothing to choose: the caller wants that exact address (MAP_FIXED_NOREPLACE checks the
++    // result), and a host-aligned one rounds to itself anyway.
++    const uint64_t PagesPerHostPage = HostPageSize() >> FEXCore::Utils::FEX_PAGE_SHIFT;
++    const uint64_t ScanPages = NumberOfPages + (StartingPosition ? 0 : PagesPerHostPage - 1);
++
+     if (Region->FreeSpace >= length) {
+       uint64_t LastAllocation =
+         StartingPosition ? (StartingPosition - Region->SlabInfo->Base) >> FEXCore::Utils::FEX_PAGE_SHIFT : Region->LastPageAllocation;
+@@ -294,7 +320,7 @@
+         // Backward scan
+         // We need to do a backward scan first to fill any holes
+         // Otherwise we will very quickly run out of VMA regions (65k maximum)
+-        auto SearchResult = Region->UsedPages.BackwardScanForRange<true>(LastAllocation, NumberOfPages, Region->NumManagedPages);
++        auto SearchResult = Region->UsedPages.BackwardScanForRange<true>(LastAllocation, ScanPages, Region->NumManagedPages);
+
+         AllocatedPage = SearchResult.FoundElement;
+
+@@ -307,11 +333,14 @@
+
+       // Foward Scan
+       if (AllocatedPage == ~0ULL) {
+-        auto SearchResult = Region->UsedPages.ForwardScanForRange<true>(LastAllocation, NumberOfPages, RegionNumberOfPages);
++        auto SearchResult = Region->UsedPages.ForwardScanForRange<true>(LastAllocation, ScanPages, RegionNumberOfPages);
+         AllocatedPage = SearchResult.FoundElement;
+       }
+
+       if (AllocatedPage != ~0ULL) {
++        // Safe because the scan reserved `ScanPages`: rounding up moves the start by at most
++        // PagesPerHostPage - 1, so the NumberOfPages we actually map remain inside the free run.
++        AllocatedPage = FEXCore::AlignUp(AllocatedPage, PagesPerHostPage);
+         AllocatedOffset = Region->SlabInfo->Base + AllocatedPage * FEXCore::Utils::FEX_PAGE_SIZE;
+
+         // We need to setup protections for this

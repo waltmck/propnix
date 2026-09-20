@@ -111,6 +111,29 @@ mkApp (
     # Inert on the wine backend (wine has no SDL). Revisit if the vendored SDL ever reaches ≥2.26.
     env.SDL_VIDEODRIVER = "x11";
 
+    # ── THIS TITLE UNDER FEX: BROKEN ON A 16K-PAGE HOST ─────────────────────────────────────────────────
+    # `.apply { backend = "fex"; }` is a legal override of the Linux platform's default (box64), and for
+    # this engine it does not work here: the thin-FEX path reaches Unity and then crashes at guest MONO
+    # init. The cause is FEX's self-modifying-code tracking, which a Mono JIT leans on and which is
+    # 4 KiB-granular against this host's 16 KiB page — a different wall from the mmap/allocator ones
+    # emulators/fex-linux fixes, and one those patches do not address.
+    #
+    # RECORDED HERE, NOT IN THE BACKEND, because it is a property of the ENGINE: FEX carries Civ V's
+    # native C++ engine in-game on the same host, so a backend-wide refusal would be false for every
+    # title that has no JIT. box64 — this platform's default and the benchmarked-faster route anyway —
+    # is unaffected, so nothing about a normal `nix run .#hollow-knight` changes; only the explicit FEX
+    # override is refused, with the wall named instead of a package that dies after the splash.
+    #
+    # Retiring this means RE-RUNNING the title under the current emulators/fex-linux and reporting that,
+    # not deleting these two lines. The windows platform is untouched (wine there loads FEX's ARM64EC
+    # DLLs, which is mechanism (A) of D12 and a different thing entirely).
+    # Both halves are gated, so a box64/native/wine build carries no `broken.reason` at all rather than an
+    # explanation of a wall it never meets.
+    broken.systems = lib.optionals (config.backend == "fex") [ "aarch64-linux" ];
+    broken.reason =
+      lib.mkIf (config.backend == "fex")
+        "Hollow Knight's Unity/Mono engine crashes at guest Mono init under the thin FEX backend on a 16K-page host: the Mono JIT depends on FEX's self-modifying-code tracking, which is 4K-granular against a 16K host page (emulators/fex-linux's large-host-page patches fix the mmap and allocator walls, not SMC). Drop `backend = \"fex\"` — box64 is this platform's default here and benchmarks faster regardless.";
+
     # ── wine tuning ── HK is well-behaved on the global defaults; what remains per-title is the Unity
     # frame-pacing preset (agreeing with the launcher's PROPNIX_FPS modes) + the de-Galaxy stubs for the
     # GOG build (HK bundles the Galaxy SDK in two spots; a Steam build has none).

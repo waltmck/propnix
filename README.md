@@ -48,6 +48,7 @@ that work there.
 | `baby-steps` | **x86_64-windows** | **x86_64-windows** |
 | `baldurs-gate-3` | **x86_64-windows** | **x86_64-windows** |
 | `casualties-unknown-demo` | **x86_64-windows** | **x86_64-windows** |
+| `civilization-5` | **i386-linux** | — *(needs a 32-bit GL stack)* |
 | `cyberpunk-2077` | **x86_64-windows** | **x86_64-windows** |
 | `dont-starve` | **i386-windows** | **i386-windows** |
 | `factorio` | **aarch64-linux**, x86_64-linux, x86_64-windows | **x86_64-linux**, x86_64-windows |
@@ -79,9 +80,9 @@ game with entries under only one column can only be built by someone who owns it
 | game | `gog` | `steam` |
 |---|---|---|
 | `baby-steps` | x86_64-windows | — |
-| `baldurs-gate-3` | x86_64-windows | — |
-| `casualties-unknown-demo` | — | x86_64-windows |
 | `baldurs-gate-3` | x86_64-windows | x86_64-windows |
+| `casualties-unknown-demo` | — | x86_64-windows |
+| `civilization-5` | — | i386-linux |
 | `cyberpunk-2077` | x86_64-windows | — |
 | `dont-starve` | i386-windows | — |
 | `factorio` | x86_64-windows | aarch64-linux, x86_64-linux, x86_64-windows |
@@ -135,8 +136,12 @@ benefits of native kernel mounts. That design leans on several host capabilities
 `mkApp` evaluates a game's module (two orthogonal axes: `fetcher` × `emulatedPlatform`) and dispatches to
 the selected backend's builder (`mkWineApp` / `mkThinApp`), producing `bin/<name>` — a wrapper around
 `propnix-launcher` with a baked JSON config (store paths + defaults + the seal + the mount table). The
-scope injects the arch-appropriate emulator set (aarch64 → wine+FEX+ARM64EC DXVK/vkd3d; x86_64 → native
-wine + standard DXVK/vkd3d), but the launcher, config, and game spec are identical. At launch the launcher:
+scope injects the arch-appropriate emulator set, but the launcher, config, and game spec are identical.
+For **Windows** content that is wine — on aarch64 with FEX + ARM64EC DXVK/vkd3d, on x86_64 native with
+standard DXVK/vkd3d. A **Linux** build needs no prefix at all, and on aarch64 gets whichever emulator its
+ABI requires: box64 for an x86_64 payload, FEX for a 32-bit x86 one (box64 emulates x86_64 only), and
+nothing at all for an ARM64 payload. An x86_64 host runs every x86 Linux build directly. At launch the
+launcher:
 
 1. **single-instance** — an flock keyed on the appid; a duplicate launch focuses the running window and
    exits. Focus works via EWMH `_NET_ACTIVE_WINDOW` on X11/Xwayland, and via `wlr-foreign-toplevel-management`

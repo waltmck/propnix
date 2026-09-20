@@ -43,6 +43,18 @@ let
         system = "x86_64-linux";
         config.allowUnfree = true;
       };
+  # The 32-bit (i386) sibling of pkgsX86, for a payload whose ABI is i386-linux — the FEX thin backend's
+  # guest set on aarch64, and the library set + PT_INTERP loader a 32-bit payload needs on the native face
+  # of an x86_64 host. Each host takes the route that is BUILDABLE THERE WITHOUT EMULATION:
+  #   * x86_64 — `pkgsi686Linux`, nixpkgs' own 32-bit set. An x86_64 CPU executes i686 directly, so this is
+  #     a NATIVE instantiation that Hydra builds and caches; no cross, no binfmt.
+  #   * aarch64 — `pkgsCross.gnu32`, CROSS-compiled from the host. Deliberately NOT
+  #     `import pkgs.path { system = "i686-linux"; }`: that is a foreign-arch native instantiation, so
+  #     every uncached path would build under qemu binfmt (slowly, on this host) and the whole set would be
+  #     unbuildable the moment a substituter is unavailable. pkgsX86 above takes that route because its
+  #     x86_64 closures ARE reliably Hydra-cached; an i686 set on aarch64 is not.
+  pkgsGuest32 =
+    if pkgs.stdenv.hostPlatform.isx86_64 then pkgs.pkgsi686Linux else pkgs.pkgsCross.gnu32;
   # Auto-discovered games: each subdir of ../pkgs/games holds one arch-agnostic game spec (default.nix).
   gamesDir = ../pkgs/games;
   gameNames = builtins.attrNames (
@@ -157,7 +169,7 @@ pkgs.lib.makeScope pkgs.newScope (
     # options aren't declared twice.
     backends =
       let
-        box64Entry = callPackage ./backends/box64 { inherit pkgs pkgsX86; };
+        box64Entry = callPackage ./backends/box64 { inherit pkgs pkgsX86 pkgsGuest32; };
       in
       {
         wine = callPackage ./backends/wine { };
@@ -166,7 +178,9 @@ pkgs.lib.makeScope pkgs.newScope (
           modules = [ ];
           build = box64Entry.build;
         };
-        fex = callPackage ./backends/fex { inherit pkgsX86; }; # research/meta.broken on 16K; `.apply { backend = "fex"; }`
+        # The aarch64 emulator for x86 LINUX content of either width; resolveStrategy routes i386-linux
+        # here (box64 is x86_64-only) and an x86_64-linux payload only via `.apply { backend = "fex"; }`.
+        fex = callPackage ./backends/fex { inherit pkgsX86 pkgsGuest32; };
       };
 
     mkApp = callPackage ./mk-app.nix { }; # the evalModules app dispatcher + `.apply` override surface
@@ -204,6 +218,9 @@ pkgs.lib.makeScope pkgs.newScope (
     # on x86_64. Exposed so a game can build a derivation that must be the EMULATED arch (a library loaded
     # into the guest process), not just list one via `box64.guestLibs`.
     pkgsGuest = pkgsX86;
+    # Its 32-bit sibling, for an i386-linux payload (see the `let` above for why the two hosts resolve it
+    # differently). Same purpose: a game that must build a derivation in the GUEST's ABI.
+    inherit pkgsGuest32;
 
     # ── games ── auto-discovered from ../pkgs/games/*: drop a pkgs/games/<name>/default.nix and it becomes
     #    scope.<name> + a flake package/app — no wiring here. `games` groups them for the flake to enumerate.
@@ -249,9 +266,14 @@ pkgs.lib.makeScope pkgs.newScope (
     llvmMingw = llvmMingwPatched;
     fexdlls = callPackage ../emulators/fex { }; # FEX-2607 from source + ./patches (+ box64 wowbox64)
 
-    # FEXInterpreter — the LINUX x86_64-on-aarch64 emulator for the THIN FEX backend (distinct from
-    # fexdlls, the Windows/ARM64EC DLLs wine loads). The thin FEX path is research/meta.broken on 16K.
-    fexInterpreter = pkgs.fex;
+    # FEXInterpreter — the LINUX x86_64/i386-on-aarch64 emulator for the THIN FEX backend (distinct from
+    # fexdlls, the Windows/ARM64EC DLLs wine loads).
+    #
+    # OURS, not nixpkgs': stock FEX >= 2508 hard-requires a 4 KiB kernel page and does not start at all on
+    # this 16 KiB host — its bundled jemalloc refuses before any guest runs. emulators/fex-linux carries
+    # the large-host-page work plus the two 32-bit-guest fixes that make i386 guests usable, which is what
+    # pkgs/games/civilization-5 runs on.
+    fexInterpreter = callPackage ../emulators/fex-linux { };
     # Graceful no-op GOG Galaxy SDK DLLs (Galaxy64/Galaxy/pops_api): bound over a game's bundled copies so a
     # statically-imported online SDK never reaches GOG's services — propnix games run fully offline, the
     # same policy as masking Steam's steam_api64.dll (winefex path; x86_64 = native wine, no stub).

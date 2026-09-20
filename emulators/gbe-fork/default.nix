@@ -2,27 +2,37 @@
 # can serve. `steam-emu` picks the arm matching the payload's `emulatedPlatform`, because the library is
 # loaded INTO the game's own process and must therefore be that process's architecture.
 #
-# The Linux shims are BUILT FROM SOURCE (./shim.nix), one instantiation per ABI:
+# THE WHOLE PACKAGE IS THIS FILE plus two builds it calls out to, and that is deliberate — read the
+# closure note below before folding them in. What it produces:
+#
+#   linuxShims.{aarch64,x64,x86}   from source (./shim.nix), one instantiation per Linux ABI
+#   winPrebuilt                    steam_api(64).dll + the SteamStub patcher, from the pinned release
+#   steamStubProxy                 a tiny from-source PE for SteamStub-wrapped exes (./steamstub-proxy.nix)
+#
+# The Linux shims are BUILT FROM SOURCE, one instantiation per ABI:
 #
 #   * the HOST's own arch      — an ordinary native build.
-#   * the other Linux ABI      — a CROSS build (`pkgsCross.gnu64` / `pkgsCross.aarch64-multiplatform`),
-#                                so the compiler runs natively and produces foreign code. NOT a native
-#                                foreign instantiation (`pkgsX86.callPackage`): that would be an x86_64
-#                                BUILD, which qemu binfmt on an aarch64 host turns into a slow success
-#                                rather than an honest failure. Nobody should have to trust a binary cache
-#                                to get these bytes — cross-compiling keeps them locally reproducible.
+#   * every other Linux ABI    — a CROSS build (`pkgsCross.gnu64` / `.gnu32` /
+#                                `.aarch64-multiplatform`), so the compiler runs natively and produces
+#                                foreign code. NOT a native foreign instantiation
+#                                (`pkgsX86.callPackage`): that would be an x86_64 BUILD, which qemu binfmt
+#                                on an aarch64 host turns into a slow success rather than an honest
+#                                failure. Nobody should have to trust a binary cache to get these bytes —
+#                                cross-compiling keeps them locally reproducible.
 #
-# The WINDOWS PE shims are still upstream's PREBUILT release artifacts, pinned to the SAME tag as the source
-# so a game's two flavours can never disagree about which Steamworks surface they implement. Building those
-# from source needs a mingw cross of the Windows file set (a different source list, `common_link_win`, and
-# mingw builds of protobuf/curl/mbedtls/portaudio) and is the remaining piece of this migration — nothing in
-# propnix's current platform set depends on it, since wine loads the PE and the prebuilt one works.
+# The WINDOWS PE shims are upstream's PREBUILT release artifacts, pinned to the SAME tag as the source so a
+# game's two flavours can never disagree about which Steamworks surface they implement. A from-source mingw
+# build of the Windows file set was written and then REMOVED: its only consumer was a patch answering
+# Valve's pre-SteamStub `STEAM_DRM_IPC` handshake for Civ V, and that title turned out to be unrunnable for
+# an unrelated reason (a CEG-stripped executable — see pkgs/games/civilization-5), leaving ~400 lines of
+# mingw protobuf/curl/mbedtls plumbing with nothing to serve. `git log` has it if a title ever needs
+# patched Windows bytes.
 #
-# ONE THING IS BUILT FROM SOURCE ON THE WINDOWS SIDE: `steamStubProxy` (./steamstub-proxy.nix), a tiny PE
-# that stands in front of the shim for a SteamStub-wrapped exe. It is a separate, LAZY passthru — a game
-# that does not set `steam.emu.steamStub` pulls neither it nor a mingw toolchain — and its whole
-# justification (with the wine `+relay` measurements that establish the wrapper never asks the on-disk
-# steam lib anything) lives in that file's header.
+# WHY NOT ONE DERIVATION CONTAINING EVERYTHING. It would cost every steam.emu game the whole set. The
+# per-ABI attrs are LAZY and games index them directly (lib/modules/steam-emu.nix), so a wine-only title
+# pulls no Linux shim and no pkgsCross bootstrap, and a title that never sets `steam.emu.steamStub` pulls
+# no mingw toolchain at all. The symlinkJoin at the bottom is the "everything" view — build it with
+# `nix build .#gbeFork` for CI and cachix — but nothing in a game's closure points at it.
 {
   lib,
   stdenv,
@@ -49,6 +59,8 @@ let
     system:
     if system == stdenv.hostPlatform.system then
       pkgs
+    else if system == "i686-linux" then
+      pkgs.pkgsCross.gnu32
     else if system == "x86_64-linux" then
       pkgs.pkgsCross.gnu64
     else
@@ -58,9 +70,14 @@ let
   # Every ABI, as LAZY attrs. Consumers index this directly (lib/modules/steam-emu.nix) so a game pulls
   # only the shim its own payload will load — indexing the assembled tree below would make every
   # steam.emu game force all of them, i.e. a full pkgsCross bootstrap on this host.
+  #
+  # `x86` is the 32-bit Linux ABI, and it is not hypothetical: Aspyr's Civ V Linux build is a 32-bit x86
+  # ELF, which is the whole reason emulators/fex-linux exists. Keys match the Windows side's x64/x86
+  # naming so both flavours of a game read the same way.
   linuxShims = {
     "aarch64" = shimFor "aarch64-linux";
     "x64" = shimFor "x86_64-linux";
+    "x86" = shimFor "i686-linux";
   };
   # …and the subset this host can actually USE, which is what the assembled tree carries. An x86_64 host
   # can never run aarch64 content (lib/strategy.nix `runnable`), so cross-building an aarch64 shim there
@@ -104,6 +121,7 @@ let
     '';
     meta.sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
   };
+
 in
 # The assembled tree is for DISCOVERY and CI (`nix build .#gbeFork` builds every shim this host can use in
 # one command, so cachix gets them). Games never reference it — see `linuxShims` above.
@@ -126,7 +144,11 @@ symlinkJoin {
         "$out/share/doc/gbe_fork"
     '';
   passthru = {
-    inherit version linuxShims winPrebuilt;
+    inherit
+      version
+      linuxShims
+      winPrebuilt
+      ;
     # The SteamStub arm, as a FUNCTION (steam-emu calls it per declared `.dll` libPath). Lazy like
     # `linuxShims`: a game that never sets `steam.emu.steamStub` pulls no mingw toolchain.
     steamStubProxy = callPackage ./steamstub-proxy.nix {

@@ -56,7 +56,8 @@ impl From<serde_json::Error> for Error {
     }
 }
 
-/// Where a pin lives in the file. `fetchInfo.<fetcher>.<platform>[i]`, or `dlc.<name>`.
+/// Where a pin lives in the file. `fetchInfo.<fetcher>.<platform>[i]`, `dlc.<name>`, or
+/// `extra.<name>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PinLoc {
     Payload {
@@ -65,6 +66,15 @@ pub enum PinLoc {
         index: usize,
     },
     Dlc {
+        name: String,
+    },
+    /// A pin that is NOT payload content: an upstream artifact a game module consumes as a BUILD-TIME
+    /// input and never mounts. pkgs/games/civilization-5 has the motivating case — its Linux depots ship
+    /// no icon at all, so it pins the 45 MB Windows exe depot purely to lift the icon out of that exe's
+    /// PE resources. Advanced with everything else so the file still moves as ONE unit; kept out of
+    /// `fetchInfo` because a row there declares a platform AVAILABLE, and that Windows build is
+    /// CEG-stripped and cannot execute at all.
+    Extra {
         name: String,
     },
 }
@@ -78,6 +88,7 @@ impl std::fmt::Display for PinLoc {
                 index,
             } => write!(f, "fetchInfo.{fetcher}.{platform}[{index}]"),
             PinLoc::Dlc { name } => write!(f, "dlc.{name}"),
+            PinLoc::Extra { name } => write!(f, "extra.{name}"),
         }
     }
 }
@@ -199,6 +210,23 @@ impl VersionsFile {
                 });
             }
         }
+        // `extra`: rows that are build-time inputs rather than payload content (see PinLoc::Extra).
+        // Walked identically to `dlc` — structural classification, same all-or-nothing update — so such a
+        // row cannot silently rot while the payloads move forward.
+        if let Some(extra) = self.root.get("extra").and_then(Value::as_object) {
+            let extra: BTreeMap<_, _> = extra.iter().collect();
+            for (name, e) in extra {
+                let obj = e
+                    .as_object()
+                    .ok_or_else(|| Error::Schema(format!("extra.{name} is not an object")))?
+                    .clone();
+                out.push(Pin {
+                    loc: PinLoc::Extra { name: name.clone() },
+                    store: classify_dlc(&obj),
+                    obj,
+                });
+            }
+        }
         Ok(out)
     }
 
@@ -220,6 +248,12 @@ impl VersionsFile {
             PinLoc::Dlc { name } => self
                 .root
                 .get_mut("dlc")
+                .and_then(|v| v.get_mut(name))
+                .and_then(Value::as_object_mut)
+                .ok_or_else(missing),
+            PinLoc::Extra { name } => self
+                .root
+                .get_mut("extra")
                 .and_then(|v| v.get_mut(name))
                 .and_then(Value::as_object_mut)
                 .ok_or_else(missing),
@@ -607,6 +641,69 @@ mod tests {
             pins[0].str_field("buildId").unwrap(),
             pins[1].str_field("buildId").unwrap()
         );
+    }
+
+    /// An `extra` row is a pin like any other: found by `pins()`, editable by `apply_all`, and NOT
+    /// reported as a DLC (its failure message is the generic one). This is what keeps
+    /// pkgs/games/civilization-5's icon-source depot moving with the rest of the file instead of rotting
+    /// at whatever manifest it was first written with.
+    #[test]
+    fn extra_rows_are_pins_and_advance() {
+        const WITH_EXTRA: &str = r#"{
+  "fetchInfo": {
+    "steam": {
+      "i386-linux": [
+        {
+          "pname": "g-282301",
+          "appId": 8930,
+          "depotId": 282301,
+          "manifestId": "111",
+          "outputHash": "sha256-AAAA"
+        }
+      ]
+    }
+  },
+  "extra": {
+    "icon": {
+      "pname": "g-8932",
+      "appId": 8930,
+      "depotId": 8932,
+      "manifestId": "222",
+      "outputHash": "sha256-BBBB"
+    }
+  }
+}
+"#;
+        let p = write_tmp(WITH_EXTRA);
+        let mut f = VersionsFile::load(&p).unwrap();
+        let pins = f.pins().unwrap();
+        assert_eq!(pins.len(), 2, "the extra row must be walked like any other pin");
+        let extra = pins
+            .iter()
+            .find(|x| matches!(&x.loc, PinLoc::Extra { name } if name == "icon"))
+            .expect("extra.icon is a pin");
+        assert_eq!(extra.store, Store::Steam, "classified structurally, like a dlc row");
+        assert!(!extra.is_dlc(), "not a DLC: it is never mounted");
+        assert_eq!(extra.loc.to_string(), "extra.icon");
+
+        // And it moves: the same edit path the base payloads take.
+        f.apply_all(&[
+            (
+                PinLoc::Extra { name: "icon".into() },
+                "manifestId".into(),
+                "333".into(),
+            ),
+            (
+                PinLoc::Extra { name: "icon".into() },
+                "outputHash".into(),
+                "sha256-CCCC".into(),
+            ),
+        ])
+        .unwrap();
+        let moved = f.render();
+        assert!(moved.contains("\"333\""), "manifest advanced");
+        assert!(moved.contains("sha256-CCCC"), "hash advanced");
+        assert!(moved.contains("\"extra\""), "the section survives the rewrite");
     }
 
     #[test]

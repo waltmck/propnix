@@ -1,0 +1,365 @@
+Make DYNAMICALLY LINKED i386 guests load: emulate sub-host-page mmap on the 32-bit guest path too.
+
+Before this patch a dynamic i386 guest dies in its own dynamic linker:
+
+    /…/getconf: error while loading shared libraries: libc.so.6: failed to map segment from shared object
+
+The x86_64 sibling of the same binary runs fine on the same build, so the problem is 32-bit-specific.
+The rejected call, from `strace -f -e trace=mmap`:
+
+    mmap(0xf78a2000, 540672, PROT_READ, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 4, 0x1b2000) = -1 EINVAL
+
+Address and file offset are both 4 KiB- but not 16 KiB-aligned, which is normal and unavoidable for an x86
+guest: an ELF only guarantees `vaddr == offset (mod 4096)`, and `mmap2` takes its offset in 4096-byte
+units. patches/0001 already emulates exactly this — but only on the path a 64-bit guest takes. GuestMmap
+splits first:
+
+    bool Map32Bit = !Is64Bit || (flags & FEX::HLE::X86_64_MAP_32BIT);
+    if (Map32Bit) {
+      Result = (uint64_t)Get32BitAllocator()->Mmap(addr, length, prot, flags, fd, offset);
+    } else {
+      Result = ::mmap(...);      // <- where 0001 put the emulation
+    }
+
+so every 32-bit guest mapping goes through `Get32BitAllocator()` instead. Which allocator that is takes
+one more step to pin down, and it is not the obvious one: `Get32BitAllocator()` is virtual, and
+`x32SyscallHandler` overrides it to return the allocator it was constructed with — which `InitAllocator()`
+builds as a PASSTHROUGH allocator, because a 64-bit host kernel can place low-4GB mappings itself and
+needs no arbitration. So under FEXInterpreter the live path is `MemAllocatorPassThrough::Mmap`, a bare
+`::mmap`, and that is what produced the trace above.
+
+Fixed in three places, all of them the same one-line substitution of MapExact for `::mmap`:
+
+  * `MemAllocatorPassThrough::Mmap` — THE LIVE PATH for a 32-bit guest on a 64-bit host.
+  * `MemAllocator32Bit::Mmap` — the sibling reached via the base handler's `Alloc32Handler` (a 32-bit
+    host, and the TestHarnessRunner). Carries the identical bug; fixed rather than left as a trap.
+  * the 64-bit direct-mmap branch in GuestMmap, which keeps 0001's behaviour but now shares the code.
+
+`MemAllocator32Bit` has two 4 KiB-granular `::mmap` calls and both are addressed:
+
+  * THE GUEST-CHOSEN ADDRESS (the `Addr != 0` path). The guest has already relocated against this address
+    and it cannot be moved, so the mapping is emulated: back the enclosing host-page span with private
+    anonymous memory and pread the file's bytes in.
+  * THE FEX-CHOSEN ADDRESS (`AllocateNoHint`). Here the address is ours to pick, so pick one the kernel
+    accepts — ask the free-page scan for enough slack to absorb host-page rounding, then round up. This
+    also mattered more than it looks: that path maps with MAP_FIXED_NOREPLACE and its retry logic only
+    treats EEXIST as "try elsewhere", so a misaligned candidate returned EINVAL and failed the whole
+    allocation rather than moving on.
+
+The emulation itself moves into a new header, Source/Tools/LinuxEmulation/LargePageMap.h, and 0001's
+inline copy is replaced by a call to it. One implementation, three call sites: a routine that rewrites
+another process's mappings byte-for-byte is not something to maintain twice. Header-only, so no
+CMakeLists change.
+
+TWO DELIBERATE NARROWINGS, both of them about not answering a request with a different mapping:
+
+  * ADDRESS. `MapExact` emulates only when MAP_FIXED is set AND MAP_FIXED_NOREPLACE is not. Without
+    MAP_FIXED the address is a hint the kernel may place elsewhere, and forcing it would silently unmap
+    whatever is there; with NOREPLACE the caller is explicitly asking not to displace an existing mapping,
+    which an emulated MAP_FIXED would do. Both go to the kernel unchanged — and a NOREPLACE caller that
+    gets EINVAL can choose another address, which is precisely what the 32-bit allocator now does.
+  * SEMANTICS. The emulation backs the span with PRIVATE ANONYMOUS memory, which reproduces a private
+    file-backed or anonymous mapping and nothing else, so it is restricted to exactly that: the type bits
+    must be MAP_PRIVATE (tested as a unit, since MAP_SHARED_VALIDATE is MAP_SHARED|MAP_PRIVATE), and no
+    flag outside a small honoured set may be present. A MAP_SHARED mapping would otherwise come back
+    without writeback, without cross-process visibility and unshared across fork(); MAP_GROWSDOWN would
+    lose its auto-growth; MAP_HUGETLB/MAP_LOCKED/MAP_SYNC each promise what an anonymous span does not.
+    Those all reach the kernel untouched and fail with EINVAL as on an unpatched FEX — which also keeps
+    FEX's VMA bookkeeping, recording the flags the GUEST passed, true of the mapping that exists.
+    Nothing on the ELF-loading path this patch exists for is affected: those mappings are MAP_PRIVATE.
+
+On a 4 KiB host every change here is a no-op: the slack is zero, the rounding is identity, and MapExact's
+alignment test never fires.
+
+--- a/Source/Tools/LinuxEmulation/LargePageMap.h
++++ b/Source/Tools/LinuxEmulation/LargePageMap.h
+@@ -0,0 +1,136 @@
++// SPDX-License-Identifier: MIT
++#pragma once
++
++// Mapping a GUEST page onto a host whose page is larger than 4 KiB.
++//
++// An x86 guest's page is 4 KiB and its ABI says so: an ELF only guarantees `vaddr == offset (mod 4096)`,
++// and `mmap2` takes its file offset in 4096-byte units. So a guest — its dynamic linker above all —
++// routinely asks for a file-backed MAP_FIXED whose address and offset are 4 KiB-aligned but not
++// host-page-aligned. The kernel rejects that outright with EINVAL, which is why no dynamically linked
++// guest can load its libc on a 16 KiB host.
++//
++// `MapExact` honours those requests by emulating them: back the whole enclosing host-page span with
++// private anonymous memory and copy the file's bytes in with pread. Header-only and free of FEX
++// dependencies so that both the 64-bit direct-mmap path (SyscallsSMCTracking) and the 32-bit guest
++// allocator (LinuxAllocator) can share one implementation — the routine is subtle enough that two copies
++// would certainly drift.
++
++#include <cerrno>
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++// Parsed explicitly rather than relying on the host headers, which is what FEX does elsewhere for this
++// flag: a build against older UAPI headers would otherwise silently lose the NOREPLACE distinction below.
++#ifndef MAP_FIXED_NOREPLACE
++#define MAP_FIXED_NOREPLACE 0x100000
++#endif
++
++namespace FEX::LargePage {
++
++inline size_t HostPageSize() {
++  static const size_t Size = [] {
++    const long Result = ::sysconf(_SC_PAGESIZE);
++    return Result > 0 ? static_cast<size_t>(Result) : static_cast<size_t>(4096);
++  }();
++  return Size;
++}
++
++// Would this request be rejected by the kernel purely for straddling host pages?
++inline bool IsSubHostPage(uintptr_t addr, off_t offset) {
++  const size_t Mask = HostPageSize() - 1;
++  return (addr & Mask) || (static_cast<uint64_t>(offset) & Mask);
++}
++
++// Map `length` bytes at EXACTLY `addr`, emulating the mapping when `addr`/`offset` straddle host pages.
++// Returns the mapped address, or MAP_FAILED with errno set. An already-host-aligned request, or one with
++// no fixed address, is handed to the kernel untouched.
++inline void* MapExact(void* addr, size_t length, int prot, int flags, int fd, off_t offset) {
++  const uintptr_t AddrU = reinterpret_cast<uintptr_t>(addr);
++  const bool FileBacked = fd >= 0 && !(flags & MAP_ANONYMOUS);
++  const bool AnonMap = (flags & MAP_ANONYMOUS) != 0;
++
++  // Emulate ONLY where the caller has demanded this exact address and is prepared for it to be taken.
++  // Without MAP_FIXED the address is merely a hint the kernel may ignore, and forcing it would silently
++  // unmap whatever lives there; with MAP_FIXED_NOREPLACE the caller is explicitly asking NOT to displace
++  // an existing mapping, which an emulated MAP_FIXED would do. Both cases go to the kernel unchanged, and
++  // a NOREPLACE caller that gets EINVAL can pick another address — which is what FEX's 32-bit allocator
++  // does.
++  const bool ExactRequested = (flags & MAP_FIXED) && !(flags & MAP_FIXED_NOREPLACE);
++
++  // AND ONLY WHERE THE RESULT IS THE MAPPING THAT WAS ASKED FOR. The span below is recreated as PRIVATE
++  // ANONYMOUS memory with the file's bytes read into it, which reproduces a private file-backed or
++  // anonymous mapping exactly — and reproduces nothing else. MAP_SHARED would lose writeback,
++  // cross-process visibility and post-fork sharing; MAP_GROWSDOWN would lose its auto-growth; MAP_HUGETLB,
++  // MAP_LOCKED and MAP_SYNC each promise something a plain anonymous span does not. Every such request
++  // goes to the kernel UNTOUCHED, where a sub-host-page address fails with EINVAL exactly as it does on an
++  // unpatched FEX: a refusal the caller can see and react to beats a mapping whose semantics silently
++  // differ from the requested ones — and it keeps FEX's own VMA bookkeeping, which records the flags the
++  // GUEST passed, true of the mapping that actually exists.
++  //
++  // MAP_SHARED_VALIDATE is (MAP_SHARED | MAP_PRIVATE), so the type bits are tested AS A UNIT; a plain
++  // `!(flags & MAP_SHARED)` would let it through. The extras listed are the ones a private anonymous span
++  // may drop safely: DENYWRITE/EXECUTABLE are ignored by Linux, NORESERVE/POPULATE/NONBLOCK are
++  // performance hints, and MAP_STACK has no effect on Linux.
++  constexpr int HonouredFlags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_DENYWRITE | MAP_EXECUTABLE |
++                                MAP_NORESERVE | MAP_POPULATE | MAP_NONBLOCK | MAP_STACK;
++  const bool Reproducible = (flags & (MAP_SHARED | MAP_PRIVATE)) == MAP_PRIVATE && !(flags & ~HonouredFlags);
++
++  if (!AddrU || !ExactRequested || !Reproducible || !IsSubHostPage(AddrU, FileBacked ? offset : 0) ||
++      !(FileBacked || AnonMap)) {
++    return ::mmap(addr, length, prot, flags, fd, offset);
++  }
++
++  const size_t HostPage = HostPageSize();
++  const uintptr_t SpanBase = AddrU & ~(HostPage - 1);
++  const uintptr_t SpanEnd = (AddrU + length + HostPage - 1) & ~(HostPage - 1);
++  const size_t LeadLen = AddrU - SpanBase;            // neighbour bytes sharing our leading host page
++  const size_t TrailLen = SpanEnd - (AddrU + length); // neighbour bytes sharing our trailing host page
++
++  // The end pages are shared with whatever the guest mapped next door, and replacing the span with fresh
++  // anonymous memory would erase it. Save those fragments first, through /proc/self/mem rather than a
++  // direct read: a neighbour page can itself be an unbacked beyond-EOF page, where a direct read raises
++  // SIGBUS but a pread merely comes up short.
++  static const int MemFd = ::open("/proc/self/mem", O_RDONLY | O_CLOEXEC);
++  uint8_t* LeadSave = LeadLen ? static_cast<uint8_t*>(::malloc(LeadLen)) : nullptr;
++  uint8_t* TrailSave = TrailLen ? static_cast<uint8_t*>(::malloc(TrailLen)) : nullptr;
++  const ssize_t LeadGot = (LeadSave && MemFd >= 0) ? ::pread(MemFd, LeadSave, LeadLen, SpanBase) : 0;
++  const ssize_t TrailGot = (TrailSave && MemFd >= 0) ? ::pread(MemFd, TrailSave, TrailLen, AddrU + length) : 0;
++
++  // R/W, and deliberately not the requested protection: FEX reads guest code in order to translate it and
++  // never executes a guest page on the host, so EXEC buys nothing, and W is needed to pread into the span.
++  // Sub-host-page protection is not enforceable here in any case.
++  void* Span = ::mmap(reinterpret_cast<void*>(SpanBase), SpanEnd - SpanBase, PROT_READ | PROT_WRITE,
++                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
++  bool Ok = Span != MAP_FAILED;
++
++  if (Ok) {
++    if (LeadGot > 0) {
++      ::memcpy(reinterpret_cast<void*>(SpanBase), LeadSave, static_cast<size_t>(LeadGot));
++    }
++    if (TrailGot > 0) {
++      ::memcpy(reinterpret_cast<void*>(AddrU + length), TrailSave, static_cast<size_t>(TrailGot));
++    }
++    if (FileBacked) {
++      // A short read is not an error: a segment's last page legitimately extends past end-of-file, and
++      // the bytes beyond it must read as zero, which the fresh anonymous mapping already provides.
++      Ok = ::pread(fd, reinterpret_cast<void*>(AddrU), length, offset) >= 0;
++    }
++    // An anonymous request needs nothing further — the new mapping is already zero-filled.
++  }
++
++  ::free(LeadSave);
++  ::free(TrailSave);
++
++  if (!Ok) {
++    // Leave errno from whatever failed and fall back to the kernel, so a caller that can cope with a
++    // refusal still sees one rather than a silently wrong mapping.
++    return ::mmap(addr, length, prot, flags, fd, offset);
++  }
++  return reinterpret_cast<void*>(AddrU);
++}
++
++} // namespace FEX::LargePage
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: MIT
+ #include "LinuxSyscalls/LinuxAllocator.h"
+ #include "LinuxSyscalls/Syscalls.h"
++#include "LargePageMap.h"
+
+ #include <FEXCore/Utils/MathUtils.h>
+ #include <FEXCore/Utils/TypeDefines.h>
+@@ -173,16 +174,28 @@
+   // Remove the MAP_32BIT flag if it exists now
+   flags &= ~FEX::HLE::X86_64_MAP_32BIT;
+
++  // We are choosing the address here, so it costs nothing to choose one the kernel will accept: a
++  // MAP_FIXED_NOREPLACE at a 4 KiB-granular address fails with EINVAL on a larger-page host, and the
++  // retry logic below only treats EEXIST as "try elsewhere", so such a candidate aborts the whole
++  // allocation. Ask the scan for enough slack to absorb rounding the start up to a host page and then
++  // round it — the free run the scan found still contains the range we actually map. One on a 4 KiB host,
++  // where the slack is zero and the rounding a no-op.
++  const uint64_t PagesPerHostPage = FEX::LargePage::HostPageSize() >> FEXCore::Utils::FEX_PAGE_SHIFT;
++  const size_t ScanPages = PagesLength + (PagesPerHostPage - 1);
++
+   auto AllocateNoHint = [&]() -> void* {
+     bool Wrapped = false;
+     uint64_t BottomPage = Map32Bit && (LastScanLocation >= LastKeyLocation32Bit) ? LastKeyLocation32Bit : LastScanLocation;
+ restart: {
+   // Linear range scan
+-  uint64_t LowerPage = (this->*FindPageRangePtr)(BottomPage, PagesLength);
++  uint64_t LowerPage = (this->*FindPageRangePtr)(BottomPage, ScanPages);
+   if (LowerPage == 0) {
+     // Try again but this time from the start
+     BottomPage = Map32Bit ? LastKeyLocation32Bit : LastKeyLocation;
+-    LowerPage = (this->*FindPageRangePtr)(BottomPage, PagesLength);
++    LowerPage = (this->*FindPageRangePtr)(BottomPage, ScanPages);
++  }
++  if (LowerPage != 0) {
++    LowerPage = FEXCore::AlignUp(LowerPage, PagesPerHostPage);
+   }
+
+   uint64_t UpperPage = LowerPage + PagesLength;
+@@ -230,8 +243,11 @@
+   if (Addr == 0) {
+     return AllocateNoHint();
+   } else {
+-    void* MappedPtr = ::mmap(reinterpret_cast<void*>(PageAddr << FEXCore::Utils::FEX_PAGE_SHIFT),
+-                             PagesLength << FEXCore::Utils::FEX_PAGE_SHIFT, prot, flags, fd, offset);
++    // The guest named this address and we cannot move it — its linker has already relocated against it.
++    // On a host with a page larger than the guest's, that address (and the file offset with it) is very
++    // often not host-page-aligned, which the kernel refuses; MapExact emulates those mappings instead.
++    void* MappedPtr = FEX::LargePage::MapExact(reinterpret_cast<void*>(PageAddr << FEXCore::Utils::FEX_PAGE_SHIFT),
++                                               PagesLength << FEXCore::Utils::FEX_PAGE_SHIFT, prot, flags, fd, offset);
+
+     if (MappedPtr != MAP_FAILED) {
+       SetUsedPages(PageAddr, PagesLength);
+@@ -522,7 +538,13 @@
+ class MemAllocatorPassThrough final : public FEX::HLE::MemAllocator {
+ public:
+   void* Mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset) override {
+-    uint64_t Result = (uint64_t)::mmap(addr, length, prot, flags, fd, offset);
++    // THIS is the allocator a 32-bit guest's mmap reaches under FEXInterpreter on a 64-bit host:
++    // x32SyscallHandler::Get32BitAllocator() returns the allocator it was constructed with, and
++    // InitAllocator() builds a passthrough one. The host kernel can place low-4GB mappings itself, so
++    // there is nothing to arbitrate — except that the guest's addresses and file offsets are 4 KiB-
++    // granular, which a larger-page host rejects. MapExact emulates exactly those; everything else is
++    // still a plain ::mmap.
++    uint64_t Result = (uint64_t)FEX::LargePage::MapExact(addr, length, prot, flags, fd, offset);
+     if (Result == ~0ULL) {
+       return reinterpret_cast<void*>(-errno);
+     }
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+@@ -19,6 +19,7 @@
+ #include <sys/shm.h>
+
+ #include "LinuxSyscalls/Syscalls.h"
++#include "LargePageMap.h"
+ #include "LinuxSyscalls/SignalDelegator.h"
+
+ #include <FEXCore/Debug/InternalThreadState.h>
+@@ -346,68 +347,11 @@
+       }
+       LOGMAN_THROW_A_FMT(Is64Bit || (Result >> 32) == 0 || (Result >> 32) == 0xFFFFFFFF, "values must fit to 32 bits");
+     } else {
+-      // propnix large-host-page: the guest dynamic linker maps shared-library PT_LOAD
+-      // segments with file-backed MAP_FIXED at 4K granularity. On a host whose page is
+-      // larger than 4K the kernel rejects any such mapping whose address or file offset
+-      // is not host-page-aligned (EINVAL), so no dynamically-linked guest can load its
+-      // libc. Emulate those sub-host-page mappings by backing the whole host-page span
+-      // with private anonymous memory (always writable, never beyond-EOF) and copying the
+-      // segment's bytes in with pread — the file-backed pages the linker leaves under a
+-      // segment can extend past the file's end (its whole-object reservation is rounded up),
+-      // so we must NOT pread into them directly (that faults). The one or two host pages at
+-      // the ends of the span are shared with a neighbouring segment; preserve their bytes
+-      // across the anonymous remap with a fault-safe /proc/self/mem read (short read instead
+-      // of SIGBUS if the neighbour is itself an unbacked/beyond-EOF page). Protection is left
+-      // at the most-lenient R/W — FEX reads guest code to translate it and never host-executes
+-      // guest pages, so EXEC is unnecessary and W is harmless. Aligned file/anon mappings and
+-      // non-fixed mappings take the kernel path unchanged.
+-      static const size_t HostPage = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+-      const uintptr_t AddrU = reinterpret_cast<uintptr_t>(addr);
+-      const bool FileBacked = fd >= 0 && !(flags & MAP_ANONYMOUS);
+-      const bool AnonMap = (flags & MAP_ANONYMOUS) != 0;
+-      const bool SubHostPage = (AddrU & (HostPage - 1)) || (static_cast<uint64_t>(offset) & (HostPage - 1));
+-      if ((flags & MAP_FIXED) && SubHostPage && AddrU != 0 && (FileBacked || AnonMap)) {
+-        const uintptr_t SpanBase = AddrU & ~(HostPage - 1);
+-        const uintptr_t SpanEnd = (AddrU + length + HostPage - 1) & ~(HostPage - 1);
+-        const size_t LeadLen = AddrU - SpanBase;               // neighbour bytes in the leading page
+-        const size_t TrailLen = SpanEnd - (AddrU + length);    // neighbour bytes in the trailing page
+-
+-        // Fault-safe capture of the neighbouring fragments that share our end pages.
+-        static int MemFd = ::open("/proc/self/mem", O_RDONLY | O_CLOEXEC);
+-        uint8_t* LeadSave = LeadLen ? reinterpret_cast<uint8_t*>(::malloc(LeadLen)) : nullptr;
+-        uint8_t* TrailSave = TrailLen ? reinterpret_cast<uint8_t*>(::malloc(TrailLen)) : nullptr;
+-        const ssize_t LeadGot = (LeadSave && MemFd >= 0) ? ::pread(MemFd, LeadSave, LeadLen, SpanBase) : 0;
+-        const ssize_t TrailGot = (TrailSave && MemFd >= 0) ? ::pread(MemFd, TrailSave, TrailLen, AddrU + length) : 0;
+-
+-        bool ok = ::mmap(reinterpret_cast<void*>(SpanBase), SpanEnd - SpanBase, PROT_READ | PROT_WRITE,
+-                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) != MAP_FAILED;
+-        if (ok) {
+-          if (LeadGot > 0) {
+-            memcpy(reinterpret_cast<void*>(SpanBase), LeadSave, static_cast<size_t>(LeadGot));
+-          }
+-          if (TrailGot > 0) {
+-            memcpy(reinterpret_cast<void*>(AddrU + length), TrailSave, static_cast<size_t>(TrailGot));
+-          }
+-          if (FileBacked) {
+-            ok = ::pread(fd, reinterpret_cast<void*>(AddrU), length, offset) >= 0;
+-          }
+-          // Anonymous request: the fresh mapping is already zero-filled.
+-        }
+-        ::free(LeadSave);
+-        ::free(TrailSave);
+-        if (ok) {
+-          Result = AddrU;
+-        } else {
+-          Result = reinterpret_cast<uint64_t>(::mmap(reinterpret_cast<void*>(addr), length, prot, flags, fd, offset));
+-          if (Result == ~0ULL) {
+-            return reinterpret_cast<void*>(-errno);
+-          }
+-        }
+-      } else {
+-        Result = reinterpret_cast<uint64_t>(::mmap(reinterpret_cast<void*>(addr), length, prot, flags, fd, offset));
+-        if (Result == ~0ULL) {
+-          return reinterpret_cast<void*>(-errno);
+-        }
++      // Sub-host-page requests are emulated (see LargePageMap.h); an aligned or non-exact one is handed
++      // to the kernel untouched, so this is also the ordinary path.
++      Result = reinterpret_cast<uint64_t>(FEX::LargePage::MapExact(reinterpret_cast<void*>(addr), length, prot, flags, fd, offset));
++      if (Result == ~0ULL) {
++        return reinterpret_cast<void*>(-errno);
+       }
+     }

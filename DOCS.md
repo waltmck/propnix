@@ -141,6 +141,15 @@ Drop a directory under `pkgs/games/<name>/` — it's auto-discovered into the sc
   = several depots, unioned read-only at launch, first wins). A populated pair *is* availability — an
   unpinned selection is a legible eval error.
 
+  Two optional sibling sections: **`dlc`** (name → one arg-set per pack, mounted above the base when
+  enabled — see the DLC framework) and **`extra`** (name → one arg-set for an upstream artifact that is a
+  BUILD-TIME INPUT rather than payload content, never mounted). `extra` exists because a game may need
+  bytes from a depot it does not run: civilization-5's Linux depots ship no icon at all, so it pins the
+  Windows exe depot as `extra.icon` and lifts the icon out of that exe's PE resources. A `fetchInfo` row
+  would instead declare that Windows build *available*, which it is not (it is CEG-stripped and cannot
+  execute). `propnix pin` walks and advances `extra` with everything else, so such a pin moves as part of
+  the same all-or-nothing unit.
+
   **Generate it with `propnix pin --new`** rather than by hand: it resolves the newest build and computes
   the hash by STREAMING the payload, so it needs no disk for the game (the old way — fetch with
   `lib.fakeHash` and copy the reported hash — needs free space equal to the title, which for a modern AAA
@@ -185,8 +194,12 @@ Drop a directory under `pkgs/games/<name>/` — it's auto-discovered into the sc
   against a newer Steamworks SDK than the gbe_fork pin (currently 1.64) needs the pin bumped first —
   triage with `nm -D` on the game's genuine lib (modules/steam-emu.nix documents the method).
 
-  One further knob, needed only by titles that block on logon state: `steam.emu.offline` (default `true`)
-  decides whether the shim reports the Steam client as sitting in offline mode. It is a statement about
+  Two further knobs. `steam.emu.extraDlc` — entitlement rows merged into the set projected from
+  `dlc.enabled` — for an engine that gates content on an appid the pin rows do not carry: Civ V reads a
+  `<SteamApp>` out of each `.civ5pkg` descriptor and asks about THAT (34495 for the Mongols pack, whose
+  depot's `dlcappid` is 16865), so claiming only the store id leaves every mounted pack inactive with no
+  error anywhere. And `steam.emu.offline` (default `true`), needed only by titles that block on logon
+  state, decides whether the shim reports the Steam client as sitting in offline mode. It is a statement about
   LOGON STATE and nothing else — in the pinned gbe_fork it reaches exactly `ISteamUser::BLoggedOn()`,
   `BConnected()` and `GetLogonState()`, while what the shim does on the wire stays governed by the
   untouched `disable_networking` / `disable_lan_only` keys. `true` is the honest answer wherever there is
@@ -246,7 +259,7 @@ Drop a directory under `pkgs/games/<name>/` — it's auto-discovered into the sc
   select any other pinned pair), `fetchInfo = (lib.importJSON ./versions.json).fetchInfo;`, and `exe`.
   Everything else is optional and may be set conditionally on the axes: `exeArgs`, `workingDir`,
   `saveBinds` (HOME-relative `dst` on every backend), `maskFiles` (runtime whiteouts for dlopen'd store
-  DLLs), `env`, `icon.{png,symbolic,auto}`, `broken.{systems,reason}`, `maintainers` (bare GitHub
+  DLLs), `env`, `icon.{png,symbolic,auto}`, `broken.{systems,reason}`, `allowBroken`, `x87ReducedPrecision` (one knob, every emulator's spelling), `maintainers` (bare GitHub
   usernames — see *Keeping pins current*), `dlc.available`, plus the backend namespaces below.
 - **`wine-tuning.nix`** (as `wine = import ./wine-tuning.nix;`, or inline) — per-game knobs layered over
   the base layer in `lib/backends/wine/defaults.nix`: scalar knobs authored `{ value; reason; }` (the
@@ -387,9 +400,11 @@ session yields steamcommunity cookies, so treat it as full account access.
 ## Scope & backlog
 
 **In:** the wine path (x86_64 + i386 Windows builds) and the box64/native thin path (x86_64 Linux builds),
-GOG + Steam fetchers, 17 games — hardware-tested on **aarch64-linux**; **x86_64-linux** is structured +
+GOG + Steam fetchers, 30 games — hardware-tested on **aarch64-linux**; **x86_64-linux** is structured +
 evaluates (unbuilt/untested on real hardware). **Backlog:** building/testing the x86_64 target on real
 hardware; a mechanical x86-guest cache-hit gate in `flake.checks`; MS-Store; MangoHud on non-DXVK
 backends; a winewayland **xdg-activation** patch (would let the game open on the splash's
-monitor/workspace, and extend focus-on-duplicate to GNOME/KDE). The thin FEX backend is
-carried but `meta.broken` on 16K hosts (see `docs/DESIGN.md` D12).
+monitor/workspace, and extend focus-on-duplicate to GNOME/KDE). The thin FEX backend SHIPS — it is what
+runs the i386-linux platform (`pkgs/games/civilization-5`); what remains `meta.broken` is per-title, on
+the engines whose walls were measured (hollow-knight's Mono/SMC crash on 16K), and `allowBroken` is how
+such an entry gets retested (see `docs/DESIGN.md` D12).

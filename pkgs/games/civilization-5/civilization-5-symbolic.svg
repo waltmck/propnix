@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Civilization V symbolic icon (monochrome line-art 'V'; uses currentColor so it follows the theme's
+  symbolic-icon color). Vendored into propnix as the -symbolic variant of the full-colour gold-V emblem
+  the package extracts from the game's own PE resources.
+
+  Source:  https://svgicons.com/icon/206298/letter-v  — Tabler Icons "letter-v" (outline), by Paweł Kuna
+  License: MIT  (https://github.com/tabler/tabler-icons/blob/master/LICENSE)
+           This icon file remains under the MIT terms of Tabler Icons; the rest of the repository is not
+           affected. "Civilization V" and its marks are property of Take-Two Interactive / Firaxis Games.
+
+  Verbatim from the upstream file apart from this header: a generic letter glyph, so nothing here is
+  derived from the game's own artwork.
+-->
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M6 4l6 16l6 -16" />
+</svg>

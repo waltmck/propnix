@@ -233,14 +233,32 @@ stdenv.mkDerivation (finalAttrs: {
   # In `postInstall`, NOT `installCheckPhase`: nixpkgs gates `doInstallCheck` on
   # `canExecuteHostOnBuild`, so an installCheck never runs on a cross build — which is precisely the case
   # this guard exists for. `buildPackages.file` is a build-platform binary, so it runs either way.
-  postInstall = ''
-    got=$(${buildPackages.file}/bin/file -b "$out/lib/libsteam_api.so")
-    echo "gbe_fork shim (${stdenv.hostPlatform.system}): $got"
-    case "$got" in
-      *${lib.escapeShellArg (if stdenv.hostPlatform.isAarch64 then "ARM aarch64" else "x86-64")}*) ;;
-      *) echo "ERROR: built for the wrong architecture (wanted ${stdenv.hostPlatform.system})" >&2; exit 1 ;;
-    esac
-  '';
+  # ONE PATTERN PER ABI WE BUILD, not an aarch64-or-else test: when the 32-bit x86 arm was added, an
+  # `else "x86-64"` fallback demanded 64-bit of a perfectly correct i686 build and failed it. `file` spells
+  # the 32-bit machine "Intel i386" or "Intel 80386" depending on its version, so accept either.
+  postInstall =
+    let
+      wanted =
+        if stdenv.hostPlatform.isAarch64 then
+          [ "ARM aarch64" ]
+        else if stdenv.hostPlatform.is32bit then
+          [
+            "Intel i386"
+            "Intel 80386"
+          ]
+        else
+          [ "x86-64" ];
+    in
+    ''
+      got=$(${buildPackages.file}/bin/file -b "$out/lib/libsteam_api.so")
+      echo "gbe_fork shim (${stdenv.hostPlatform.system}): $got"
+      case "$got" in
+        ${lib.concatMapStringsSep "|" (w: "*${lib.escapeShellArg w}*") wanted}) ;;
+        *) echo "ERROR: built for the wrong architecture (wanted ${stdenv.hostPlatform.system}, one of: ${
+          lib.concatStringsSep ", " wanted
+        })" >&2; exit 1 ;;
+      esac
+    '';
 
   passthru = { inherit libssq; };
 

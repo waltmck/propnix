@@ -320,9 +320,39 @@ fn resolve_thin_table(cfg: &ThinConfig, view: &Path) -> io::Result<Vec<Entry>> {
                 ));
             }
         }
-        let target = view.join(&b.dst).to_string_lossy().into_owned();
+        // `dst` is view-relative — EXCEPT when it expands to an absolute path, which `Path::join` then
+        // takes verbatim, landing the bind OUTSIDE the view. That is deliberate, and exactly one kind of
+        // game needs it: a port that resolves its data directory from /etc/passwd
+        // (`getpwuid(getuid())->pw_dir`) rather than from $HOME reaches the launching user's REAL home no
+        // matter what this process sets, so the only way to redirect it is to bind the save dir onto that
+        // absolute path inside the namespace. (Civ V's Aspyr shim does this for one file — see
+        // pkgs/games/civilization-5's saveBinds. Its game FOLDER honours XDG_DATA_HOME and lands in the
+        // view; the stray one would otherwise persist to the real home, escaping the sandbox.)
+        //
+        // Expansion makes that expressible without hardcoding a user: `$HOME/...` resolves against the
+        // LAUNCHER's own env, whose HOME is the real one (the child's is set to the view further down).
+        // Existing relative dsts contain no `$`, so this is a no-op for them.
+        let dst = util::expand_env(&b.dst);
+        let target = view.join(&dst);
+        // An out-of-view target has no parent entry to provide it as a mountpoint (propnix-mount's plain
+        // bind requires the target to exist), so create it here — on the HOST, deliberately: an empty
+        // directory in the user's home that the bind immediately covers for the life of the launch.
+        if Path::new(&dst).is_absolute() && !target.exists() {
+            if b.create {
+                std::fs::create_dir_all(&target)?;
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "bind target {} is outside the view and does not exist \
+                         (set create = true to make it)",
+                        target.display()
+                    ),
+                ));
+            }
+        }
         entries.push(Entry::Mount {
-            target,
+            target: target.to_string_lossy().into_owned(),
             source: Some(src),
             mode: if b.ro { "ro" } else { "rw" }.to_string(),
             seed: None,
@@ -384,9 +414,22 @@ fn run_inner(cfg: &ThinConfig, settings: &Settings, paths: &Paths, passthrough: 
     // inside the view (only the explicitly-bound save dir persists — every other write is throwaway, the same
     // ephemeral-prefix contract the wine path gives). XDG_RUNTIME_DIR (sockets) and the system XDG_*_DIRS are
     // left intact. Applied BEFORE cfg.env so a game that pins its own XDG value can still override.
+    //
+    // Each root is SET to its view path, not unset. Unsetting looks equivalent — the freedesktop default is
+    // exactly `$HOME/<subdir>`, which is where a game that reads $HOME lands either way — but it silently
+    // fails for a game that does NOT read $HOME. Civ V's Aspyr shim resolves the home directory with
+    // `getpwuid(getuid())->pw_dir` (the binary imports getpwuid and contains no "HOME" string at all), so
+    // with these unset it writes its saves, settings and databases to the REAL ~/.local/share/Aspyr,
+    // escaping the view entirely and leaving the game's own save bind inert. It does read XDG_DATA_HOME,
+    // so stating the value fixes it — and states the contract for every other passwd-reading port too.
     cmd.env("HOME", &paths.view);
-    for k in ["XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"] {
-        cmd.env_remove(k);
+    for (k, sub) in [
+        ("XDG_DATA_HOME", ".local/share"),
+        ("XDG_CONFIG_HOME", ".config"),
+        ("XDG_CACHE_HOME", ".cache"),
+        ("XDG_STATE_HOME", ".local/state"),
+    ] {
+        cmd.env(k, paths.view.join(sub));
     }
 
     // Steam-emulated build (cfg.steam_emu): gbe_fork generates its own identity in its global settings

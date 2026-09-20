@@ -1,0 +1,272 @@
+{
+  "fetchInfo": {
+    "steam": {
+      "i386-linux": [
+        {
+          "pname": "civilization-5-282301",
+          "appId": 8930,
+          "depotId": 282301,
+          "manifestId": "5267780777055206315",
+          "version": "4390913",
+          "outputHash": "sha256-IofZKddXBaN1GXrtwAEWmJ5r+gbs1TivQxtpGG0SYC8=",
+          "depotKeySha256": "e47c6b88f608cd41eacc54e13883dfffae04195ec9feb5be3ce478b151e26e31",
+          "manifestSha256": "fea1e6e10253664e5e38b95c806a755d1ec42cbeb376ddb0674b02b53a937b5a",
+          "title": "Sid Meier's Civilization V (linux binaries, Steam)"
+        },
+        {
+          "pname": "civilization-5-282300",
+          "appId": 8930,
+          "depotId": 282300,
+          "manifestId": "6389225738581842747",
+          "version": "4390913",
+          "outputHash": "sha256-voBJRj6fA1I6x0wxqp4a/xEMnM61RXUmAafix8PC+tY=",
+          "depotKeySha256": "3758fca5b6d40d61d038c8b2ed351b18f3812ca2365072f36f3536f4c41c7bff",
+          "manifestSha256": "360fd319b0e2032043abab6436097a8bb77341c1826144b136ae27b7747dc9ca",
+          "title": "Sid Meier's Civilization V (linux content, Steam)"
+        },
+        {
+          "pname": "civilization-5-282302",
+          "appId": 8930,
+          "depotId": 282302,
+          "manifestId": "1982156094632779925",
+          "version": "4390913",
+          "outputHash": "sha256-8AwE3T8rptdkZ8waJMjhqtRWawuGXuveManF7X8tS6c=",
+          "depotKeySha256": "cd993336c6484f8c10fdc890f25fab53a41b20b7d67358e16189a00fd794ee9e",
+          "manifestSha256": "a3f0b09ddcd84530fd351b1486c6de1c9132c1ba53a84db224da43913025f2a6",
+          "title": "Sid Meier's Civilization V (english gameplay XML, Steam)"
+        }
+      ]
+    }
+  },
+  "dlc": {
+    "mongols": {
+      "pname": "civilization-5-dlc-mongols",
+      "appId": 8930,
+      "depotId": 282303,
+      "dlcAppId": 16865,
+      "manifestId": "120079972373717717",
+      "version": "4390913",
+      "outputHash": "sha256-KbmH6FsLOkbtFiju653Jl2gXLQccKVEaVTAHGLhkM0o=",
+      "depotKeySha256": "7602852282df6ebbadbc84a799405a6eec26224a512ab41104090bb5b24f7916",
+      "manifestSha256": "cfdf498abeb23f3c684d6e46698024525681cf95d8910b99e77068a9c1407e44",
+      "title": "Civilization V - Civ and Scenario Pack: Mongols (Genghis Khan) (Steam)"
+    },
+    "spain-and-inca": {
+      "pname": "civilization-5-dlc-spain-and-inca",
+      "appId": 8930,
+      "depotId": 282304,
+      "dlcAppId": 16867,
+      "manifestId": "2643485439959527777",
+      "version": "4390913",
+      "outputHash": "sha256-O0oFsVD+/WL7Q5kY9zCATGoNnZuAdFQQWgIxNHCQsEM=",
+      "depotKeySha256": "b23d029fb96e04f55dba5916cb518056e75399585779a8ddbd860a2f062aeea4",
+      "manifestSha256": "b5a7dbaf28a7460ab893877dcbe72cb8256d63b27954ab3fa5f12ad0b4da069d",
+      "title": "Civilization V - Civ and Scenario Double Pack: Spain and Inca (Steam)"
+    },
+    "polynesia": {
+      "pname": "civilization-5-dlc-polynesia",
+      "appId": 8930,
+      "depotId": 282305,
+      "dlcAppId": 99610,
+      "manifestId": "313489635234814162",
+      "version": "4390913",
+      "outputHash": "sha256-gk8JFD6dWy2W1/YXsRTM8oX00jMZwXcy/yTvi0KQF10=",
+      "depotKeySha256": "4da1d6666f5b82109660f08a975f6c6ceec9d06b716e9d9a8f04759dcae68145",
+      "manifestSha256": "e77a182ac2eadd1e8c2f05baf79b9787f2fc54f09875ce9a36c08ad22560e3a0",
+      "title": "Civilization V - Civ and Scenario Pack: Polynesia (Steam)"
+    },
+    "denmark": {
+      "pname": "civilization-5-dlc-denmark",
+      "appId": 8930,
+      "depotId": 282306,
+      "dlcAppId": 99611,
+      "manifestId": "158481880894805329",
+      "version": "4390913",
+      "outputHash": "sha256-HcKqSzfseZJejmfFVRvHgyXaTydrRsu1FdnJ1n6S4T4=",
+      "depotKeySha256": "40da494fc0222e40a59a3518f1a33acc719ac021e1559df041bb6b3406cf0825",
+      "manifestSha256": "7005fadc5ac0bf31f57f9da34ec1389e6b826b877da42d94262fb193debd3cca",
+      "title": "Civilization V - Civ and Scenario Pack: Denmark (The Vikings) (Steam)"
+    },
+    "korea": {
+      "pname": "civilization-5-dlc-korea",
+      "appId": 8930,
+      "depotId": 282307,
+      "dlcAppId": 99612,
+      "manifestId": "323507258050599970",
+      "version": "4390913",
+      "outputHash": "sha256-iZ9HK7ZlOae7HJ1IkvUCcn5fkid03rFgmeKwZuSDoFY=",
+      "depotKeySha256": "26183c284c0d6cb5122e7b27eb3d25cc397dec153c9e90fe3d29564d7970fc10",
+      "manifestSha256": "814d1b5c070d44f9d28b879d68eb0f74f1662cfda8762dd94b3c0a4cc3ab9437",
+      "title": "Civilization V - Civ and Scenario Pack: Korea (Steam)"
+    },
+    "wonders-of-the-ancient-world": {
+      "pname": "civilization-5-dlc-wonders-of-the-ancient-world",
+      "appId": 8930,
+      "depotId": 282308,
+      "dlcAppId": 99613,
+      "manifestId": "261355857334255286",
+      "version": "4390913",
+      "outputHash": "sha256-fPcodoozAgJrqIaK3pFpSTu8sjvFbAasnP78uIKRyHk=",
+      "depotKeySha256": "a31d910a480001448c467ba01f349847018f4ae2c51022574bf622b2f127e8ba",
+      "manifestSha256": "6c6c6f250b5970394c28eb4c7968fa8b4f26db253005bb5ad2afcb8474069085",
+      "title": "Civilization V - Scenario Pack: Wonders of the Ancient World (Steam)"
+    },
+    "digital-deluxe": {
+      "pname": "civilization-5-dlc-digital-deluxe",
+      "appId": 8930,
+      "depotId": 282309,
+      "dlcAppId": 16864,
+      "manifestId": "323705303891630438",
+      "version": "4390913",
+      "outputHash": "sha256-MYdp3VNfom8dSeStpM1opKDTsZyzGnpC6jvV7C0jDE8=",
+      "depotKeySha256": "b3a2f3f9d0c7f41a3a9324eff0ba23b917eb3fc139960f63012902b6baca0d1a",
+      "manifestSha256": "f50b94345eca4e62867bdd0df176d2d9dd0df6c85be2eeb94c382a8562ff7f30",
+      "title": "Civilization V - Digital Deluxe Content (Steam)"
+    },
+    "babylon": {
+      "pname": "civilization-5-dlc-babylon",
+      "appId": 8930,
+      "depotId": 282310,
+      "dlcAppId": 16868,
+      "manifestId": "65932600989304912",
+      "version": "4390913",
+      "outputHash": "sha256-n4PJt897aXdYmFbL10lCfu41MW+B7IS+lxqApyLXufg=",
+      "depotKeySha256": "ba37e66f53746a8e5aab4d49504f97756091cd6529f4eaff1f9a025a9e6ddfe9",
+      "manifestSha256": "13f39e0c0cd5084d6d6a88a0580478bb900e975dce5d5ca11137b76a4a77a94a",
+      "title": "Civilization V - Babylon (Nebuchadnezzar II) (Steam)"
+    },
+    "explorers-map-pack": {
+      "pname": "civilization-5-dlc-explorers-map-pack",
+      "appId": 8930,
+      "depotId": 282311,
+      "dlcAppId": 16866,
+      "manifestId": "48089012925950836",
+      "version": "4390913",
+      "outputHash": "sha256-JMl67BMCzZoBE1Eb5mtfxuLb/IGabewdevmr6jdKhCs=",
+      "depotKeySha256": "9e3ed6c11a0f62af0658fb87a24f726c79b3d6bce1a62792fd95abe9dbe92f37",
+      "manifestSha256": "d3a6c913f666992807361af48980fdb088a7bc183a62ea18624efaaeca5bafb1",
+      "title": "Civilization V - Explorer's Map Pack (Steam)"
+    },
+    "scrambled-continents": {
+      "pname": "civilization-5-dlc-scrambled-continents",
+      "appId": 8930,
+      "depotId": 282312,
+      "dlcAppId": 235584,
+      "manifestId": "700181433679681602",
+      "version": "4390913",
+      "outputHash": "sha256-tthFS57KydQGTLau6f7nBDE8vl9s82oLDKpqysv+ln4=",
+      "depotKeySha256": "94fcb256e645a5668d0a2a5307112f64b529844d455d27b2df16bf8938c617e3",
+      "manifestSha256": "f2d00ce118f78843dacd2ace95961914cf32ece828fbfd680719df36e8a53f55",
+      "title": "Civilization V - Scrambled Continents Map Pack (Steam)"
+    },
+    "scrambled-nations": {
+      "pname": "civilization-5-dlc-scrambled-nations",
+      "appId": 8930,
+      "depotId": 282313,
+      "dlcAppId": 235585,
+      "manifestId": "95041807267491356",
+      "version": "4390913",
+      "outputHash": "sha256-Nn3/U28IyIj6qKZtw4KrVmzhszhJnXfTsEJwr8J08zc=",
+      "depotKeySha256": "efc0200d4cecccd57052731acf43d6fff32135edc179590b158daf5ae6c93a33",
+      "manifestSha256": "aee147a6a40520ab98fb7c88b3d681e1ffb1656973be098520c8eedb696881ad",
+      "title": "Civilization V - Scrambled Nations Map Pack (Steam)"
+    },
+    "cradle-mediterranean": {
+      "pname": "civilization-5-dlc-cradle-mediterranean",
+      "appId": 8930,
+      "depotId": 282314,
+      "dlcAppId": 16860,
+      "manifestId": "239834820357537853",
+      "version": "4390913",
+      "outputHash": "sha256-W8O03S6fkTc8CKGb6zmuXM11vs0z8GttpEBhqR/pwvo=",
+      "depotKeySha256": "f53b99cfe05f97143ba58b65fa60a613b0ec5a3202732de4ca7313f6c1927be9",
+      "manifestSha256": "f4f6f825971b9b8b53d536ba812edcf30ed09345782422d41af603101d55f2fd",
+      "title": "Civilization V - Cradle of Civilization Map Pack: Mediterranean (Steam)"
+    },
+    "cradle-asia": {
+      "pname": "civilization-5-dlc-cradle-asia",
+      "appId": 8930,
+      "depotId": 282315,
+      "dlcAppId": 16861,
+      "manifestId": "528022330178821064",
+      "version": "4390913",
+      "outputHash": "sha256-ilLvrAVf+72icmcSgXY0gPVb5i+oruVlhxLg79YlWQ8=",
+      "depotKeySha256": "0d423be46e6ddadc9639ed67c897d22d3992da2bdb1d5a62404c1ca2031c9313",
+      "manifestSha256": "d32e302f194df18d57fa79028ee8437eb1c63182b2ed0dc6a101d59427d8b752",
+      "title": "Civilization V - Cradle of Civilization Map Pack: Asia (Steam)"
+    },
+    "cradle-americas": {
+      "pname": "civilization-5-dlc-cradle-americas",
+      "appId": 8930,
+      "depotId": 282316,
+      "dlcAppId": 16862,
+      "manifestId": "35840779178982127",
+      "version": "4390913",
+      "outputHash": "sha256-wotijHKLqrWIoOr8swWXTDWUqG7dvcNOm26ZTJsciao=",
+      "depotKeySha256": "31fcff9143353eb2387ac97dab6ef6dffdf14bc36fcbf266a8a62db0da29f22c",
+      "manifestSha256": "00ceb84e179fe7d5b305cf41f330919282411dc9134807b9e03139d2ff1a6dda",
+      "title": "Civilization V - Cradle of Civilization Map Pack: Americas (Steam)"
+    },
+    "cradle-mesopotamia": {
+      "pname": "civilization-5-dlc-cradle-mesopotamia",
+      "appId": 8930,
+      "depotId": 282317,
+      "dlcAppId": 16863,
+      "manifestId": "240675552619007338",
+      "version": "4390913",
+      "outputHash": "sha256-U1WRdaeRnxA8Vn+PaYz4YOUbT9qRhc4NAQus55T8r6E=",
+      "depotKeySha256": "1cdbda21ae0a96627db932020005919657913e2189e56b362f33cdf99f4f4f70",
+      "manifestSha256": "7bda78126612d56f2686b1380cdb8faff0d38e19c364ec8603f859389ba31530",
+      "title": "Civilization V - Cradle of Civilization Map Pack: Mesopotamia (Steam)"
+    },
+    "gods-and-kings": {
+      "pname": "civilization-5-dlc-gods-and-kings",
+      "appId": 8930,
+      "depotId": 282318,
+      "dlcAppId": 16870,
+      "manifestId": "779329514913021136",
+      "version": "4390913",
+      "outputHash": "sha256-PQuToXrROVYKCkQURXtZx9t1mDSxdWvizcjQ2Qy3NZc=",
+      "depotKeySha256": "8730038a367ac272062a4b2ba88323c0a55e6124d0b5bc4e1633c0da6100d1ec",
+      "manifestSha256": "770aa105e4cd8605dc890171056e8d756602b3aad08d92e3d6061115229a1702",
+      "title": "Sid Meier's Civilization V: Gods and Kings (Steam)"
+    },
+    "brave-new-world": {
+      "pname": "civilization-5-dlc-brave-new-world",
+      "appId": 8930,
+      "depotId": 282320,
+      "dlcAppId": 235580,
+      "manifestId": "2505833101960255592",
+      "version": "4390913",
+      "outputHash": "sha256-AStqyUVaAOm3PS6ZBiy4i4n/0e+qcwcXQBlF4yztkik=",
+      "depotKeySha256": "e623bbfce373a242cfdf38569d1ddfb78bf3c54ff2ae429360c535542de5f8c5",
+      "manifestSha256": "df520dda2a8b88dda41c1111d9000387f07ede4d939dcd11bb7a635db61a56fb",
+      "title": "Sid Meier's Civilization V: Brave New World (Steam)"
+    },
+    "conquest-of-the-new-world": {
+      "pname": "civilization-5-dlc-conquest-of-the-new-world",
+      "appId": 8930,
+      "depotId": 282326,
+      "dlcAppId": 266720,
+      "manifestId": "7705606035427097533",
+      "version": "4390913",
+      "outputHash": "sha256-hIEJlOFNKmlFIvGH/GvZ25zkwdq0HLHtZRhLExAohGA=",
+      "depotKeySha256": "5f1a64299eefcf113c83568400f5f5e0213afb548b818d7f89615d848d04af9e",
+      "manifestSha256": "746f07dad31de044b3e7b7e41c6625a4b498d5235d621d5dd464ee6bad06f2f6",
+      "title": "Civilization V - Scenario Pack: Conquest of the New World (Steam)"
+    }
+  },
+  "extra": {
+    "icon": {
+      "pname": "civilization-5-8932",
+      "appId": 8930,
+      "depotId": 8932,
+      "manifestId": "1500173799562188053",
+      "version": "4390913",
+      "outputHash": "sha256-hX7+WtEWsKcCPajDq6+UhwV8RbMns2KoPwOti52flsY=",
+      "depotKeySha256": "567b69ae04f0fe4c9f3ea98b365e2204def6eb68aa0be88e3ced51c575f9ba7b",
+      "manifestSha256": "21425d8f6eb36de596144e77e3ef25af8c13cb20bbe5b8e7a75917988660b093",
+      "title": "Sid Meier's Civilization V (windows executables — pinned ONLY as the icon source, Steam)"
+    }
+  }
+}

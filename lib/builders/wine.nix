@@ -39,7 +39,7 @@
   # The game tree(s): head = the primary tree (C:\game, the launch cwd). A wine build is normally ONE tree;
   # extra trees (co-base depots) union read-only above it exactly like DLC — never silently dropped.
   payloads,
-  exe, # executable relative to the game dir, e.g. "Hollow Knight.exe"
+  exe, # what wine STARTS, relative to the game dir, e.g. "Hollow Knight.exe"
   # Launch arguments for the exe (the single, backend-shared source of exe args).
   exeArgs ? [ ],
   # Offline enforcement: false → the launcher unshares a netns for the game (see app-options `online`).
@@ -67,10 +67,11 @@
     symbolic = null;
     auto = true;
   },
-  # `{ systems; reason; }` → meta.broken (see mkLauncherPackage).
+  # `{ systems; reason; allow; }` → meta.broken (see mkLauncherPackage).
   broken ? {
     systems = [ ];
     reason = null;
+    allow = false;
   },
   # Bare GitHub usernames → meta.maintainers (see mkLauncherPackage).
   maintainers ? [ ],
@@ -280,7 +281,10 @@ let
         inherit iconName;
       }
     else if icon.auto then
-      extractPeIcon { inherit payload exe iconName; }
+      extractPeIcon {
+        inherit payload iconName;
+        inherit exe;
+      }
     else
       null;
   splashIcon = if iconTree != null then "${iconTree}/share/propnix/${iconName}.png" else null;

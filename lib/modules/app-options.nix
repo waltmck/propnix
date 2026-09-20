@@ -468,6 +468,66 @@ in
       };
     };
 
+    # ── x87ReducedPrecision ──
+    x87ReducedPrecision = lib.mkOption {
+      type = knobTypes.lastWins;
+      default = true;
+      description = ''
+        Let the emulator compute x87 floating point in 64-bit doubles instead of the architectural 80-bit
+        extended format. ON by default, on every backend that emulates x86.
+
+        WHY IT IS THE DEFAULT. ARM64 has no 80-bit float type, so an emulator must do x87 in SOFTWARE, and
+        the i386 ABI computes and returns floating point in the x87 stack — so a 32-bit x86 title pays that
+        cost constantly. Measured with `perf` on pkgs/games/civilization-5 (i386 Linux under FEX, 16 KiB
+        pages): `extF80_sub` was the hottest named symbol at 14.3% SELF time, with
+        `softfloat_roundPackToExtF80` behind it, while the ENTIRE host GL stack was 0.04%. Turning this on
+        removed every softfloat sample from the profile and took the main menu from 59.8% to 24.0% of a
+        core, startup from 25.1 to 20.4 CPU-seconds.
+
+        THE TRADE: 64-bit doubles keep 53 bits of mantissa where 80-bit extended keeps 64, so results can
+        differ in the low bits. Both emulators warn about it (FEX: "may result in rendering bugs"), and FP
+        results may then differ from a native x86 machine's — a cross-platform lockstep/checksum
+        multiplayer session could desync, though propnix's offline-first target is unaffected. Set this
+        `false` on a title that needs the last 11 bits, and say why:
+
+        ```nix
+        x87ReducedPrecision = false; # <game> mis-renders terrain without 80-bit x87
+        ```
+
+        WHAT IT REACHES, per backend — one knob, each backend's own spelling:
+          * fex (thin)        `FEX_X87REDUCEDPRECISION`
+          * box64 (thin)      `BOX64_X87_NO80BITS`, the emulated face only
+          * wine on aarch64   BOTH, because the prefix can load either emulator: FEX's ARM64EC DLLs for an
+                              x86_64 guest and box64's wowbox64 for an i386 one.
+        A native run (x86_64 host, no emulator) has nothing to configure and is unaffected — the knob keeps
+        its meaning everywhere, there is simply no x87 being emulated.
+      '';
+    };
+
+    # ── allowBroken ──
+    allowBroken = lib.mkOption {
+      type = knobTypes.lastWins;
+      default = false;
+      description = ''
+        BUILD A CONFIGURATION THIS REPO KNOWS IS BROKEN. `meta.broken` is suppressed — the package
+        builds and runs — while `meta.brokenReason` stays set, and the build prints a warning naming
+        the wall it is ignoring. For TESTING a known wall, which is the only way one ever gets retired:
+
+        ```sh
+        ./run-variant.sh hollow-knight '{ backend = "fex"; allowBroken = true; }'
+        ```
+
+        It suppresses the `broken.systems` verdict WHEREVER it comes from — the game's own entry
+        (hollow-knight's Mono/SMC wall under FEX), a backend's launch block (the FEX entry on a host
+        with no FEXInterpreter), or mk-thin-build's face×arch guard — because every one of those is a
+        claim about what does not work, and this option means "I know, run it anyway".
+
+        NEVER SET BY A GAME. A title that needs this to build is broken, and `broken.systems` + a
+        `reason` is how that gets recorded; this is a caller's override, like nixpkgs' own
+        `config.allowBroken`, and lives on the same `.apply` surface as the axes.
+      '';
+    };
+
     # ── maintainers ──
     maintainers = lib.mkOption {
       type = knobTypes.dedupList lib.types.str;

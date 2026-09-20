@@ -33,6 +33,11 @@ let
     # Likewise Steam-only, Windows-only — and not sold on GOG at all, so the single pinned pair is also the
     # only one that could ever exist here. The four base depots are all ONE (steam, x86_64-windows) row, so
     # they add payloads, not pairs.
+    # The matrix's ONLY i386-linux row, and the one platform whose two hosts take different backends:
+    # Aspyr's 32-bit x86 Linux port runs under emulators/fex-linux on aarch64 (box64 emulates x86_64 only)
+    # and directly on an x86_64 host. Steam-only and single-pair — Civ V is not sold on GOG, and its
+    # Windows depots are deliberately NOT pinned because they ship a CEG-stripped exe (see the package).
+    civilization-5 = if isAarch64 then "steam/i386-linux/fex" else "steam/i386-linux/native";
     civilization-6 = "steam/x86_64-windows/${wineB}";
     cyberpunk-2077 = "gog/x86_64-windows/${wineB}";
     dont-starve = "gog/i386-windows/${wineB}";
@@ -157,6 +162,51 @@ let
       .success;
     unrunnable-platform-is-broken-off-host =
       (dflt.factorio.apply { emulatedPlatform = "aarch64-linux"; }).meta.broken == !isAarch64;
+
+    # ── the `allowBroken` escape hatch (app-options) ──
+    # A caller testing a known wall (`./run-variant.sh hollow-knight '{ backend = "fex"; allowBroken =
+    # true; }'`) must get a BUILDABLE package, and the default must stay refused — pinned in both
+    # directions so neither the hatch nor the refusal can rot. The three claim SOURCES are covered: a
+    # game's own `broken.systems` (hollow-knight's Mono/SMC wall under FEX), mk-thin-build's face×arch
+    # guard (box64 handed 32-bit content), and `runnable` (aarch64 content off an aarch64 host).
+    #
+    # EXPECT WARNINGS when this check runs: forcing those `meta.broken` values is forcing packages built
+    # with the hatch, and mkLauncherPackage says so by design. The check passing IS the assertion; the
+    # warning lines are the feature working, not a misbehaving gate.
+    allowbroken-default-refuses =
+      (dflt.hollow-knight.apply { backend = "fex"; }).meta.broken == isAarch64;
+    allowbroken-suppresses-game-entry =
+      (dflt.hollow-knight.apply {
+        backend = "fex";
+        allowBroken = true;
+      }).meta.broken == false;
+    allowbroken-keeps-the-reason =
+      (dflt.hollow-knight.apply {
+        backend = "fex";
+        allowBroken = true;
+      }).meta ? brokenReason;
+    allowbroken-suppresses-face-guard =
+      (dflt.civilization-5.apply {
+        backend = "box64";
+        allowBroken = true;
+      }).meta.broken == false;
+    allowbroken-suppresses-runnable-refusal =
+      (dflt.factorio.apply {
+        emulatedPlatform = "aarch64-linux";
+        allowBroken = true;
+      }).meta.broken == false;
+    # It is a CALLER's override, never a game's: no packaged title may set it (that would ship a build
+    # whose own `broken.systems` says it cannot work).
+    allowbroken-unset-by-every-game = lib.all (n: dflt.${n}.config.allowBroken == false) (
+      lib.attrNames expected
+    );
+
+    # ── the app-wide x87 knob ──
+    # ON by default everywhere (the measurement is in app-options), and ONE `false` must reach every
+    # backend — pinned so a new backend cannot quietly skip the translation.
+    x87-default-is-reduced = lib.all (n: dflt.${n}.config.x87ReducedPrecision) (lib.attrNames expected);
+    x87-knob-turns-off =
+      (dflt.hollow-knight.apply { x87ReducedPrecision = false; }).config.x87ReducedPrecision == false;
 
     overridescope-reinstantiates =
       triple

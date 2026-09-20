@@ -20,6 +20,7 @@ rec {
     "i386-windows"
     "aarch64-linux"
     "x86_64-linux"
+    "i386-linux"
   ];
 
   # A platform → the { os; arch; } ABI pair `resolveStrategy` selects a backend from.
@@ -38,6 +39,12 @@ rec {
         os = "linux";
         arch = "x86_64";
       };
+      # A 32-bit x86 Linux ELF — an old native port (pkgs/games/civilization-5 is Aspyr's). Emulated by
+      # emulators/fex-linux on aarch64 and run directly on an x86_64 host.
+      "i386-linux" = {
+        os = "linux";
+        arch = "i386";
+      };
       "aarch64-linux" = {
         os = "linux";
         arch = "aarch64";
@@ -45,7 +52,9 @@ rec {
     }
     .${p};
 
-  # An x86 guest (either width) is what box64 emulates; an x86_64 host runs both directly.
+  # An x86 guest of EITHER width — an x86_64 host runs both directly, and an aarch64 host has an emulator
+  # for each (box64 for 64-bit, emulators/fex-linux for 32-bit; see resolveStrategy, which no longer
+  # conflates them).
   isX86Guest = need: need.arch == "x86_64" || need.arch == "i386";
   hostArchOf = system: if lib.hasPrefix "aarch64" system then "aarch64" else "x86_64";
 
@@ -65,11 +74,22 @@ rec {
       # wine handles both hosts; it picks native vs ARM64EC-Hangover+HODLL and the 32-bit backend DLL INTERNALLY
       # (host/bits-derived, not a surface choice).
       "wine"
+    else if hostArchOf system != "aarch64" then
+      # An x86_64 host runs x86 Linux content of EITHER width directly; aarch64 content it cannot run at
+      # all, which `runnable` below turns into a build refusal rather than a different backend.
+      "native"
+    # Linux content on aarch64, and the two widths take DIFFERENT emulators — this is not a stylistic
+    # split. box64 emulates x86_64 only, so it cannot serve a 32-bit payload; box86 would be the usual
+    # answer and is dead on 16 KiB pages. The 32-bit route is emulators/fex-linux, which JITs i386 Linux
+    # ELFs (pkgs/games/civilization-5 is the title that forced it into existence). Collapsing the two
+    # widths here — dispatching on `isX86Guest` — would hand an i386 payload to a backend that cannot run
+    # it, and the mismatch surfaces only at execve.
+    else if need.arch == "x86_64" then
+      "box64"
+    else if need.arch == "i386" then
+      "fex"
     else
-      # Linux content. box64 is the ONE emulator here (fex is opt-in via `.apply`; box86 is dead on 16K),
-      # and it only emulates x86 — so an aarch64 host runs an x86 payload under box64 and everything else
-      # goes straight to `native`.
-      (if isX86Guest need && hostArchOf system == "aarch64" then "box64" else "native");
+      "native";
 
   # Can `system` actually run this platform's content? The `emulatedPlatform` resolver filters the game's
   # own quality ranking through this (so a game may rank a host-specific native build first without

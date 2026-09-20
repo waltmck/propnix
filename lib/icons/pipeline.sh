@@ -3,8 +3,10 @@
 # while from-png gets it at eval — a pure-Nix core cannot serve both).
 #
 # propnix_icon_theme SRC ICON_NAME OUT:
-#   * AUTOCROP — trim the fully-transparent border (`-trim`) so asymmetric padding can't push the glyph
-#     off-centre (visible on real game icons, e.g. Factorio's upper-left 1024px gear).
+#   * PICK ONE FRAME — a source may be MULTI-FRAME (a Windows .ico bundles every size the game ships,
+#     e.g. Civ V's Civ5Icon.ico: sixteen frames from 16² to a 256² PNG). ImageMagick would then write one
+#     numbered output per frame and no `$master` at all, so the rest of the pipeline fails on a missing
+#     file. Select the LARGEST frame by area rather than trusting frame order, which no format fixes.
 #   * RE-CENTRE + margin — fit the trimmed glyph into a 512² canvas CENTRED with ~10% breathing room
 #     (glyph resized to 460 on its longer side; `-resize` without `!` preserves aspect ratio, so a
 #     non-square glyph is letterboxed, never stretched).
@@ -15,7 +17,15 @@
 propnix_icon_theme() {
     local src="$1" iconName="$2" out="$3"
     local master="$TMPDIR/propnix-icon-master.png"
-    magick "$src" -alpha on -trim +repage \
+
+    # `identify` prints one line per frame; take the index of the biggest. A single-frame source yields
+    # index 0, i.e. the same `src[0]` this always used implicitly — so nothing changes for a plain PNG.
+    local frame
+    frame=$(magick identify -format '%w %h %s\n' "$src" \
+        | awk '{ a = $1 * $2; if (a > best) { best = a; idx = $3 } } END { print idx + 0 }')
+    echo "propnix: icon source $src — using frame $frame"
+
+    magick "$src[$frame]" -alpha on -trim +repage \
         -background none -gravity center \
         -resize 460x460 -extent 512x512 \
         "$master"

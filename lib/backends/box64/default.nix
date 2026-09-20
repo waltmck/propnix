@@ -19,6 +19,7 @@
   stdenv,
   pkgs,
   pkgsX86,
+  pkgsGuest32,
   knobTypes,
   strategy, # lib/strategy.nix — `runnable`, for the meta.broken contribution below
   mangohud,
@@ -40,6 +41,14 @@
       # of "arch matches the host": an x86_64 payload on x86_64, and an aarch64 payload on aarch64.
       isNative = cfg.backend == "native";
       inherit (cfg.box64) bridgingLibs guestLibs guestPreload;
+      # THE NATIVE FACE IS NOT ALWAYS THE HOST'S ABI. An x86_64 host runs i386 Linux content directly, so
+      # resolveStrategy hands an i386-linux payload to `native` there — but "directly" still means the
+      # 32-bit loader and 32-bit libraries, and taking either from `pkgs` would silently hand a 64-bit
+      # ld.so and 64-bit sonames to a 32-bit ELF. So the native face resolves BOTH from the set matching
+      # the payload, which is the host's own set in every case except this one.
+      # (The emulated face is unaffected: box64 emulates x86_64 only, and an i386 payload on aarch64 goes
+      # to the FEX entry — lib/strategy.nix.)
+      nativePkgs = if cfg.emulatedPlatform == "i386-linux" then pkgsGuest32 else pkgs;
       # NB steam-emu's shim contributes NOTHING here. It used to: upstream's prebuilt gbe_fork release
       # static-linked its dependencies and carried no RUNPATH, so glibc and libstdc++ had to be injected
       # into the launch's library path on its behalf. The shim is now built from source in this repo
@@ -48,7 +57,7 @@
       # its RUNPATH. It is self-contained; a parallel list here would only be a copy that can go stale.
       libs =
         if isNative then
-          (bridgingLibs pkgs) ++ (guestLibs pkgs)
+          (bridgingLibs nativePkgs) ++ (guestLibs nativePkgs)
         else
           (bridgingLibs pkgs) ++ (bridgingLibs pkgsX86) ++ (guestLibs pkgsX86);
       # `guestPreload` in the loader's own spelling: box64's guest loader ignores LD_PRELOAD (and prepends
@@ -57,8 +66,7 @@
       # PROPNIX_BENCH branch prepends MangoHud's shim to a baked LD_PRELOAD rather than clobbering it
       # (thin.rs), so benching keeps the preload live.
       preloadEnv = lib.optionalAttrs (guestPreload != [ ]) {
-        ${if isNative then "LD_PRELOAD" else "BOX64_LD_PRELOAD"} =
-          lib.concatStringsSep ":" guestPreload;
+        ${if isNative then "LD_PRELOAD" else "BOX64_LD_PRELOAD"} = lib.concatStringsSep ":" guestPreload;
       };
 
       # ── the NATIVE path's ELF interpreter ──────────────────────────────────────────────────────────
@@ -83,7 +91,9 @@
         # Mount priority order — DLC first, matching mk-thin-build's game-tree list.
         trees = enabledDlc ++ cfg.payloads;
         executables = [ cfg.exe ] ++ executables;
-        interpreter = stdenv.cc.bintools.dynamicLinker;
+        # From the payload's OWN package set (see `nativePkgs`): the host loader for a host-ABI payload,
+        # ld-linux.so.2 for a 32-bit one on an x86_64 host.
+        interpreter = nativePkgs.stdenv.cc.bintools.dynamicLinker;
       };
     in
     mkThinBuild {
@@ -106,6 +116,12 @@
           (lib.optionalAttrs (!isNative) {
             BOX64_NORCFILES = "1";
             BOX64_PREFER_WRAPPED = "1";
+            # x87 precision — the app-wide `x87ReducedPrecision` knob in box64's spelling (that option
+            # carries the measurement, the trade, and the per-backend translation table). box64's default
+            # is 0, "handle 80bits long double as precise as possible"; 1 computes x87 in 64-bit doubles,
+            # which is what FEX's X87ReducedPrecision does. EMULATED FACE ONLY: a native run has no
+            # emulator to configure, and BOX64_* would be inert noise in its environment.
+            BOX64_X87_NO80BITS = if cfg.x87ReducedPrecision then "1" else "0";
           })
           // preloadEnv
           // cfg.env;

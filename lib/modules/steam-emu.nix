@@ -89,6 +89,7 @@ let
     {
       "aarch64-linux" = "${gbeFork.linuxShims.aarch64}/lib/libsteam_api.so";
       "x86_64-linux" = "${gbeFork.linuxShims.x64}/lib/libsteam_api.so";
+      "i386-linux" = "${gbeFork.linuxShims.x86}/lib/libsteam_api.so";
       "x86_64-windows" = null;
       "i386-windows" = null;
     }
@@ -185,7 +186,10 @@ let
     stubProxies = lib.optionalAttrs cfg.steam.emu.steamStub (lib.genAttrs dllPaths winStubFor);
     steamOffline = cfg.steam.emu.offline;
     interfaces = cfg.steam.emu.interfaces;
-    dlc = lib.genAttrs cfg.dlc.enabled entitlement;
+    # The projected rows, then the game's own (`steam.emu.extraDlc` — an engine that gates on ids the pin
+    # rows don't carry). Extra rows win a key collision, which is the useful direction: a game correcting
+    # a projected claim states the correction and gets it.
+    dlc = lib.genAttrs cfg.dlc.enabled entitlement // cfg.steam.emu.extraDlc;
   };
 in
 {
@@ -290,6 +294,37 @@ in
         MEASURED not to work, are in emulators/gbe-fork/steamstub-proxy.nix. VERIFIED on
         pkgs/games/civilization-6 (x86_64-linux, 2026-09-03): without it the process exits 53 having
         written nothing; with it the game reaches its rendered front end.
+
+        IT ONLY SERVES `.bind`. gbe_fork's `stubdrm.cpp` looks up the section literally named
+        `.bind` and gives up when it is absent, and its `dllmain.cpp` then returns FALSE so Windows
+        unloads the dll immediately (observed as adjacent PROCESS_ATTACH/PROCESS_DETACH lines under
+        `+module`). Setting this on a title with no `.bind` section is therefore inert, not harmful — and
+        it does nothing for the OLDER `STEAM_DRM_IPC` handshake, which gbe_fork does not implement at all
+        (see pkgs/games/civilization-5 for that measurement).
+      '';
+    };
+    emu.extraDlc = lib.mkOption {
+      type = knobTypes.lastWins;
+      default = { };
+      defaultText = lib.literalExpression "{ }";
+      description = ''
+        Entitlement rows merged INTO the set projected from `dlc.enabled` — `name → { appId; title; }`,
+        the same shape the projection emits, where the name is only a key (and the fallback display
+        title). For a game whose engine gates content on an appid the framework cannot derive from the
+        pin rows.
+
+        WHY THIS EXISTS. The projection claims each enabled pack's own store appid (its row's `dlcAppId`,
+        else its `depotId`), which is what Steam's appinfo says the DLC IS. Some engines ask about a
+        DIFFERENT id: Civilization V reads a `<SteamApp>` out of each `.civ5pkg` descriptor it finds and
+        asks `ISteamApps` about THAT — 34495 for the Mongols pack, whose depot's `dlcappid` is 16865 — so
+        claiming only the store id leaves every pack inactive with no error anywhere. The ids live in the
+        payload, so they cannot be read at eval time without IFD; the game states them, cited to the
+        descriptor it read them from (see pkgs/games/civilization-5).
+
+        The rows are merged VERBATIM, so a game that must claim an id only while some pack is mounted
+        gates it itself off `config.dlc.enabled` — claiming an unmounted pack's id invites the engine to
+        load content that is not there. Content the BASE payload ships (Civ V's `dlc/shared`, gated on a
+        `99999` sentinel that is not a real Steam app) is simply an ungated row.
       '';
     };
     emu.libPaths = lib.mkOption {
@@ -325,6 +360,9 @@ in
     # resolves. mk-app.nix enforces that a native build declares its `.so` path, mirroring the wine rule.
     box64.guestPreload = lib.optionals (cfg.backend != "native") [ "${settings}/libsteam_api.so" ];
     extraLowers = [ settings ];
+    # steamclient mode: the backend starts the LOADER, which starts the game. The loader is in the
+    # settings tree, which unions into the game dir, so a bare filename is the right game-dir-relative
+    # path. `exe` itself stays the game's own binary — it is the icon source and what the INI names.
     # The thin bind-over rows (`.so` libPaths; the .dll flavor travels INSIDE the tree as wine mirrors).
     # "game/" is the launcher's THIN_GAME_DIR contract (config.rs); a sibling target that does not exist
     # in the game tree is stubbed into the game overlay by propnix-mount's child-skeleton machinery, so

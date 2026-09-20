@@ -69,10 +69,11 @@
   windowWatch ? true,
   # Bare GitHub usernames → meta.maintainers (see mkLauncherPackage).
   maintainers ? [ ],
-  # `{ systems; reason; }` → meta.broken (see mkLauncherPackage).
+  # `{ systems; reason; allow; }` → meta.broken (see mkLauncherPackage).
   broken ? {
     systems = [ ];
     reason = null;
+    allow = false;
   },
   # Whether this build carries the gbe_fork offline Steam-entitlement shim (`steam.emu.enable`). Baked as
   # informational metadata: the shim manages its own identity, and the launcher no longer seats a stored

@@ -1,8 +1,14 @@
 # backends/box64/options.nix — the `box64.*` option namespace (the box64 sibling of `wine.*`): the
 # LIBRARY UNION a Linux-build game declares, each a function `p: [ drv ]` over a nixpkgs instance. box64
 # splits them (native aarch64 bridge ∪ x86_64 guest, resolved twice so the two can't drift — D7); the FEX
-# backend reuses the SAME declarations as a pure x86_64 guest union, so one declaration serves both thin
+# backend reuses the SAME declarations as a pure guest union, so one declaration serves both thin
 # emulators. Games usually set the whole namespace from a file: `box64 = import ./box64-tuning.nix;`.
+#
+# WHICH nixpkgs INSTANCE `p` is depends on the resolved backend and the PAYLOAD's ABI, never on the host
+# alone: `pkgs` for a host-ABI native run, `pkgsX86` for an x86_64 guest (box64, or FEX on an x86_64-linux
+# payload), and `pkgsGuest32` for an i386-linux payload — cross-built i686 on aarch64, pkgsi686Linux on an
+# x86_64 host, where a 32-bit payload runs on the native face. So name SONAMES, and expect the same
+# declaration to be resolved in whichever ABI the payload turns out to need.
 { lib, knobTypes }:
 {
   options.box64 = {
@@ -19,7 +25,12 @@
       type = knobTypes.lastWins;
       default = _p: [ ];
       defaultText = lib.literalExpression "_p: [ ]";
-      description = "Guest-only x86_64 libraries (glibc, libstdc++, …): `p: [ drv ]` resolved from pkgsX86.";
+      description = ''
+        Libraries the payload needs only in the GUEST's ABI (glibc, libstdc++, …): `p: [ drv ]` resolved
+        from the guest set — pkgsX86 for an x86_64 payload, pkgsGuest32 for an i386 one. Under FEX this is
+        where a game's whole library set belongs: FEX bridges nothing, so `bridgingLibs`' native/guest
+        distinction has no meaning for a payload that only ever runs there.
+      '';
     };
     guestPreload = lib.mkOption {
       type = knobTypes.dedupList lib.types.str;

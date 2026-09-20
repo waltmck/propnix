@@ -45,6 +45,7 @@ that work there.
 
 | game | on an `aarch64-linux` host | on an `x86_64-linux` host |
 |---|---|---|
+| `baba-is-you` | **x86_64-linux** | **x86_64-linux** |
 | `baby-steps` | **x86_64-windows** | **x86_64-windows** |
 | `baldurs-gate-3` | **x86_64-windows** | **x86_64-windows** |
 | `casualties-unknown-demo` | **x86_64-windows** | **x86_64-windows** |
@@ -79,6 +80,7 @@ game with entries under only one column can only be built by someone who owns it
 
 | game | `gog` | `steam` |
 |---|---|---|
+| `baba-is-you` | — | x86_64-linux |
 | `baby-steps` | x86_64-windows | — |
 | `baldurs-gate-3` | x86_64-windows | x86_64-windows |
 | `casualties-unknown-demo` | — | x86_64-windows |

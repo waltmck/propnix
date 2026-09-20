@@ -1,0 +1,19 @@
+{
+  "fetchInfo": {
+    "steam": {
+      "x86_64-linux": [
+        {
+          "pname": "baba-is-you-736263",
+          "appId": 736260,
+          "depotId": 736263,
+          "manifestId": "7874711158613025532",
+          "version": "24529734",
+          "outputHash": "sha256-NGTGP35xV2PysTK9YX5T98sm4NvwjX8l4qRNRFGbDCQ=",
+          "depotKeySha256": "6730f48b6091fa061e28879e5c5dcbe80e26aadfacbab674a766e818fa72a49b",
+          "manifestSha256": "3e8d34c9351d701f11da0553af532ce6918e84c9273e83aa5c807075f8ea4e81",
+          "title": "baba-is-you (linux, Steam)"
+        }
+      ]
+    }
+  }
+}

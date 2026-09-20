@@ -24,6 +24,9 @@ let
 
   # 1. The expected triple per game under the DEFAULT config (all fetchers enabled, registry order).
   expected = {
+    # Steam-only here (also sold on itch.io/GOG, unpinned) and single-depot per OS: the NATIVE Linux
+    # build is pinned, so aarch64 takes box64 and x86_64 runs it directly — no wine on either host.
+    baba-is-you = "steam/x86_64-linux/${linuxB}";
     baby-steps = "gog/x86_64-windows/${wineB}";
     baldurs-gate-3 = "gog/x86_64-windows/${wineB}";
     casualties-unknown-demo = "steam/x86_64-windows/${wineB}";

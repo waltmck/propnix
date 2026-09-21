@@ -121,10 +121,6 @@ mkApp (
     # The game's own icon — the gold "V" emblem, whose 256² frame the shared pipeline autocrops and
     # recentres into the hicolor theme + splash. Source and its cost: see `iconIco` in the `let` above.
     icon.png = "${iconIco}/Civ5Icon.ico";
-    # Monochrome variant for symbolic contexts. Vendored (MIT, Tabler Icons) rather than derived from the
-    # emblem above: a symbolic icon has to be flat single-colour line art, which a shaded gold glyph is
-    # not, and the game ships no such asset. See the file's own header for source + licence.
-    icon.symbolic = ./civilization-5-symbolic.svg;
 
     # ── THE RUNNING RECIPE ──────────────────────────────────────────────────────────────────────────────
     # Two environment variables, both load-bearing and both measured on this host (aarch64, 16 KiB pages,

@@ -43,6 +43,7 @@
         pname
         appid
         name
+        wmClass
         exeArgs
         online
         workingDir

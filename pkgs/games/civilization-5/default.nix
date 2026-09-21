@@ -113,6 +113,10 @@ mkApp (
     # cwd = the game root, propnix's default, so no `workingDir`: the engine resolves `steamassets/`
     # relative to the install directory and the binary sits at that root.
     exe = "Civ5XP";
+    # The window's class is the exe name in its ORIGINAL case (measured: `hyprctl -j clients` →
+    # class=Civ5XP), while the derived StartupWMClass lowercases — a case-insensitive matcher never
+    # notices, a strict one does. State the measured value and depend on neither.
+    wmClass = "Civ5XP";
 
     # The game's own icon — the gold "V" emblem, whose 256² frame the shared pipeline autocrops and
     # recentres into the hicolor theme + splash. Source and its cost: see `iconIco` in the `let` above.

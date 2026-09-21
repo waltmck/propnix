@@ -283,6 +283,21 @@ in
       type = knobTypes.lastWins;
       description = "The executable, RELATIVE to the game dir (payload root).";
     };
+    wmClass = lib.mkOption {
+      type = knobTypes.lastWins;
+      default = null;
+      example = "Baba Is You";
+      description = ''
+        The window class (X11 `WM_CLASS` res_class / Wayland app_id) the game's OWN window carries at
+        runtime → the desktop entry's `StartupWMClass`, which is how a taskbar/dock ties that window to
+        this app's icon. `null` derives it from `exe`'s basename, which is what wine sets and therefore
+        right for every Windows title — but a native engine may name its window itself (SDL games set an
+        app name: Chowdren's is the game's title, so baba-is-you carries "Baba Is You"), and then the
+        derived guess matches nothing and the window falls back to the generic icon while the LAUNCHER's
+        splash (whose app_id is the desktop-file id) still shows the right one. Measure it, don't guess:
+        `hyprctl -j clients` / `xprop WM_CLASS` on the running game.
+      '';
+    };
     online = lib.mkOption {
       type = knobTypes.lastWins;
       default = true;

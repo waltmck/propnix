@@ -45,6 +45,7 @@
   # empty-but-present stub instead makes its dlopen throw → a black screen.)
   maskFiles ? [ ],
   exe, # the executable, RELATIVE to the game dir
+  wmClass ? null, # the game window's own class when it differs from the exe-derived guess (see launcher-package)
   exeArgs ? [ ],
   # Offline enforcement: false → the launcher unshares a netns for the game (see app-options `online`).
   online ? true,
@@ -221,6 +222,7 @@ mkLauncherPackage {
     appid
     name
     exe
+    wmClass
     configFile
     iconTree
     broken

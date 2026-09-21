@@ -17,7 +17,8 @@
   pname,
   appid,
   name,
-  exe, # for startupWMClass (the window class ≈ exe basename, lowercased)
+  exe, # startupWMClass fallback (wine's window class = exe basename, lowercased)
+  wmClass ? null, # the game's OWN measured window class, when the exe-derived guess is wrong
   configFile,
   iconTree ? null, # the hicolor theme + splash tree (built by the caller — icon SOURCE selection is per-builder)
   iconSymbolic ? null,
@@ -66,7 +67,10 @@ let
     inherit appid name iconSymbolic;
     exec = pname; # resolves from PATH once the package is installed
     hasIcon = iconTree != null; # set Icon=<id> only if the raster theme is actually installed
-    startupWMClass = lib.toLower (baseNameOf exe);
+    # The wine convention (class = exe basename) is only a DEFAULT: a native engine names its own
+    # window, and StartupWMClass must match what the window actually carries or the taskbar shows the
+    # generic icon for the game while the splash shows the right one.
+    startupWMClass = if wmClass != null then wmClass else lib.toLower (baseNameOf exe);
   };
 
   # What this host's verdict WOULD be, and what it actually is: `allowBroken` is the only thing that

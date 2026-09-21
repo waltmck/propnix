@@ -134,6 +134,7 @@ lib.throwIfNot (lib.hasSuffix "-linux" cfg.emulatedPlatform)
       appid
       name
       exe
+      wmClass
       exeArgs
       online
       workingDir

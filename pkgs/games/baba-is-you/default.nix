@@ -40,6 +40,11 @@ mkApp (
     # engine binary is run from the game ROOT, which is propnix's default cwd. That makes the script pure
     # overhead: name the ELF directly and skip a shell (`workingDir` stays null for the same reason).
     exe = "bin64/Chowdren";
+    # Chowdren names its own window: WM_CLASS is the game's TITLE (measured: `xprop WM_CLASS` →
+    # "Baba Is You", "Baba Is You"), not the exe basename the desktop entry would otherwise guess —
+    # without this the taskbar ties the icon to the splash only and the game window falls back to the
+    # generic one.
+    wmClass = "Baba Is You";
 
     # ── ICON: THE GAME'S OWN CHARACTER SPRITE, NOT ITS KEY ART ──────────────────────────────────────────
     # The payload root carries `icon.bmp`, a 256² key-art card (logo lettering over a dark scene) — the

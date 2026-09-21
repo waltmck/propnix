@@ -40,6 +40,7 @@
   # extra trees (co-base depots) union read-only above it exactly like DLC — never silently dropped.
   payloads,
   exe, # what wine STARTS, relative to the game dir, e.g. "Hollow Knight.exe"
+  wmClass ? null, # the game window's own class when it differs from wine's exe-basename convention
   # Launch arguments for the exe (the single, backend-shared source of exe args).
   exeArgs ? [ ],
   # Offline enforcement: false → the launcher unshares a netns for the game (see app-options `online`).
@@ -438,6 +439,7 @@ mkLauncherPackage {
     appid
     name
     exe
+    wmClass
     configFile
     iconTree
     broken

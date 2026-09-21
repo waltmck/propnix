@@ -90,6 +90,12 @@ mkApp (
         "bin/x64_/factorio" # NB the underscore: bin/x64/factorio is the arch dispatcher script
       else
         "bin/x64/factorio.exe";
+    # Factorio 2.x names its own window with a reverse-DNS Wayland app_id (measured on the running game:
+    # `hyprctl -j clients` → class=com.factorio.Factorio, xwayland=false), so the exe-derived
+    # StartupWMClass guess ("factorio") matches nothing and the game window loses its icon while the
+    # launcher's splash keeps it. Linux builds only — the Windows build under wine gets wine's
+    # exe-basename class, which IS the derived default.
+    wmClass = lib.mkIf (lib.hasSuffix "-linux" config.emulatedPlatform) "com.factorio.Factorio";
 
     # Full-color icon: factorio.exe's PE resources top out at 48px (pixelated upscaled) AND the high-res game
     # asset is off-centre in its canvas, so use the 1024px icon Wube ships in the game data via `icon.png` —

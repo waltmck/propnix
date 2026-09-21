@@ -11,6 +11,7 @@
 #   wine (both systems; the multi-hour long pole, nixpkgs-only deps) ─────────┐
 #   toolchain (aarch64 llvmMingw; fast prebuilt fetch) ─→ arm64ec fan-out ────┼─→ prefix-lower
 #   tools (Rust launcher/cli + box64 / x86_64 dxvk+vkd3d; independent roots)  │
+#   fex-linux (aarch64 FEXInterpreter; independent root)                      │
 #
 # (prefix-lower `needs` the whole wine + arm64ec jobs — GitHub can't express per-matrix-entry edges —
 # so the x86_64 prefixLower also waits on the aarch64 arm64ec fan-out; it's cheap, minutes.)
@@ -60,15 +61,51 @@ jobs:
           - system: aarch64-linux
             runner: ubuntu-24.04-arm
             attrs: propnix-launcher propnix-cli box64 gbeFork
+          # galaxyStub is here AND as an arm64ec leg below because it is a DIFFERENT derivation per host
+          # (it builds its x86_64/i386 PEs with llvmMingw on aarch64, pkgsCross mingw here), and the
+          # aarch64 leg therefore does not cover this one. One derivation, everything else substituted.
           - system: x86_64-linux
             runner: ubuntu-latest
-            attrs: propnix-launcher propnix-cli dxvk vkd3d gbeFork
+            attrs: propnix-launcher propnix-cli dxvk vkd3d gbeFork galaxyStub
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/build-and-push
         with:
           system: ${{ matrix.system }}
           attrs: ${{ matrix.attrs }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+  # FEXInterpreter — the emulator the THIN fex backend runs (emulators/fex-linux), and the only route for
+  # a 32-bit x86 Linux payload on aarch64 (pkgs/games/civilization-5). aarch64 ONLY: FEX emulates x86 ON
+  # ARM64, so the scope defines this attr nowhere else, and asking for it on x86_64 is a missing-attribute
+  # error rather than a build.
+  #
+  # Its OWN job, not another leg of `tools`: it is a full FEX source tree + cmake build (the same scratch
+  # pressure the arm64ec fex-dlls leg has), and its `doInstallCheck` EXECUTES x86_64 and i386 guests, so
+  # like wine and prefix-lower it must run on the matching-arch runner rather than under emulation.
+  #
+  # ANY RUNNER WILL DO, because the OUTPUT does not depend on the builder's page size — a property of the
+  # package, not luck: nothing in FEX's build system probes a page size, every host-page boundary is read
+  # at runtime from sysconf(_SC_PAGESIZE), the one compile-time constant (jemalloc's LG_PAGE) is pinned in
+  # source at 16 = 64 KiB so that "compiled >= runtime" holds on every ARM page size, and the only page
+  # constant in the installed headers is FEX_PAGE_SIZE = 4096, which is the x86 GUEST's page and an ABI
+  # fact on every host. A build whose portability depended on the builder's kernel would be a bug in
+  # emulators/fex-linux, to be fixed there rather than worked around by pinning a runner.
+  #
+  # The install check is the one thing that is genuinely host-specific, and deliberately so: it EXECUTES
+  # guests, so it tests the page size the runner happens to have (4 KiB here, 16 KiB on the Asahi dev
+  # host). That is extra coverage, not a caveat — if this leg ever fails where the dev host passes, the
+  # runtime really is broken for small-page hosts and the fork's page-portability claim is false.
+  fex-linux:
+    name: fex-linux (aarch64-linux)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build-and-push
+        with:
+          system: aarch64-linux
+          attrs: fexInterpreter
           cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
   # The aarch64 ARM64EC toolchain root: fast (prebuilt mstorsjo release + autoPatchelf), pushed before

@@ -176,8 +176,22 @@ let
     # EXPECT WARNINGS when this check runs: forcing those `meta.broken` values is forcing packages built
     # with the hatch, and mkLauncherPackage says so by design. The check passing IS the assertion; the
     # warning lines are the feature working, not a misbehaving gate.
-    allowbroken-default-refuses =
-      (dflt.hollow-knight.apply { backend = "fex"; }).meta.broken == isAarch64;
+    # Refused on BOTH hosts, for DIFFERENT reasons: on aarch64 by hollow-knight's own Mono/SMC wall, on
+    # x86_64 by the fex backend having no x86_64-host interpreter at all. (Writing this as
+    # `== isAarch64` — expecting the x86_64 side to be fine — is what broke CI: the second claim was
+    # overlooked because this check only ever gets run by hand on the aarch64 dev host.)
+    allowbroken-default-refuses = (dflt.hollow-knight.apply { backend = "fex"; }).meta.broken;
+    # …and the reason each host reports must be the one that applies THERE, which is the whole job of
+    # mk-thin-build's claim selection. Pinned per host because the failure mode is silent: the wrong
+    # reason still refuses the build, it just explains it with another machine's wall.
+    allowbroken-reason-is-about-this-host =
+      let
+        r = (dflt.hollow-knight.apply { backend = "fex"; }).meta.brokenReason;
+      in
+      if isAarch64 then
+        lib.hasInfix "guest Mono init" r
+      else
+        lib.hasInfix "no x86_64-host FEXInterpreter" r;
     allowbroken-suppresses-game-entry =
       (dflt.hollow-knight.apply {
         backend = "fex";
@@ -198,6 +212,21 @@ let
         emulatedPlatform = "aarch64-linux";
         allowBroken = true;
       }).meta.broken == false;
+    # A HEALTHY package must carry NO brokenReason at all. The claim list is assembled unconditionally
+    # and its reason chosen afterwards, so a claim that does not fire has to say so with a null reason
+    # rather than an empty `systems` — otherwise the fallback hands a working package someone else's
+    # wall. Hollow Knight's default (box64 on aarch64, native on x86_64) makes no claim from any of the
+    # three sources, so `brokenReason` must be absent, not merely unused.
+    healthy-default-has-no-broken-reason =
+      !(dflt.hollow-knight.meta ? brokenReason) && dflt.hollow-knight.meta.broken == false;
+    # …while a package broken on the OTHER host keeps its reason as information (civilization-5 states an
+    # x86_64 wall; on aarch64 that is not a refusal but is still worth reading).
+    cross-host-reason-survives =
+      let
+        m = dflt.civilization-5.meta;
+      in
+      if isAarch64 then (m.broken == false && m ? brokenReason) else m.broken;
+
     # It is a CALLER's override, never a game's: no packaged title may set it (that would ship a build
     # whose own `broken.systems` says it cannot work).
     allowbroken-unset-by-every-game = lib.all (n: dflt.${n}.config.allowBroken == false) (
@@ -223,7 +252,10 @@ let
   # COVERAGE. `expected` is hand-maintained, so without this a NEW game silently escapes the whole check —
   # its resolution unpinned, and its `fetcher` exempt from the quality-exception ratchet below (which
   # iterates `attrNames expected`). That is not hypothetical: baldurs-gate-3 was absent and unchecked.
-  # The README's supported-games tables are derived from the same resolution, so this guards them too.
+  # The README's supported-games tables describe this same resolution, but THIS check does not see them:
+  # they are prose, and a game absent from both is absent from nothing an eval can reach. Five were
+  # missing that way. `ci/readme-tables.sh` is what actually holds them (regenerating both tables from
+  # the resolver and diffing), so add a game here AND run that with `--write`.
   uncovered = lib.subtractLists (lib.attrNames expected) (lib.attrNames dflt.games);
   stale = lib.subtractLists (lib.attrNames dflt.games) (lib.attrNames expected);
 

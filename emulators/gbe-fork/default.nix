@@ -20,6 +20,12 @@
 #                                failure. Nobody should have to trust a binary cache to get these bytes —
 #                                cross-compiling keeps them locally reproducible.
 #
+# i686 IS INCLUDED IN THAT RULE, on every host. It is tempting to special-case it on an x86_64 builder,
+# where `pkgsi686Linux` would be a native build with a fully-populated upstream cache — but that is the
+# cache making the decision, and the requirement here is that the bytes stay buildable when the cache is
+# gone. `pkgsCross.gnu32` gets there with a natively-running compiler on BOTH hosts; the only thing the
+# x86_64 builder needs is the check-phase normalization below, not a different package set.
+#
 # The WINDOWS PE shims are upstream's PREBUILT release artifacts, pinned to the SAME tag as the source so a
 # game's two flavours can never disagree about which Steamworks surface they implement. A from-source mingw
 # build of the Windows file set was written and then REMOVED: its only consumer was a patch answering
@@ -53,6 +59,48 @@
 let
   version = "2026_07_19";
 
+  # The i686 cross set, with the THREE test suites nixpkgs runs only here switched off.
+  #
+  # `doCheck` on a cross build follows `buildPlatform.canExecute hostPlatform`, and an x86_64 builder CAN
+  # execute i686 — so `pkgsCross.gnu32` is the one cross target whose dependencies run their test suites,
+  # and only when built from an x86_64 host. From this aarch64 host the very same packages have
+  # `doCheck = false`, which is why the aarch64 CI leg builds this chain green while the x86_64 leg died
+  # in cross-`sqlite`'s suite (`libgcc_s.so.1 must be installed for pthread_exit to work`), taking
+  # dbus/libjack2/portaudio and the shim with it.
+  #
+  # Turning them off makes x86_64 behave like every other builder rather than inventing a policy: these
+  # are upstream test suites for libraries we merely consume, in a configuration nixpkgs itself exercises
+  # by accident. All three are listed rather than one, because the two that never ran are unproven, not
+  # known-good. Re-derive the list after a nixpkgs bump with:
+  #   nix eval --impure --expr '(import <nixpkgs> { system = "x86_64-linux"; }).pkgsCross.gnu32.<pkg>.doCheck'
+  # Conditioned on the exact predicate that turns the checks ON, so the two can never disagree — and so
+  # the builders where nothing runs keep byte-identical outputs. That second part is not cosmetic:
+  # `appendOverlays` re-instantiates the whole fixpoint, so applying it unconditionally moved every
+  # dependency hash in this shim (including build-side ones) on aarch64, for a no-op.
+  gnu32Base = pkgs.pkgsCross.gnu32;
+  gnu32ChecksWouldRun = gnu32Base.stdenv.buildPlatform.canExecute gnu32Base.stdenv.hostPlatform;
+  gnu32 =
+    if !gnu32ChecksWouldRun then
+      gnu32Base
+    else
+      gnu32Base.appendOverlays [
+        (
+          _: prev:
+          # The i686 SIDE ONLY. An overlay reaches `buildPackages` as well, where these are the ordinary
+          # native packages Hydra already built and tested — overriding them there rebuilds the native
+          # world instead (native python3 links sqlite, so sphinx/meson/gobject-introspection/rustc/
+          # fontforge follow: 291 derivations, measured, against 11 for the cross chain alone).
+          lib.optionalAttrs (prev.stdenv.hostPlatform.system == "i686-linux") (
+            lib.genAttrs [ "sqlite" "dbus" "mbedtls" ] (
+              n:
+              prev.${n}.overrideAttrs (_: {
+                doCheck = false;
+              })
+            )
+          )
+        )
+      ];
+
   # One shim per Linux ABI. `pkgsCross.*` is instantiated FROM this host's pkgs, so the cross toolchain is
   # host-native; the ABI whose name matches the host resolves to the plain (non-cross) build.
   crossFor =
@@ -60,7 +108,7 @@ let
     if system == stdenv.hostPlatform.system then
       pkgs
     else if system == "i686-linux" then
-      pkgs.pkgsCross.gnu32
+      gnu32
     else if system == "x86_64-linux" then
       pkgs.pkgsCross.gnu64
     else

@@ -44,3 +44,15 @@ jobs:
         run: nix eval --raw '.#checks.${{ matrix.system }}.config-resolution.drvPath'
       - name: fetcher × emulatedPlatform eval matrix
         run: ci/eval-matrix.sh '${{ matrix.system }}' 4
+      # Holds the cache policy: nothing non-unfree may be left for users to compile from source. It
+      # instantiates but never realizes, so it belongs in this eval-only workflow rather than in the
+      # cachix build DAG — and running it on PRs is the point, since the alternative is noticing the
+      # hole after a release, as happened twice before this existed.
+      - name: cache coverage
+        run: ci/cache-audit.sh '${{ matrix.system }}'
+      # The README's supported-games tables are generated data living in prose, so they rot silently —
+      # a reader cannot tell a stale cell from a true one. Both hosts' columns come from one evaluation,
+      # so this runs once rather than per matrix leg.
+      - name: README tables match the resolver
+        if: ${{ matrix.system == 'x86_64-linux' }}
+        run: ci/readme-tables.sh

@@ -33,9 +33,17 @@ flags: propnix picks it from the game's own quality ranking, filtered by what yo
 else in the cell is selectable explicitly:
 
 ```sh
-nix run .#hollow-knight                                                        # the default
-nix run '.#hollow-knight.apply { emulatedPlatform = "x86_64-windows"; }'       # any other entry
-nix run '.#hollow-knight.apply { fetcher = "steam"; emulatedPlatform = "x86_64-linux"; }'
+nix run .#hollow-knight              # the bold cell — the default
+nix run .#civilization-5.withAllDlc  # a plain attribute path, so it works the same way
+```
+
+Any **other** cell is an override, and `nix run .#…` cannot express one: its installable is an attribute
+*path*, so a function call like `.apply { … }` is read as part of the name and fails with "does not provide
+attribute". Reach the override surface through an expression instead:
+
+```sh
+nix run --impure --expr '(builtins.getFlake (toString ./.)).legacyPackages.${builtins.currentSystem}.hollow-knight.apply { emulatedPlatform = "x86_64-windows"; }'
+nix run --impure --expr '(builtins.getFlake (toString ./.)).legacyPackages.${builtins.currentSystem}.hollow-knight.apply { fetcher = "steam"; emulatedPlatform = "x86_64-linux"; }'
 ```
 
 ### Table 1 (by host): which builds run on my machine?
@@ -49,7 +57,9 @@ that work there.
 | `baby-steps` | **x86_64-windows** | **x86_64-windows** |
 | `baldurs-gate-3` | **x86_64-windows** | **x86_64-windows** |
 | `casualties-unknown-demo` | **x86_64-windows** | **x86_64-windows** |
+| `cities-skylines` | **x86_64-windows** | **x86_64-windows** |
 | `civilization-5` | **i386-linux** | — *(needs a 32-bit GL stack)* |
+| `civilization-6` | **x86_64-windows** | **x86_64-windows** |
 | `cyberpunk-2077` | **x86_64-windows** | **x86_64-windows** |
 | `dont-starve` | **i386-windows** | **i386-windows** |
 | `factorio` | **aarch64-linux**, x86_64-linux, x86_64-windows | **x86_64-linux**, x86_64-windows |
@@ -57,19 +67,22 @@ that work there.
 | `hollow-knight` | **x86_64-linux**, x86_64-windows | **x86_64-linux**, x86_64-windows |
 | `hollow-knight-silksong` | **x86_64-windows** | **x86_64-windows** |
 | `homeworld-rm` | **i386-windows** | **i386-windows** |
-| `iron-lung` | **i386-windows** | **x86_64-windows** |
+| `iron-lung` | **x86_64-windows** | **x86_64-windows** |
 | `iron-nest` | **x86_64-windows** | **x86_64-windows** |
-| `kerbal-space-program` | **i386-windows** | **x86_64-windows** |
+| `kerbal-space-program` | **x86_64-windows** | **x86_64-windows** |
 | `no-mans-sky` | **x86_64-windows** | **x86_64-windows** |
 | `outlast` | **x86_64-windows** | **x86_64-windows** |
 | `outlast-2` | **x86_64-windows** | **x86_64-windows** |
 | `papers-please` | **x86_64-windows** | **x86_64-windows** |
 | `potionomics` | **x86_64-windows** | **x86_64-windows** |
 | `prison-architect` | **x86_64-windows** | **x86_64-windows** |
+| `repo` | **x86_64-windows** | **x86_64-windows** |
 | `rust` | **x86_64-windows** | **x86_64-windows** |
 | `shadow-of-mordor` | **x86_64-windows** | **x86_64-windows** |
 | `skyrim-se` | **x86_64-windows** | **x86_64-windows** |
+| `space-engineers` | **x86_64-windows** | **x86_64-windows** |
 | `stellaris` | **x86_64-linux** | **x86_64-linux** |
+| `victoria-3` | **x86_64-windows** | **x86_64-windows** |
 | `witcher-3` | **x86_64-windows** | **x86_64-windows** |
 
 ### Table 2 (by store): which fetcher provides a given game build?
@@ -84,7 +97,9 @@ game with entries under only one column can only be built by someone who owns it
 | `baby-steps` | x86_64-windows | — |
 | `baldurs-gate-3` | x86_64-windows | x86_64-windows |
 | `casualties-unknown-demo` | — | x86_64-windows |
+| `cities-skylines` | — | x86_64-windows |
 | `civilization-5` | — | i386-linux |
+| `civilization-6` | — | x86_64-windows |
 | `cyberpunk-2077` | x86_64-windows | — |
 | `dont-starve` | i386-windows | — |
 | `factorio` | x86_64-windows | aarch64-linux, x86_64-linux, x86_64-windows |
@@ -101,10 +116,13 @@ game with entries under only one column can only be built by someone who owns it
 | `papers-please` | x86_64-windows | — |
 | `potionomics` | — | x86_64-windows |
 | `prison-architect` | x86_64-windows | — |
+| `repo` | — | x86_64-windows |
 | `rust` | — | x86_64-windows |
 | `shadow-of-mordor` | x86_64-windows | x86_64-windows |
 | `skyrim-se` | x86_64-windows | x86_64-windows |
+| `space-engineers` | — | x86_64-windows |
 | `stellaris` | — | x86_64-linux |
+| `victoria-3` | — | x86_64-windows |
 | `witcher-3` | x86_64-windows | — |
 
 When a game is pinned from both stores, the default fetcher follows your `preferredFetchers` config
@@ -129,7 +147,7 @@ benefits of native kernel mounts. That design leans on several host capabilities
 | A Vulkan ICD (e.g. Mesa on Asahi) | the default DXVK/vkd3d D3D backend | hard *unless* `PROPNIX_WINE_D3D=wined3d` |
 | Wayland (+ Xwayland) | the GTK4 splash + the game window | yes |
 | `/dev/ntsync` (Linux **6.14+**) | fast wine synchronization | recommended |
-| `wlr-foreign-toplevel-management` or `org_kde_plasma_window_management` compositor (basically anything but GNOME) | single-instance raise, splash dismiss, close-to-quit | optional (degrades gracefully) |
+| A toplevel-list protocol — `ext-foreign-toplevel-list-v1` (Mutter 45+, wlroots), `wlr-foreign-toplevel-management`, or `org_kde_plasma_window_management` (KDE) — or an X11/Xwayland session | single-instance raise, splash dismiss, close-to-quit | optional (degrades gracefully; every desktop provides at least one, and the only gap is raising a *native-Wayland* window on GNOME) |
 | GOG/Steam account owning the title + its token | **building** a game payload (FOD fetch) | yes (build-time) |
 | Nix's classic build users, i.e. `auto-allocate-uids = false` | reading that token inside the FOD sandbox — an auto-allocated build runs as a synthetic uid/gid in no host group, so a 0640 token is unreadable and only a world-readable one would work | yes (build-time) |
 
@@ -146,10 +164,14 @@ nothing at all for an ARM64 payload. An x86_64 host runs every x86 Linux build d
 launcher:
 
 1. **single-instance** — an flock keyed on the appid; a duplicate launch focuses the running window and
-   exits. Focus works via EWMH `_NET_ACTIVE_WINDOW` on X11/Xwayland, and via `wlr-foreign-toplevel-management`
-   on Wayland (matching the game's app_id, or — while the game is still cold-starting — this game's startup
-   splash) — portable across the wlroots family (Hyprland/sway/Wayfire/river) + COSMIC; a graceful no-op on
-   GNOME/KDE, which don't advertise it.
+   exits. The raise tries three paths in order, matching the game's app_id — or, while the game is still
+   cold-starting, this game's startup splash: EWMH `_NET_ACTIVE_WINDOW`, which covers an Xwayland game
+   window under *any* compositor; then `wlr-foreign-toplevel-management` (the wlroots family —
+   Hyprland/sway/Wayfire/river — plus COSMIC); then KDE's `org_kde_plasma_window_management`, since KWin
+   implements neither of the first two and this is its only activate verb (it needs the
+   `X-KDE-Wayland-Interfaces` grant that every game's `.desktop` file carries). The single gap is a
+   *native-Wayland* window on GNOME, which exposes no activate verb to foreign clients at all — there it
+   degrades to a no-op.
 2. **prefix** — assembles the `WINEPREFIX` from a **declarative mount table** (there is no symlink farm and
    no seeding step): `propnix-mount` unshares a private user+mount namespace and lays a fresh tmpfs at the
    view root, then binds the read-only system tree (`wine-prefix-lower`: `C:\Windows`, Program Files,

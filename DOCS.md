@@ -40,12 +40,26 @@ knobs, how it runs, and credentials.
   (`graphics=wayland`); `PROPNIX_WINE_GRAPHICS=x11` selects the X11 driver (native X or Xwayland). The GTK4
   splash and the game window both need a display server.
 
-- **(Optional) a `wlr-foreign-toplevel-management` compositor.** `focus.rs` uses this protocol to (a) raise
-  the running window when you launch a game that's already open, (b) dismiss the splash for OpenGL titles
-  that emit no first-frame log marker, and (c) force teardown when you close the game window (some wine
-  games hang on shutdown). It's present on the wlroots family (Hyprland/sway/Wayfire/river) and COSMIC. On
-  GNOME/KDE or plain X11 it degrades gracefully: single-instance raise falls back to X11 EWMH
-  (`_NET_ACTIVE_WINDOW`), and the splash falls back to the first-present marker / timeout.
+- **(Optional) a way to see and raise another client's window.** `focus.rs` wants this for three things,
+  and they do NOT need the same protocol — which is why no single compositor family is required:
+
+  *Seeing* the game's window (dismissing the splash for OpenGL titles that emit no first-frame marker, and
+  forcing teardown when you close the window, since some wine games hang on shutdown) takes any
+  toplevel LIST: `ext-foreign-toplevel-list-v1` first — portable, and present on Mutter 45+ as well as
+  wlroots — then `wlr-foreign-toplevel-management`, then KDE's `org_kde_plasma_window_management`. A pure
+  X11 session uses EWMH `_NET_CLIENT_LIST` instead. On a Wayland session the Wayland protocols are treated
+  as the only authority, because an Xwayland query would report a native-Wayland game window as absent and
+  trigger a false close-to-quit.
+
+  *Raising* it (a duplicate launch focusing the running game) needs an activate verb: EWMH
+  `_NET_ACTIVE_WINDOW` covers any Xwayland window under any compositor, `wlr-foreign-toplevel-management`
+  covers the wlroots family and COSMIC, and KDE is served by `org_kde_plasma_window_management` — KWin
+  implements neither of the first two, and reaching it additionally requires the installed
+  `X-KDE-Wayland-Interfaces` grant (see `pkgs/propnix-launcher/default.nix`), so an ungranted client never
+  even sees the global. GNOME Wayland is the one place with no activate verb for foreign clients: a
+  native-Wayland game window there cannot be raised, and the attempt is a silent no-op.
+
+  Everything degrades gracefully — the splash falls back to the first-present marker / timeout.
 
 ## To build a game payload
 
@@ -122,10 +136,12 @@ triple + the guard semantics.
 | `lib/sealing.nix` | pure-lib data model: the tuning flatten (reason-strip) + the env-seal record + `defaultScrub` |
 | `lib/presets/` | reusable tuning fragments (`unity.framePacing`, `unity.fullscreen`) + `mergeTuning` (collision-throwing compose) |
 | `lib/fetchers/` | `fetchGogGalaxyBuild/` (`propnix download gog` FOD, buildId-pinned), `fetchGogLinuxInstaller.nix` (lgogdownloader, latest-only), `fetchSteamDepot.nix` (`propnix download steam` FOD, manifest-pinned) + the shared `cred-lib.sh` prologue |
-| `emulators/` | `wine-hangover` (same source both arches), `fex-dlls` + `galaxy-stub` + `llvm-mingw` + `box64` (aarch64), `dxvk-arm64ec`/`dxvk-x86_64`, `vkd3d-proton-arm64ec`/`vkd3d-proton-x86_64`, `wine-mono` (the .NET CLR every MANAGED title needs, pinned to wine's own `WINE_MONO_VERSION`), `wine-prefix-lower` (the read-only system tree — installs the CLR at `C:\windows\mono\mono-2.0`) |
+| `emulators/` | `wine-hangover` (same source both arches), `fex` (the ARM64EC DLLs wine loads) + `galaxy-stub` + `llvm-mingw` + `box64-latest` (aarch64), `fex-linux` (FEXInterpreter — a *different* target from `fex`: it runs i386/x86_64 **Linux** ELFs for the thin backend, and carries our large-host-page patches), `gbe-fork` (the offline Steam-entitlement shim, built per ABI), `dxvk-arm64ec`/`dxvk-x86_64`, `vkd3d-proton-arm64ec`/`vkd3d-proton-x86_64`, `wine-mono` (the .NET CLR every MANAGED title needs, pinned to wine's own `WINE_MONO_VERSION`), `wine-prefix-lower` (the read-only system tree — installs the CLR at `C:\windows\mono\mono-2.0`) |
 | `pkgs/propnix-launcher/` | the Rust launcher (GTK4 splash + single-instance + env-seal + mount-table orchestration, PREFIX + THIN modes); links `pkgs/propnix-mount/` (the userns bind/overlay layer) and `pkgs/propnix-prefetch/` (the `posix_fadvise` page-cache warmer — run by the wine INNER over the assembled prefix, PE modules only: `.dll`/`.drv`/`.exe`) as library crates — they are not separate packages |
 | `pkgs/games/<name>/` | one game per directory — `default.nix` (the `mkApp` module) + pinned `versions.json` (the `fetchInfo` fetch matrix) + optional `wine-tuning.nix`/`box64-tuning.nix`/`setup.sh`; auto-discovered into the scope + a flake package/app |
 | `nixos/propnix.nix` | host module: binds the credential dir into the build sandbox, loads `ntsync`, trusts `propnix.cachix.org`, installs the `propnix` CLI, materializes declared credentials (sops-nix/agenix) |
+| `ci/` | the gate scripts CI runs, each usable by hand: `eval-matrix.sh <system>` (one `nix eval` per pinned game × fetcher × platform), `cache-audit.sh <system>` (nothing non-unfree is left for users to compile), `pin-refresh.sh` + `pin-issue.sh` (weekly pin refresh and its issue lifecycle, with an offline `pin-issue-test.sh`), `readme-tables.sh` (the README's two supported-games tables regenerated from the resolver and diffed; `--write` rewrites them, which is how you add a game to them) |
+| `tools/` | `unwind-guest-stack.py` — an exact x86_64 guest-stack unwinder for FEX-under-ARM64EC-wine, where neither winedbg nor FEX can produce a backtrace and stack-scanning yields false frames |
 | `config/` | credential model + host-capability facts (reference) |
 | `docs/DESIGN.md` | the architecture decision record |
 | `preliminaries/` | the validated POCs + historical design docs (`PLAN2.md`, `RESEARCH.md`) |
@@ -274,6 +290,25 @@ build under box64; Steam DLC, where each DLC is its own depot of the base app), 
 (`extraSystem32`), `pkgs/games/factorio/` (GOG DLC, via `dlcId`), and `pkgs/games/kerbal-space-program/`
 (writable game-dir overlay + a seeded tmpfs).
 
+### Two steps CI will fail you on
+
+Packaging the game is not the whole change — a new title is not "just discovered", because two standing
+gates enumerate the games and both refuse an entry they have never been told about:
+
+1. **Pin its resolution** in `lib/tests/resolution.nix`: add `<name> = "<fetcher>/<platform>/<backend>";`
+   to `expected`, with a comment saying *why* that triple is the right one for this title. The check
+   fails on a game that is missing from that list as loudly as on one that resolves wrongly — being
+   unlisted is the failure, since an unpinned resolution is exactly what silently drifts. Host-dependent
+   answers are written as a conditional (see `factorio` and `civilization-5`).
+2. **Regenerate the README's tables**: `ci/readme-tables.sh --write`. They are generated data living in
+   prose — Table 1 is (runnable platforms × the resolved default) per host, Table 2 the pinned fetch
+   matrix — so never hand-edit a cell; the script rewrites both from the resolver and is diffed in CI.
+   A hand-written note on a `—` cell (the human reason a build cannot run there) is preserved.
+
+Run both before pushing: `nix eval --raw '.#checks.<system>.config-resolution.drvPath'` and
+`ci/readme-tables.sh`. Note the resolution check is per system and CI runs **both**, so an
+aarch64-only local run can still miss an x86_64 failure.
+
 ## Keeping pins current
 
 Two workflows keep `versions.json` honest, and both lean on the fact that *detecting* a new upstream
@@ -290,9 +325,20 @@ does not own the title, or a construct the tool refuses to guess at — while `1
 (transport, parse, a bug). CI keys on `4` to open an issue instead of failing the run, and scripts can
 rely on the same distinction from every subcommand (`pin`, `hash`, `steam-probe`, `download`, `verify`).
 
+- **`.github/workflows/cachix.yml`** (push to master) builds every redistributable package and pushes it
+  to `propnix.cachix.org`. The policy it serves: **anything non-unfree that cache.nixos.org does not
+  already serve must be built here**, so installing propnix never means compiling an emulator from
+  source. Game payloads are the deliberate exception — credentialed and unfree, so caching them would be
+  redistribution. Packages nixpkgs already builds (box64) are simply substituted and not re-pushed.
+  `ci/cache-audit.sh <system>` holds that policy as a gate in `eval.yml`: it walks the scope, asks
+  cache.nixos.org about each non-unfree package, and fails naming anything neither cached upstream nor
+  reachable from a job in this workflow — by name in its `attrs` or through its closure (wineMono rides
+  inside prefixLower). It reads the expectations out of the workflow, per system, so there is one list
+  rather than two; the per-system precision is the point, since a package like `galaxyStub` is a
+  different derivation on each host and was once covered on only one of them.
 - **`.github/workflows/auto-update.yml`** (weekly, plus `workflow_dispatch`) builds and pushes the CLI to
   cachix, then substitutes it (`--max-jobs 0`, so it fails loudly rather than quietly recompiling) and runs
-  `ci/pin-refresh.sh`. Stage 1 checks all 17 games anonymously in a few seconds; only a game that moved
+  `ci/pin-refresh.sh`. Stage 1 checks every packaged game anonymously in a few seconds; only a game that moved
   reaches stage 2, which streams the payload to recompute hashes. Every game it updates goes into one pull
   request — never a direct push, so `eval.yml` gates the result. Set the `PROPNIX_APP_ID` variable and
   `PROPNIX_APP_PRIVATE_KEY` secret if you want that PR to trigger CI by itself; a `GITHUB_TOKEN` PR does
@@ -378,7 +424,7 @@ What the value *means* is the store's business:
 
 This lives in `versions.json` rather than the game's `default.nix` on purpose: it is the file
 `propnix pin` already reads and rewrites, so consulting the policy costs nothing and the tool keeps working
-on a plain checkout without evaluating any Nix — `--check` stays a few seconds for all 17 games. (`dlc` is
+on a plain checkout without evaluating any Nix — `--check` stays a few seconds across every packaged game. (`dlc` is
 the existing precedent for a non-`fetchInfo` key there.) The rewriter preserves it untouched.
 
 ### A GOG pin can age out, and that is the intended outcome
@@ -400,7 +446,7 @@ session yields steamcommunity cookies, so treat it as full account access.
 ## Scope & backlog
 
 **In:** the wine path (x86_64 + i386 Windows builds) and the box64/native thin path (x86_64 Linux builds),
-GOG + Steam fetchers, 30 games — hardware-tested on **aarch64-linux**; **x86_64-linux** is structured +
+GOG + Steam fetchers, every game in the README's tables — hardware-tested on **aarch64-linux**; **x86_64-linux** is structured +
 evaluates (unbuilt/untested on real hardware). **Backlog:** building/testing the x86_64 target on real
 hardware; a mechanical x86-guest cache-hit gate in `flake.checks`; MS-Store; MangoHud on non-DXVK
 backends; a winewayland **xdg-activation** patch (would let the game open on the splash's

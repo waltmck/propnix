@@ -66,7 +66,9 @@ Each is a commitment. Superseded entries have been rewritten to the current deci
 ```
 propnix/
 ├── flake.nix                      # single nixpkgs pin; outputs: legacyPackages(=scope), packages, apps,
-│                                  #   lib (mkSeal/flattenTuning/defaultScrub), nixosModules
+│                                  #   checks (config-resolution + cli-tests), ci (the eval matrix),
+│                                  #   nixosModules, and lib: mkScope — the public entry point, a scope
+│                                  #   for your own `pkgs`/config — plus mkSeal/flattenTuning/defaultScrub
 ├── lib/
 │   ├── default.nix                # the scope: emulator set (arch-aware), the two REGISTRIES
 │   │                              #   (fetchers, backends), builders, icons, presets; auto-discovers pkgs/games/*
@@ -103,12 +105,14 @@ propnix/
 │   └── presets/default.nix        # unity.framePacing / unity.fullscreen fragments + mergeTuning
 ├── emulators/                     # first-class, game-independent, pinned translation layers
 │   ├── wine-hangover/             # arm64ec wine (aarch64) / native wine (x86_64) — same source
-│   ├── fex-dlls.nix               # FEX-2607 ARM64EC DLLs (HODLL64) + wowbox64 (box64 -DWOW64=ON, HODLL)
+│   ├── fex/                       # FEX-2607 ARM64EC DLLs (HODLL64) + wowbox64 (box64 -DWOW64=ON, HODLL)
 │   ├── box64-latest.nix           # regular box64 for x86_64 Linux guests (thin backend)
 │   ├── fex-linux/                 # FEXInterpreter for i386|x86_64 LINUX guests + our large-host-page
 │   │                              #   and 32-bit-guest patches (the `fex` thin backend; D12)
 │   ├── dxvk-arm64ec.nix / dxvk-x86_64.nix / vkd3d-proton-arm64ec.nix / vkd3d-proton-x86_64.nix
 │   ├── galaxy-stub/               # graceful no-op GOG Galaxy SDK DLLs (bound over bundled copies)
+│   ├── gbe-fork/                  # offline Steam-entitlement shim, one build per ABI (modules/steam-emu.nix)
+│   ├── wine-mono/                 # the .NET CLR every MANAGED title needs, pinned to wine's own version
 │   ├── llvm-mingw/  wine-prefix-lower.nix
 ├── pkgs/
 │   ├── propnix-launcher/          # Rust — PREFIX + THIN modes; links propnix-mount/-prefetch as crates;
@@ -119,7 +123,14 @@ propnix/
 │       ├── hollow-knight/         # the two-axis exemplar (gog/steam × windows/linux; see Worked examples)
 │       ├── stellaris/             # Steam Linux two-depot build under box64/native
 │       ├── civilization-5/        # Steam i386 LINUX build under FEX (the only i386-linux title)
-│       └── …                      # 27 more titles
+│       └── …                      # every other title — the README's tables are the current list
+├── ci/                            # the gate scripts CI runs: eval-matrix.sh (pinned game × fetcher ×
+│                                  #   platform), cache-audit.sh (nothing non-unfree left uncached),
+│                                  #   pin-refresh.sh + pin-issue.sh (+ its offline test)
+├── .github/workflows/             # eval.yml (PR gates) · cachix.yml (build + push redistributables)
+│                                  #   auto-update.yml (weekly pin refresh) · pin-issues.yml
+├── tools/unwind-guest-stack.py    # exact x86_64 guest-stack unwinder for FEX-under-ARM64EC-wine,
+│                                  #   where neither winedbg nor FEX can produce a backtrace
 ├── nixos/propnix.nix              # services.propnix: cred-dir bind into the FOD sandbox; ntsync udev;
 │                                  #   cachix substituter+key (useCache); `propnix` CLI in systemPackages;
 │                                  #   declarative cred store from sops/agenix paths (credentials.<t>.<u>);
@@ -188,7 +199,7 @@ thin backend's `meta.broken` contribution — so a game may rank a host-specific
 
 ### The option schema (lib/modules/app-options.nix)
 
-Top-level options, each typed and described: `pname`, `appid`, `name`, the two axes (`fetcher`, `emulatedPlatform` — enum over the registry / the platform list `x86_64-windows | i386-windows | aarch64-linux | x86_64-linux | i386-linux`, defined once in `lib/strategy.nix` alongside the backend selection that reads it), `backend` (enum over the registry, default `resolveStrategy`), the generated `fetchInfo.<fetcher>.<platform>` matrix, `payloads` (default: fetch the selected pair or throw the availability error enumerating the pinned pairs), `exe`, `exeArgs`, `executables` (thin exec-bit list), `maskFiles` (runtime whiteouts — true absence for dlopen'd store DLLs like `steam_api`; a statically-imported SDK needs the opposite, `wine.galaxyStubDlls` stubs), `workingDir`, `saveBinds`, `icon = { png; symbolic; auto; }`, `broken = { systems; reason; }`, `allowBroken` (a CALLER's override — suppresses the `meta.broken` refusal so a known wall can be TESTED, keeps `brokenReason`, and warns which wall it ignores; never set by a game), `dlc = { available; enabled; }`, `env`.
+Top-level options, each typed and described: `pname`, `appid`, `name`, the two axes (`fetcher`, `emulatedPlatform` — enum over the registry / the platform list `x86_64-windows | i386-windows | aarch64-linux | x86_64-linux | i386-linux`, defined once in `lib/strategy.nix` alongside the backend selection that reads it), `backend` (enum over the registry, default `resolveStrategy`), the generated `fetchInfo.<fetcher>.<platform>` matrix, `payloads` (default: fetch the selected pair or throw the availability error enumerating the pinned pairs), `exe`, `exeArgs`, `executables` (thin exec-bit list), `maskFiles` (runtime whiteouts — true absence for dlopen'd store DLLs like `steam_api`; a statically-imported SDK needs the opposite, `wine.galaxyStubDlls` stubs), `workingDir`, `saveBinds`, `icon = { png; symbolic; auto; }`, `broken = { systems; reason; }`, `allowBroken` (a CALLER's override — suppresses the `meta.broken` refusal so a known wall can be TESTED, keeps `brokenReason`, and warns which wall it ignores; never set by a game), `dlc = { available; enabled; }`, `env`, `platformPreference` (the game's own QUALITY ranking of its pinned platforms, best first — derived automatically for a single-platform matrix), `online` (`false` unshares a NETWORK namespace for the game, making the offline guarantee kernel-enforced rather than a promise), `setupScript` (a store-path executable run in the OUTER phase, before the game's view exists — the per-game escape hatch no option covers), `extraBinds` (THIN-only bind rows in `saveBinds`' shape, but UNIONED across layers so a framework and a game can both contribute) and `extraLowers` (trees unioned into the game dir above the payloads, for content that is neither payload nor DLC), `mesa` (which Mesa the launch's GL/Vulkan userspace comes from; `null` = the host's stack when it has one, else the bundled nixpkgs build), `x87ReducedPrecision` (compute x87 in 64-bit doubles rather than 80-bit extended — ON by default on every backend that has the lever; see D12), `maintainers` (GitHub usernames → `meta.maintainers`, which the pin workflows @mention), and the three namespaced blocks the backends and frameworks own: `wine.*`, `box64.*` (shared with the `fex` and `native` faces) and `steam.*`.
 
 Two options are **unified across backends**:
 
@@ -203,7 +214,7 @@ Two options are **unified across backends**:
 
 **fex** (`backends/fex/default.nix`): `modules = []` (reuses `box64.*`); guest-only library union from the set matching the payload's ABI (`pkgsX86` or `pkgsGuest32`, off `cfg.emulatedPlatform`); the `PT_INTERP`-patched executables as an `extraLowers` overlay with `executables = []` — via the shared `mkPatchedExes` (builders/patched-exes.nix), which the native face uses too, and which takes each executable from the highest-priority game tree that actually provides it; FEX's per-width GL/EGL guest thunks staged under their sonames ahead of the guest set; `FEX_ROOTFS = "/"`; `brokenSystems = [ "x86_64-linux" ]` — the one refusal that is the backend's own (no x86_64-host FEX). An engine that FEX cannot carry records that in ITS OWN module conditioned on `config.backend`, per D4 — `pkgs/games/hollow-knight` does exactly that for the Mono/SMC wall on 16K, which is a property of the engine and not of the backend (D12).
 
-**mkThinBuild** (`backends/mk-thin-build.nix`): the shared thin dispatch-arm assembler. It enforces the **launch-block contract** — required `backend/emulator/env/ldLibraryPath/mangohud`, optional `extraLowers/executables/brokenSystems/brokenReason`; a misspelled or undeclared field is a named eval error — merges backend `broken*` into the app's, stacks enabled DLC above any backend overlay, and calls `mkThinApp`.
+**mkThinBuild** (`backends/mk-thin-build.nix`): the shared thin dispatch-arm assembler. It enforces the **launch-block contract** — required `backend/emulator/env/ldLibraryPath/mangohud`, optional `extraLowers/executables/brokenSystems/brokenReason`; a misspelled or undeclared field is a named eval error — unions the three `meta.broken` claim sources — the game's own `broken.systems`, the backend block's `brokenSystems`, and its own (face × payload arch × host arch) guard, which is what catches an `.apply { backend = …; }` naming a face that cannot execute the payload — stacks enabled DLC above any backend overlay, and calls `mkThinApp`. `brokenReason` is a single string where the claims are many, so it is CHOSEN rather than merged: the first claim that names the host being evaluated, game before guards (a game's verdict survives any change of backend, so naming the backend first would offer a remedy that cannot work). Picking a claim about another host is a live failure mode, not a hypothetical — it reads as a confident explanation of the wrong machine's wall.
 
 ### Builders (lib/builders/)
 
@@ -263,9 +274,14 @@ box64 = import ./box64-tuning.nix;   # { bridgingLibs = p: [ … ]; guestLibs = 
 One module covers three pinned combos; the axes' `mkDefault`s pick gog/windows, and `.apply` selects the rest:
 
 ```
-nix run .#hollow-knight                                                                  # gog/x86_64-windows (wine)
-nix run '.#hollow-knight.apply { fetcher = "steam"; }'                                   # steam/x86_64-windows (wine)
-nix run '.#hollow-knight.apply { fetcher = "steam"; emulatedPlatform = "x86_64-linux"; }'# steam/x86_64-linux (box64)
+# The default combo is a plain attribute path:
+nix run .#hollow-knight        # gog/x86_64-windows (wine)
+
+# An override is a FUNCTION CALL, which a `.#attr` installable cannot express (nix parses the whole
+# string as an attribute path), so it goes through an expression:
+S='(builtins.getFlake (toString ./.)).legacyPackages.${builtins.currentSystem}.hollow-knight'
+nix run --impure --expr "$S"'.apply { fetcher = "steam"; }'                                 # steam/x86_64-windows (wine)
+nix run --impure --expr "$S"'.apply { fetcher = "steam"; emulatedPlatform = "x86_64-linux"; }'  # steam/x86_64-linux (box64)
 ```
 
 The spec (`pkgs/games/hollow-knight/default.nix`, abridged) sets everything conditionally on the axes:
@@ -337,11 +353,11 @@ The DLC framework on the **wine** path (Stellaris, §2, is the thin one): `versi
 
 ## Testing & the "verified working" manifest
 
-**Tier 1 — eval (CI-safe, no payload).** All 17 games' `configFile` + `backend` evaluate on aarch64 **and** x86_64 (the launcher-config JSON is `nix eval`-able via `passthru.configFile` without fetching anything). `nixfmt-rfc-style` over `lib/` + `pkgs/games` + `flake.nix`. The refactor was gated by a **golden semantic diff** of all 20 config JSONs against the pre-refactor tree (only intended diffs: wine configs gained `mode:"prefix"`; thin `scrubPrefixes` reordered to the canonical `sealing.defaultScrub` order); the standing gate is the launcher's own strictness (D3) — a drifted config fails deserialization loudly. `flake.checks` is currently empty; the strategy golden table and `checkX86GuestCache` are backlog.
+**Tier 1 — eval (CI-safe, no payload).** Every packaged game's `configFile` + `backend` evaluates on aarch64 **and** x86_64 (the launcher-config JSON is `nix eval`-able via `passthru.configFile` without fetching anything). `nixfmt-rfc-style` over `lib/` + `pkgs/games` + `flake.nix`. The refactor was gated by a **golden semantic diff** of all 20 config JSONs against the pre-refactor tree (only intended diffs: wine configs gained `mode:"prefix"`; thin `scrubPrefixes` reordered to the canonical `sealing.defaultScrub` order); the standing gate is the launcher's own strictness (D3) — a drifted config fails deserialization loudly. `flake.checks` is currently empty; the strategy golden table and `checkX86GuestCache` are backlog.
 
 **Tier 2 — launch smoke (payload-gated, local only).** `nix run` the title; the window-watcher confirms the window **maps**; screenshot-stddev catches a black window. Not in CI (CI cannot legally fetch payloads).
 
-**Tier 3 — the verified manifest (source of truth).** `docs/verified/<game>.json`, committed as data: `{ date, hostArch, kernel, mesa, box64/fex/wine versions, graphicsBackend, fps, resolution, status, notes }`. This is what actually enforces "hand-tested," is diffable on every emulator bump, and is the authoritative input to `broken.systems` (KSP/Homeworld precedent). It is the maintainable substitute for a perf CI that cannot legally fetch payloads.
+**Tier 3 — the verified manifest (DESIGNED, ONE ENTRY SO FAR).** `docs/verified/<game>.json`, committed as data: `{ date, hostArch, kernel, mesa, box64/fex/wine versions, graphicsBackend, fps, resolution, status, notes }` — diffable on every emulator bump, and the maintainable substitute for a perf CI that cannot legally fetch payloads. **State the reality plainly: the directory currently holds `hollow-knight-win.json` and nothing else.** What actually records per-title status today is the README's supported-games tables plus each game's own `broken.systems`/`broken.reason` (KSP and Homeworld are the precedent), and those are what a reader should trust. Treat this tier as a design that is one game old, not as a populated source of truth — a claim of "hand-tested, see the manifest" is false for every title but one.
 
 ---
 
@@ -355,7 +371,7 @@ The DLC framework on the **wine** path (Stellaris, §2, is the thin one): `versi
 
 ## Status
 
-- **aarch64-linux (16K Asahi)** is the primary, hardware-tested host: the wine path (native + i386 WoW64) and the box64 thin path are verified across the 17 packaged titles (per-title status in `docs/verified/` and `broken.systems`).
+- **aarch64-linux (16K Asahi)** is the primary, hardware-tested host: the wine path (native + i386 WoW64) and the box64 thin path are exercised across the packaged titles, with per-title status in the README's tables and each game's `broken.systems` (`docs/verified/` is the intended machine-readable home for this and currently holds a single entry).
 - **x86_64-linux** is structured and evaluates (same wine source native, standard DXVK/vkd3d, `native` thin backend) but is unbuilt/untested on real hardware.
 - The thin **fex** backend is research/`meta.broken` (D12). **muvm** remains an unshipped escape hatch.
 

@@ -1,0 +1,143 @@
+FutexSpinTest: measure with steady_clock, and give the timed cases a cross-clock tolerance.
+
+`FutexSpin-Timed-{8,16,32,64}bit` arm a 250 ms deadline through SpinWaitLock::Wait and then REQUIRE that
+the elapsed wait, measured with std::chrono::high_resolution_clock, was at least 250 ms. Two distinct
+defects hide in that comparison, and on a stock GitHub aarch64 runner they produced a check-phase
+failure in which three of the four cases failed while the fourth passed in the very same run — same
+binary, same machine, per-case marginality deciding each one.
+
+1. THE MEASURING CLOCK CAN STEP. Under libstdc++, high_resolution_clock is an alias for system_clock,
+   i.e. CLOCK_REALTIME (this build links libstdc++: ENABLE_LIBCXX defaults FALSE and the produced
+   binaries carry DT_NEEDED libstdc++.so.6). Measuring a duration with the realtime clock is wrong
+   regardless of any tolerance: NTP/chrony steps it, and a backward step inside the window shortens the
+   measured wait by an arbitrary amount — CI machines are fresh VMs whose clocks are being actively
+   disciplined. Every measurement in this file moves to steady_clock, which never steps. This also makes
+   FutexSpin-Sleep-8bit sound as-is: its 1 s reference is this_thread::sleep_for, which sleeps on the
+   monotonic clock, so reference and measurement now use the same clock and its bare >= needs no slack.
+
+2. THE TIMED DEADLINE IS ARMED ON A DIFFERENT CLOCK THAN THE ONE CHECKING IT. SpinWaitLock converts the
+   request into cycle-counter ticks:
+
+       TimeoutCycles = 250e6 ns / (1'000'000'000 / CNTFRQ_EL0)      <- both divisions integer
+
+   Wherever the counter frequency divides 1e9 exactly — 25/50/100 MHz parts, and the 1 GHz that ARMv8.6
+   mandates, i.e. essentially every server ARM — the conversion is exact: the wait returns after exactly
+   250 ms of CNTVCT_EL0 time, and the REQUIRE holds only if the measuring clock ran no slower than the
+   counter over the window. CLOCK_MONOTONIC is NTP-slewed by up to 500 ppm, so it can legitimately
+   measure that span as 249.875 ms: exact-or-fail. A part whose frequency does NOT divide evenly passes
+   only by accident — Apple's 24 MHz (measured) truncates 41.667 ns/cycle to 41, overshooting every wait
+   by 1.6%, which is why this never reproduces on an Asahi dev box.
+
+   The timed cases therefore allow 2 ms of slack: ~16x the worst legal slew over the window, while a
+   genuine early return — the property these cases exist to check — still fails by two orders of
+   magnitude.
+
+Note what is NOT wrong here: the emulator. ConvertNanosecondsToCycles errs long or exact on every
+frequency, never short, so a real wait is never cut off early. The defects are entirely in the test's
+choice of measuring clock and its zero-tolerance comparison across clock domains.
+
+--- a/FEXCore/unittests/APITests/FutexSpinTest.cpp	2026-09-20 22:12:49.206418593 -0400
++++ b/FEXCore/unittests/APITests/FutexSpinTest.cpp	2026-09-20 22:12:49.258418035 -0400
+@@ -6,16 +6,31 @@
+ 
+ constexpr auto SleepAmount = std::chrono::milliseconds(250);
+ 
++// The timed cases below arm their deadline in CYCLE-COUNTER ticks (SpinWaitLock converts the request
++// via TimeoutCycles = ns / (1'000'000'000 / CNTFRQ_EL0), both divisions integer) and then measure the
++// elapsed wait with std::chrono — a DIFFERENT clock, so the comparison needs slack for the rate offset
++// between the two. Wherever the counter frequency divides 1e9 evenly (25/50/100 MHz parts, and the 1GHz
++// that ARMv8.6 mandates) the conversion is exact, the wait is exactly the requested span of counter
++// time, and a monotonic clock running NTP-slow by even a fraction of a ppm measures it short: the
++// REQUIRE below is then exact-or-fail. (A part whose frequency does NOT divide evenly passes only by
++// luck — 24MHz truncates 41.667 ns/cycle to 41 and overshoots every wait by 1.6%.)
++//
++// 2ms of slack is ~16x the worst NTP slew (500ppm over 250ms = 125us) yet still fails a genuine early
++// return — the property these cases exist to check — by two orders of magnitude.
++constexpr auto SleepTolerance = std::chrono::milliseconds(2);
++
+ TEST_CASE("FutexSpin-Timed-8bit") {
+   uint8_t Test {};
+ 
+-  auto now = std::chrono::high_resolution_clock::now();
++  auto now = std::chrono::steady_clock::now();
+   FEXCore::Utils::SpinWaitLock::Wait(&Test, 1, SleepAmount);
+-  auto end = std::chrono::high_resolution_clock::now();
++  auto end = std::chrono::steady_clock::now();
+   auto diff = end - now;
+ 
+-  // The futex spinwait needs to have slept for at /least/ the amount specified. It will always run slightly late.
+-  REQUIRE(std::chrono::duration_cast<std::chrono::nanoseconds>(diff) >= std::chrono::duration_cast<std::chrono::nanoseconds>(SleepAmount));
++  // The futex spinwait needs to have slept for at /least/ the amount specified, less the cross-clock
++  // tolerance above. It will always run slightly late.
++  REQUIRE(std::chrono::duration_cast<std::chrono::nanoseconds>(diff) >=
++          std::chrono::duration_cast<std::chrono::nanoseconds>(SleepAmount - SleepTolerance));
+ }
+ 
+ TEST_CASE("FutexSpin-Sleep-8bit") {
+@@ -26,10 +41,10 @@
+   std::chrono::nanoseconds SleptAmount;
+ 
+   std::thread t([&Test, &SleptAmount, &ActualSpinLoop]() {
+-    auto now = std::chrono::high_resolution_clock::now();
++    auto now = std::chrono::steady_clock::now();
+     ActualSpinLoop.store(1);
+     FEXCore::Utils::SpinWaitLock::Wait(&Test, 1);
+-    auto end = std::chrono::high_resolution_clock::now();
++    auto end = std::chrono::steady_clock::now();
+     SleptAmount = end - now;
+   });
+ 
+@@ -53,35 +68,41 @@
+ TEST_CASE("FutexSpin-Timed-16bit") {
+   uint16_t Test {};
+ 
+-  auto now = std::chrono::high_resolution_clock::now();
++  auto now = std::chrono::steady_clock::now();
+   FEXCore::Utils::SpinWaitLock::Wait(&Test, 1, SleepAmount);
+-  auto end = std::chrono::high_resolution_clock::now();
++  auto end = std::chrono::steady_clock::now();
+   auto diff = end - now;
+ 
+-  // The futex spinwait needs to have slept for at /least/ the amount specified. It will always run slightly late.
+-  REQUIRE(std::chrono::duration_cast<std::chrono::nanoseconds>(diff) >= std::chrono::duration_cast<std::chrono::nanoseconds>(SleepAmount));
++  // The futex spinwait needs to have slept for at /least/ the amount specified, less the cross-clock
++  // tolerance above. It will always run slightly late.
++  REQUIRE(std::chrono::duration_cast<std::chrono::nanoseconds>(diff) >=
++          std::chrono::duration_cast<std::chrono::nanoseconds>(SleepAmount - SleepTolerance));
+ }
+ 
+ TEST_CASE("FutexSpin-Timed-32bit") {
+   uint32_t Test {};
+ 
+-  auto now = std::chrono::high_resolution_clock::now();
++  auto now = std::chrono::steady_clock::now();
+   FEXCore::Utils::SpinWaitLock::Wait(&Test, 1, SleepAmount);
+-  auto end = std::chrono::high_resolution_clock::now();
++  auto end = std::chrono::steady_clock::now();
+   auto diff = end - now;
+ 
+-  // The futex spinwait needs to have slept for at /least/ the amount specified. It will always run slightly late.
+-  REQUIRE(std::chrono::duration_cast<std::chrono::nanoseconds>(diff) >= std::chrono::duration_cast<std::chrono::nanoseconds>(SleepAmount));
++  // The futex spinwait needs to have slept for at /least/ the amount specified, less the cross-clock
++  // tolerance above. It will always run slightly late.
++  REQUIRE(std::chrono::duration_cast<std::chrono::nanoseconds>(diff) >=
++          std::chrono::duration_cast<std::chrono::nanoseconds>(SleepAmount - SleepTolerance));
+ }
+ 
+ TEST_CASE("FutexSpin-Timed-64bit") {
+   uint64_t Test {};
+ 
+-  auto now = std::chrono::high_resolution_clock::now();
++  auto now = std::chrono::steady_clock::now();
+   FEXCore::Utils::SpinWaitLock::Wait(&Test, 1, SleepAmount);
+-  auto end = std::chrono::high_resolution_clock::now();
++  auto end = std::chrono::steady_clock::now();
+   auto diff = end - now;
+ 
+-  // The futex spinwait needs to have slept for at /least/ the amount specified. It will always run slightly late.
+-  REQUIRE(std::chrono::duration_cast<std::chrono::nanoseconds>(diff) >= std::chrono::duration_cast<std::chrono::nanoseconds>(SleepAmount));
++  // The futex spinwait needs to have slept for at /least/ the amount specified, less the cross-clock
++  // tolerance above. It will always run slightly late.
++  REQUIRE(std::chrono::duration_cast<std::chrono::nanoseconds>(diff) >=
++          std::chrono::duration_cast<std::chrono::nanoseconds>(SleepAmount - SleepTolerance));
+ }

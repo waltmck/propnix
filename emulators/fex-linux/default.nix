@@ -54,12 +54,13 @@ let
   # The source these patches were cut against.
   expectedVersion = "2605";
 in
-lib.throwIf (fex.version or "" != expectedVersion) ''
-  emulators/fex-linux: nixpkgs' fex is version ${fex.version or "<unknown>"}, but ./patches is cut
-  against ${expectedVersion}. Re-cut them against the new source (and re-run the i386/x86_64 static-guest
-  check) rather than loosening this assert — a partially-applied large-host-page patch produces an
-  emulator that starts and then faults unpredictably, which is expensive to diagnose.
-''
+lib.throwIf (fex.version or "" != expectedVersion)
+  ''
+    emulators/fex-linux: nixpkgs' fex is version ${fex.version or "<unknown>"}, but ./patches is cut
+    against ${expectedVersion}. Re-cut them against the new source (and re-run the i386/x86_64 static-guest
+    check) rather than loosening this assert — a partially-applied large-host-page patch produces an
+    emulator that starts and then faults unpredictably, which is expensive to diagnose.
+  ''
   (
     fex.overrideAttrs (old: {
       pname = "fex-linux";
@@ -75,6 +76,23 @@ lib.throwIf (fex.version or "" != expectedVersion) ''
         shopt -u nullglob
       ''
       + (old.postPatch or "");
+
+      # ── WHY A TEST FAILURE HERE IS A CI-ONLY EVENT ─────────────────────────────────────────────────
+      # nixpkgs' fex decides whether to test from the BUILDER's page size: its preConfigure runs
+      # `getconf PAGESIZE` and, on anything but 4 KiB, unsets doCheck and configures
+      # -DBUILD_TESTING:BOOL=FALSE ("running the tests isn't supported on non-4K pagesize systems").
+      # This 16 KiB Asahi host therefore compiles and runs NO upstream test, while the 4 KiB CI runner
+      # runs all 24 — so `nix build` succeeding here says NOTHING about the check phase, and a green
+      # local build is not evidence when CI's check phase is what failed. (The installed tree is the
+      # same either way: everything BUILD_TESTING gates is build-tree only, TestHarnessRunner has no
+      # install(), so this changes what is CHECKED, never what is produced.)
+      #
+      # The timed futex tests that failed on that runner are FIXED, not skipped — patches/0004, two
+      # defects: the file measured durations with high_resolution_clock, which under libstdc++ is the
+      # STEPPABLE realtime clock (now steady_clock throughout); and the timed cases arm their deadline
+      # in cycle-counter ticks then assert on std::chrono with no tolerance, which is exact-or-fail on
+      # every part whose counter frequency divides 1e9 evenly (now 2 ms of slack — ~16x the worst legal
+      # NTP slew over the window, while a genuine early return still fails). All 24 tests still run.
 
       doInstallCheck = true;
       # A FEX that cannot execute a guest is the failure mode this package exists to prevent, and it is

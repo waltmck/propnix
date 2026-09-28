@@ -646,7 +646,15 @@ fn mount_overlay(
                 Some(cs) => format!("{lower}:{cs}"),
                 None => lower.to_string(),
             };
-            (ld, "")
+            // `userxattr` here too, not only on the skeleton branch. Every propnix overlay is mounted in
+            // an unprivileged userns, where the `trusted.overlay.*` namespace is unreachable no matter
+            // what — so without this, any upper-bearing mount from this branch (a writable bind carrying
+            // a child mountpoint, e.g. a save dir whose settings file is split out) makes the kernel's
+            // workdir xattr probe fail, warn to dmesg on EVERY launch ("failed to set xattr on upper …
+            // try mounting with 'userxattr'"), and silently degrade the mount (noxattr: no opaque dirs,
+            // uuid=null). With it, a saves fs with user.* xattr support (a stated host requirement) keeps
+            // full overlay semantics; one without degrades exactly as before, minus the noise.
+            (ld, ",userxattr")
         }
     };
     // Read-only: a lowerdir-only overlay (no upper/work) — the merged tree is read-only.

@@ -5,9 +5,9 @@
         {
           "pname": "no-mans-sky-win",
           "productId": "1446213994",
-          "buildId": "60043703052147687",
-          "version": "7.03_Cosmos_179109",
-          "outputHash": "sha256-iK1wVKo1YzI23Bzu9W/VVyYilKO4l891othTE6FvHK8=",
+          "buildId": "60061959462841573",
+          "version": "7.04_Cosmos_179666",
+          "outputHash": "sha256-LKwvboiwIyfNoWLVYA5JIEnzznsr5oslxINzjIHQHA8=",
           "outputHashMode": "recursive",
           "os": "windows",
           "lang": "en",

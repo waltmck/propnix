@@ -75,17 +75,6 @@ jobs:
           # preferring the App token.
           persist-credentials: false
 
-      # A PR authored by GITHUB_TOKEN does NOT trigger other workflows, so eval.yml would never gate it.
-      # An App token makes the PR look like a real actor and CI runs. Optional: without the secrets the
-      # run still works, and the PR step says clearly that CI must be kicked by hand.
-      - name: Mint an App token (optional)
-        id: app
-        if: ${{ vars.PROPNIX_APP_ID != '' }}
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ vars.PROPNIX_APP_ID }}
-          private-key: ${{ secrets.PROPNIX_APP_PRIVATE_KEY }}
-
       - uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |
@@ -160,6 +149,20 @@ jobs:
       - name: Re-pin the games that moved
         run: ci/pin-refresh.sh repin "$RUNNER_TEMP/pins" x86_64-linux
 
+      # A PR authored by GITHUB_TOKEN does NOT trigger other workflows, so eval.yml would never gate it.
+      # An App token makes the PR look like a real actor and CI runs. Optional: without the secrets the
+      # run still works, and the PR step says clearly that CI must be kicked by hand.
+      #
+      # Minted AFTER the re-pin, not at job start: an installation token lives one hour, and a re-pin of
+      # a big title alone can outlast that. Every step below finishes in seconds.
+      - name: Mint an App token (optional)
+        id: app
+        if: ${{ vars.PROPNIX_APP_ID != '' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.PROPNIX_APP_ID }}
+          private-key: ${{ secrets.PROPNIX_APP_PRIVATE_KEY }}
+
       # Issues come BEFORE the PR: if the PR step fails for a permissions reason we still want the human
       # -actionable games on record.
       - name: Open or update issues for games a human must handle
@@ -191,8 +194,9 @@ jobs:
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/pins"
-          # One API call for every open issue, then act only on the intersection.
-          ci/pin-issue.sh list-open > "$out/open-issues" || : > "$out/open-issues"
+          # One API call for every open issue, then act only on the intersection. No open issues is
+          # empty output with exit 0, so a failure here is a real API error and must fail the step.
+          ci/pin-issue.sh list-open > "$out/open-issues"
           # `frozen` is deliberately NOT included: a held game is not "caught up", and its issue is
           # about something else.
           jq -r '.[] | select(.status == "up-to-date") | .game' "$out/summary.json" \

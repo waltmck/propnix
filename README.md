@@ -13,33 +13,48 @@ nix run .#propnix -- cred add steam   # And follow the instructions to login
 nix run .#factorio --extra-sandbox-paths /propnix=/var/lib/propnix
 ```
 
-This is fully reproducible (every download is pinned in the game's `versions.json` — GOG Windows builds
-by Galaxy `buildId`, Steam builds by depot manifest); it downloads the game using your credentials as a
-FOD, then wraps it so that it looks like a native linux application.
+This is fully reproducible (every download is pinned in the game's `versions.json`). The derivation will
+download the game as a FOD using your credentials, then wrap it to look like a native linux application.
 
-Tell propnix which stores you have (a ranked preference; resolved purely at eval — credentials are never
-probed): `propnix.lib.mkScope { inherit pkgs; config.preferredFetchers = [ "steam" "gog" ]; }` — see
+You can globally configure which fetchers to download from by using
+```nix
+with propnix.lib.mkScope { inherit pkgs; config.preferredFetchers = /* subset of */ [ "steam" "gog" ]; };
+```
+
+Alternatively, you can override the fetcher used on a per-game basis depending on your ownership like
+```nix
+factorio.apply { fetcher = "gog" }
+```
+
+This `apply` idiom (inspired by [wrappers](https://github.com/Lassulus/wrappers)) is a common general
+pattern: almost every knob for propnix packages is tunable via a module system exposed with `apply`.
+
 **Configuration** in [DOCS.md](DOCS.md).
 
 ## Supported games
 
-Two views of the same fetch matrix. The first answers **"what will run on my machine?"**; the second
-answers **"which store do I need an account with, and what does it give me?"**
+Core to Nix is the [concept]](https://ryantm.github.io/nixpkgs/stdenv/cross-compilation/#sec-cross-packaging)
+of a `buildPlatform`, `hostPlatform`, and `targetPlatform`. The last can be safely
+ignored here; the first two are attributes of a derivation that describe respectively the architecture needed
+to _build_ the package and the architecture needed to _run_ the package. Although `propnix` provides a cache
+for the compiled portions of the project (e.g. our patched WINE and FEX), in order to support users who want
+to build from source we will always make `buildPlatform` equal `hostPlatform`.
 
-**How to read these tables.** Every game is packaged along two orthogonal axes — `fetcher` (which store the
-payload comes from) and `emulatedPlatform` (the OS+ABI of the build being run) — and a cell lists the
-`emulatedPlatform` values valid for that row and column. **Bold** marks what you get by default, with no
-flags: propnix picks it from the game's own quality ranking, filtered by what your host can run. Anything
-else in the cell is selectable explicitly:
+This project is somewhat unusual for Nix because it packages binaries built for a different architecture
+alongside their emulation stacks. In our case, a different abstraction is necessary: what is the architecture
+that the proprietary binary was built for (and that we need to emulate)? We call this `emulatedPlatform`. Often
+a single game may be available on multiple `emulatedPlatform`s, so the purview of this project is to support
+running several of these and experimentally find the best one (balancing performance and compatibility).
 
-```sh
-nix run .#hollow-knight              # the bold cell — the default
-nix run .#civilization-5.withAllDlc  # a plain attribute path, so it works the same way
-```
+Often different `emulatedPlatform`s will be available on different fetchers (for example, Factorio for `aarch64-linux`
+is available on Steam but not on GoG). If the `emulatedPlatform` is overridden with `apply`, the module system will
+try to pick a fetcher to satisfy that preference (and it will fail with an error if it is unable to). 
 
-Any **other** cell is an override, and `nix run .#…` cannot express one: its installable is an attribute
-*path*, so a function call like `.apply { … }` is read as part of the name and fails with "does not provide
-attribute". Reach the override surface through an expression instead:
+**How to read these tables.** The below table give a matrix of supported fetchers and `emulatedPlatform`s on different
+hosts. **Bold** marks the default chosen by the project: propnix picks it from the game's own quality ranking, filtered
+by what your host can run.
+
+As usual, it is possible to pick the `emulatedPlatform` yourself using `apply`. An example:
 
 ```sh
 nix run --impure --expr '(builtins.getFlake (toString ./.)).legacyPackages.${builtins.currentSystem}.hollow-knight.apply { emulatedPlatform = "x86_64-windows"; }'
@@ -49,7 +64,7 @@ nix run --impure --expr '(builtins.getFlake (toString ./.)).legacyPackages.${bui
 ### Table 1 (by host): which builds run on my machine?
 
 Rows are games, columns are the architecture you are running on, and cells are the `emulatedPlatform` values 
-that work there.
+that work there. The bolded `emulatedPlatform` is the default one.
 
 | game | on an `aarch64-linux` host | on an `x86_64-linux` host |
 |---|---|---|
@@ -125,10 +140,9 @@ game with entries under only one column can only be built by someone who owns it
 | `victoria-3` | — | x86_64-windows |
 | `witcher-3` | x86_64-windows | — |
 
-When a game is pinned from both stores, the default fetcher follows your `preferredFetchers` config
-(every registered fetcher in registry order, unless you narrow it) — so a gog-only setup automatically
-falls back to the GOG build of a game whose Steam build would otherwise win, provided the game's own
-ranking sanctions that platform. Nothing outside that ranking is ever selected silently.
+When a game is pinned from both stores, the default fetcher follows your `preferredFetchers` config,
+so a gog-only setup automatically falls back to the GOG build of a game whose Steam build would otherwise win (provided the game's own
+ranking sanctions that platform).
 
 ## Requirements
 

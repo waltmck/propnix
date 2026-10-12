@@ -5,9 +5,9 @@
         {
           "pname": "witcher-3-win",
           "productId": "1495134320",
-          "buildId": "57606063263997132",
-          "version": "4.04a_REDkit_Update_2",
-          "outputHash": "sha256-/ILe+qI+Jxe5yrhAfMXqAoC8dZFNauHRAoeBFICHQSQ=",
+          "buildId": "60108119997011548",
+          "version": "5.01",
+          "outputHash": "sha256-owaNM4UArwgBm+tYEkM9IQuyJFOe8DBafxLD6/5YQsQ=",
           "outputHashMode": "recursive",
           "os": "windows",
           "lang": "en",

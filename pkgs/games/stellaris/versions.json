@@ -6,23 +6,23 @@
           "pname": "stellaris-linux-binaries",
           "appId": 281990,
           "depotId": 281994,
-          "manifestId": "6500770057213784155",
-          "version": "25505771",
-          "outputHash": "sha256-ZfZguUbcbA0gNh8EsCuLXeuPGilzLs7DqnMrZKM0DUY=",
+          "manifestId": "1994331557761953329",
+          "version": "25664273",
+          "outputHash": "sha256-jKsEwQ4tGev343xstFOaNXI4V1roOZp6VwMyQ+YTSNw=",
           "title": "Stellaris (Linux, Steam)",
           "depotKeySha256": "c4afc23459f1a268dbf249e85abacc551d4bd7ee4da15a45df9f42b6f92166a0",
-          "manifestSha256": "a0de6a5b92eefda8ea260b6cea701701d1bfd0e8284cfc459c6d17fc7dec28c2"
+          "manifestSha256": "e0a65f541ea719273a60beaa981d6ba7d5eafa4930944b9c6fe0f55c3c4ed85f"
         },
         {
           "pname": "stellaris-linux-data",
           "appId": 281990,
           "depotId": 281991,
-          "manifestId": "4474190844677920248",
-          "version": "25505771",
-          "outputHash": "sha256-G1Sd4WQ6C7SetJKKbWLcBcsFPxvc5BwmGqcTByl8ljc=",
+          "manifestId": "7568313918290590295",
+          "version": "25664273",
+          "outputHash": "sha256-Oc93rC6SWvu5QBZwl1s/XxnawRuxjC8odMXUnz6430I=",
           "title": "Stellaris (Linux, Steam)",
           "depotKeySha256": "4e11012016545171c7e240de4ec8142718a9897ef93ec526251ecde8ed2537d5",
-          "manifestSha256": "fd03c5acb24a5cdb72957894128e352c9c6d2cd0590e913b2bc5720df721890e"
+          "manifestSha256": "a8ce26fa07f851652ef3e8035e6cb60825e44d11480514648e3bbd24b07580ab"
         }
       ]
     }

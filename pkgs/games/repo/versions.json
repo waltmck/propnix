@@ -6,10 +6,12 @@
           "pname": "repo-3241661",
           "appId": 3241660,
           "depotId": 3241661,
-          "manifestId": "8225435692675993447",
-          "version": "23363152",
-          "outputHash": "sha256-/tue1px3NtIl2JYv0Bo0iw95ZpBIqu4GlDTsXXJK+SU=",
-          "title": "R.E.P.O. (windows, Steam)"
+          "manifestId": "1154737144948731327",
+          "version": "26294889",
+          "outputHash": "sha256-Pur8wpg63gxriKjMubb2gQd2KKcpb76HEqxl7/mlxUc=",
+          "title": "R.E.P.O. (windows, Steam)",
+          "depotKeySha256": "ec7985745b8bf985c24c848ff0309b6ddf00b3ae59b1ae373d029836aa1160d6",
+          "manifestSha256": "52bf609561232ebaf7f2e9e9d611a7ef974592fb4b124def2868a13b1d2674b9"
         }
       ]
     }

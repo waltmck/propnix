@@ -5,9 +5,9 @@
         {
           "pname": "factorio-win",
           "productId": "1238653230",
-          "buildId": "60146039532378429",
-          "version": "2.1.23",
-          "outputHash": "sha256-knGVCSekADvVRJXMFntrUqT0nrMpjZ3FnfIuQE+dHls=",
+          "buildId": "60166908948733930",
+          "version": "2.1.24",
+          "outputHash": "sha256-khyOaND9L/xgjOCOiaEVlCAmU3PowTv+fREIRBopknM=",
           "outputHashMode": "recursive",
           "os": "windows",
           "lang": "en",
@@ -22,13 +22,13 @@
           "pname": "factorio-win-steam",
           "appId": 427520,
           "depotId": 427521,
-          "manifestId": "1465536947685815302",
+          "manifestId": "422768584032543502",
           "branch": "experimental",
-          "version": "26076417",
-          "outputHash": "sha256-4uRJtSBPnixPEwc8eD0DlZai/blqd4r2J8QTNFioH+A=",
+          "version": "26246811",
+          "outputHash": "sha256-LnvuActL08Rc/6xOD2seTtKw5ksqXjuKNUsMvnAEDh8=",
           "title": "Factorio (windows, Steam)",
           "depotKeySha256": "59ec40ecf05586f96b9dcd19b24ebb4a27fae5d6688599a3bfbc31b3b83d2f3a",
-          "manifestSha256": "3e2bde14b591c4e09ebd66d7f5a8d58467ba9caeeaeef09b25cae50314601490"
+          "manifestSha256": "00d334d39ea580be8dadbf8fd97111e2fb30af464e7f82e6fe5cec20fd521865"
         }
       ],
       "aarch64-linux": [
@@ -36,13 +36,13 @@
           "pname": "factorio-linux-steam",
           "appId": 427520,
           "depotId": 427523,
-          "manifestId": "2745529165053833293",
+          "manifestId": "4835038178438493428",
           "branch": "experimental",
-          "version": "26076417",
-          "outputHash": "sha256-c/ONuap5L87fMe4HW3IRe/EPTiZwlP9UYaNtc1+YOvo=",
+          "version": "26246811",
+          "outputHash": "sha256-/j52pR7TNdiVHEDG9Wo0bqudRZ+NQUer1MBm3HYy56g=",
           "title": "Factorio (linux, Steam)",
           "depotKeySha256": "a23e1f42de16608093ac15cbee860e3dada5d34eb9352b1018f06939ba188cc6",
-          "manifestSha256": "607a82a179d840449e06952bfde2f093a8cb2da9f93ca4e076e1d1ec82662b82"
+          "manifestSha256": "8973444262adc5d7309e7cbd80e3265f0a5c7a7d1367bc7cb572e92f05a74e14"
         }
       ],
       "x86_64-linux": [
@@ -50,13 +50,13 @@
           "pname": "factorio-linux-steam",
           "appId": 427520,
           "depotId": 427523,
-          "manifestId": "2745529165053833293",
+          "manifestId": "4835038178438493428",
           "branch": "experimental",
-          "version": "26076417",
-          "outputHash": "sha256-c/ONuap5L87fMe4HW3IRe/EPTiZwlP9UYaNtc1+YOvo=",
+          "version": "26246811",
+          "outputHash": "sha256-/j52pR7TNdiVHEDG9Wo0bqudRZ+NQUer1MBm3HYy56g=",
           "title": "Factorio (linux, Steam)",
           "depotKeySha256": "a23e1f42de16608093ac15cbee860e3dada5d34eb9352b1018f06939ba188cc6",
-          "manifestSha256": "607a82a179d840449e06952bfde2f093a8cb2da9f93ca4e076e1d1ec82662b82"
+          "manifestSha256": "8973444262adc5d7309e7cbd80e3265f0a5c7a7d1367bc7cb572e92f05a74e14"
         }
       ]
     }
@@ -65,10 +65,10 @@
     "space-age": {
       "pname": "factorio-space-age-win",
       "productId": "1238653230",
-      "buildId": "60146039532378429",
-      "version": "2.1.23",
+      "buildId": "60166908948733930",
+      "version": "2.1.24",
       "dlcId": "1831417704",
-      "outputHash": "sha256-GyxpBJvH7AazYP4P+Xy4tWc/wdsQGaiozArS+GYL+bw=",
+      "outputHash": "sha256-fDv5kUZnxi3B19OTO2lQzwF6AC26HCUQyLVYPY7IdSk=",
       "outputHashMode": "recursive",
       "os": "windows",
       "lang": "en",
@@ -80,26 +80,26 @@
       "appId": 427520,
       "depotId": 645393,
       "dlcAppId": 645390,
-      "manifestId": "2163546417284355313",
+      "manifestId": "7435081102448144579",
       "branch": "experimental",
-      "version": "26076417",
-      "outputHash": "sha256-cIP5bHwjWUdVQB8UuXUSWo3bv1qPGMiKz8d5V4qL6SA=",
+      "version": "26246811",
+      "outputHash": "sha256-ojMODLquvBO2N9LqMVePZbrzV+fa4wfplDCSj9v8qnc=",
       "title": "Factorio: Space Age (windows, Steam)",
       "depotKeySha256": "d69d2817e7afe138ea55d87da1183b1dcf2f4200617f61e667b9e41cb829c120",
-      "manifestSha256": "dec391d7c2c99ec49a230f9bbde2bff021764fe656fe0900edca3e8e3a1c6540"
+      "manifestSha256": "1e952dce9f01767e52c856a30a0a613de2909dc231751f5f86ad009f070e14ab"
     },
     "space-age-steam-linux": {
       "pname": "factorio-space-age-linux-steam",
       "appId": 427520,
       "depotId": 645391,
       "dlcAppId": 645390,
-      "manifestId": "5460750201911482965",
+      "manifestId": "7593083902538539794",
       "branch": "experimental",
-      "version": "26076417",
-      "outputHash": "sha256-9RMIoEXlDb1mVTxV6Nq0YKfa1BYD94tHCPDUZifTwxI=",
+      "version": "26246811",
+      "outputHash": "sha256-Yfki8PNQMvAApl1UC9ox738PjKT/sLKWbHHBbh5wFOE=",
       "title": "Factorio: Space Age (linux, Steam)",
       "depotKeySha256": "d74fffeb6207d7eaa6cdb2292ec427bdd81f2031dc0fc61cca7a4210649f1fdd",
-      "manifestSha256": "6a32363f8ccc8b8a113fc4125ff385e532e36ee694ab64c8ed1990b865159883"
+      "manifestSha256": "716c1b75b6c542a225f46017fb1f3ce266623d5e54c9e8b38cfce4ef1a136ac2"
     }
   }
 }

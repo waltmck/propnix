@@ -74,20 +74,26 @@ $(saidwhat)"
 }
 
 # The attrs cachix.yml builds FOR THIS SYSTEM: a job step passes `system` + `attrs` to the composite
-# action, either literally or through its matrix, so read both shapes and keep the ones whose system
-# matches. `${{ … }}` templates are resolved against the job's own matrix include list.
-mapfile -t covered < <(
-  yq -o=json '.jobs' "$workflow" | jq -r --arg sys "$sys" '
+# build action, either literally or through its matrix, so read both shapes and keep the ones whose
+# system matches. `${{ … }}` templates are resolved against the job's own matrix include list. ONLY
+# steps that use the build action count — any other step's `with:` (a nix installer's config, a
+# cachix pull) carries no `attrs`, and feeding its nulls to `test` once aborted jq half-way, which
+# left a PARTIAL list and a false "7 packages uncovered". A parse failure is therefore fatal here, not
+# a shorter list.
+build_action='./.github/actions/build-and-push'
+covered_text=$(
+  yq -o=json '.jobs' "$workflow" | jq -r --arg sys "$sys" --arg uses "$build_action" '
     to_entries[] | .value as $job
-    | ($job.steps // [])[] | select(.with != null) | .with as $w
+    | ($job.steps // [])[] | select(.uses == $uses) | (.with // {}) as $w
     | ($job.strategy.matrix.include // [{}]) as $inc
     | $inc[] | . as $m
-    | (if ($w.system | test("matrix\\.")) then ($m.system // "") else $w.system end) as $s
-    | (if ($w.attrs  | test("matrix\\.")) then ($m.attrs  // "") else $w.attrs  end) as $a
+    | (if (($w.system // "") | test("matrix\\.")) then ($m.system // "") else ($w.system // "") end) as $s
+    | (if (($w.attrs  // "") | test("matrix\\.")) then ($m.attrs  // "") else ($w.attrs  // "") end) as $a
     | select($s == $sys) | $a | split(" ")[] | select(length > 0)
   ' | sort -u
-)
-[ ${#covered[@]} -gt 0 ] || {
+) || die "parsing $workflow for its build steps failed — the parser is broken, not the policy"
+mapfile -t covered <<<"$covered_text"
+[ -n "$covered_text" ] && [ ${#covered[@]} -gt 0 ] || {
   echo "cache-audit($sys): parsed NO attrs out of $workflow — the parser is broken, not the policy" >&2
   exit 1
 }

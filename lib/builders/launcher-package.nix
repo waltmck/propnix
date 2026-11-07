@@ -1,6 +1,6 @@
 # builders/launcher-package.nix — mkLauncherPackage: the shared packaging TAIL of every propnix app.
 # Both builders (wine.nix, thin.nix) compute their launcher config JSON + icon tree, then delegate here for
-# the parts that are backend-independent: the `bin/<pname>` wrapper (makeWrapper around propnix-launcher
+# the parts that are backend-independent: the `bin/<pname>` wrapper (makeBinaryWrapper around propnix-launcher
 # with the baked config path), the `.desktop` entry (+ symbolic icon), meta.broken gating, and the final
 # symlinkJoin. The configFile IS the launcher↔wrapper interface (PLAN2 §4): Nix computes the intended
 # state; the launcher enforces it.
@@ -8,7 +8,7 @@
   lib,
   stdenv,
   runCommandLocal,
-  makeWrapper,
+  makeBinaryWrapper,
   symlinkJoin,
   propnix-launcher,
   mkDesktopItem,
@@ -44,11 +44,15 @@
   extraChecks ? [ ],
 }:
 let
-  wrapper = runCommandLocal "${pname}-launcher-wrapper" { nativeBuildInputs = [ makeWrapper ]; } ''
-    mkdir -p "$out/bin"
-    makeWrapper ${propnix-launcher}/bin/propnix-launcher "$out/bin/${pname}" \
-      --add-flags "--config ${configFile}"
-  '';
+  wrapper =
+    runCommandLocal "${pname}-launcher-wrapper" { nativeBuildInputs = [ makeBinaryWrapper ]; }
+      ''
+        mkdir -p "$out/bin"
+        # A BINARY wrapper: this is the per-launch entry every game goes through, and its one job
+        # (exec the launcher with --config) needs no shell.
+        makeBinaryWrapper ${propnix-launcher}/bin/propnix-launcher "$out/bin/${pname}" \
+          --add-flags "--config ${configFile}"
+      '';
 
   # The launcher's KWin-authorization desktop entry (see propnix-launcher's postFixup: it is what grants
   # the launcher binary KDE's window-management global for the raise + window-watcher paths), linked into

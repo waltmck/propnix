@@ -127,7 +127,8 @@ propnix/
 ├── ci/                            # the gate scripts CI runs: eval-matrix.sh (pinned game × fetcher ×
 │                                  #   platform), cache-audit.sh (nothing non-unfree left uncached),
 │                                  #   pin-refresh.sh + pin-issue.sh (+ its offline test)
-├── .github/workflows/             # eval.yml (PR gates) · cachix.yml (build + push redistributables)
+├── .github/workflows/             # eval.yml (pure gates on every push + PR, tree-hash memo, cancels
+│                                  #   superseded runs) · cachix.yml (build + push redistributables)
 │                                  #   auto-update.yml (weekly pin refresh) · pin-issues.yml
 ├── tools/unwind-guest-stack.py    # exact x86_64 guest-stack unwinder for FEX-under-ARM64EC-wine,
 │                                  #   where neither winedbg nor FEX can produce a backtrace

@@ -27,7 +27,40 @@
           "outputHash": "sha256-WsnQrQsCiqpYDoIE8TVR1DujmmEKBYmCbzJlCb/TIns=",
           "depotKeySha256": "ba36799f8454cf9a3e0becc169d5a120b8c2350a59533e56d4f2f156169c3cc0",
           "manifestSha256": "861c6c90ac2edfddb3510b317cf868e002e6c24c492ebd4f15a50189d6041b9c",
-          "title": "Baldur's Gate 3 (windows binaries, Steam)"
+          "title": "Baldur's Gate 3 (windows binaries, Steam)",
+          "steamApiInterfaces": [
+            "STEAMAPPLIST_INTERFACE_VERSION001",
+            "STEAMAPPS_INTERFACE_VERSION008",
+            "STEAMHTMLSURFACE_INTERFACE_VERSION_005",
+            "STEAMHTTP_INTERFACE_VERSION003",
+            "STEAMINVENTORY_INTERFACE_V003",
+            "STEAMMUSICREMOTE_INTERFACE_VERSION001",
+            "STEAMMUSIC_INTERFACE_VERSION001",
+            "STEAMPARENTALSETTINGS_INTERFACE_VERSION001",
+            "STEAMREMOTEPLAY_INTERFACE_VERSION001",
+            "STEAMREMOTESTORAGE_INTERFACE_VERSION016",
+            "STEAMSCREENSHOTS_INTERFACE_VERSION003",
+            "STEAMUGC_INTERFACE_VERSION017",
+            "STEAMUSERSTATS_INTERFACE_VERSION012",
+            "STEAMVIDEO_INTERFACE_V002",
+            "SteamClient017",
+            "SteamClient020",
+            "SteamController008",
+            "SteamFriends017",
+            "SteamGameServer015",
+            "SteamGameServerStats001",
+            "SteamInput006",
+            "SteamMatchGameSearch001",
+            "SteamMatchMaking009",
+            "SteamMatchMakingServers002",
+            "SteamNetworking006",
+            "SteamNetworkingMessages002",
+            "SteamNetworkingSockets012",
+            "SteamNetworkingUtils004",
+            "SteamParties002",
+            "SteamUser023",
+            "SteamUtils010"
+          ]
         },
         {
           "pname": "baldurs-gate-3-1419653",
@@ -38,7 +71,40 @@
           "outputHash": "sha256-jLv5f4y80isrwF2Lp0Xyx0BUpNEz8BcZOH0agIhOpO0=",
           "depotKeySha256": "e9abc980babdbe39160a20fb491f41e9f3365f0d10965f4f594a89f31c163770",
           "manifestSha256": "646eb2308e8626e30b8f8c6f794f2df78bef4fb1c8abe6e5126e4db935d57f1d",
-          "title": "Baldur's Gate 3 (launcher, Steam)"
+          "title": "Baldur's Gate 3 (launcher, Steam)",
+          "steamApiInterfaces": [
+            "STEAMAPPLIST_INTERFACE_VERSION001",
+            "STEAMAPPS_INTERFACE_VERSION008",
+            "STEAMHTMLSURFACE_INTERFACE_VERSION_005",
+            "STEAMHTTP_INTERFACE_VERSION003",
+            "STEAMINVENTORY_INTERFACE_V003",
+            "STEAMMUSICREMOTE_INTERFACE_VERSION001",
+            "STEAMMUSIC_INTERFACE_VERSION001",
+            "STEAMPARENTALSETTINGS_INTERFACE_VERSION001",
+            "STEAMREMOTEPLAY_INTERFACE_VERSION001",
+            "STEAMREMOTESTORAGE_INTERFACE_VERSION016",
+            "STEAMSCREENSHOTS_INTERFACE_VERSION003",
+            "STEAMUGC_INTERFACE_VERSION016",
+            "STEAMUSERSTATS_INTERFACE_VERSION012",
+            "STEAMVIDEO_INTERFACE_V002",
+            "SteamClient017",
+            "SteamClient020",
+            "SteamController008",
+            "SteamFriends017",
+            "SteamGameServer014",
+            "SteamGameServerStats001",
+            "SteamInput006",
+            "SteamMatchGameSearch001",
+            "SteamMatchMaking009",
+            "SteamMatchMakingServers002",
+            "SteamNetworking006",
+            "SteamNetworkingMessages002",
+            "SteamNetworkingSockets012",
+            "SteamNetworkingUtils004",
+            "SteamParties002",
+            "SteamUser021",
+            "SteamUtils010"
+          ]
         },
         {
           "pname": "baldurs-gate-3-1086941",
@@ -49,7 +115,8 @@
           "outputHash": "sha256-JNud98WoOXtwp8lkEXynIxZU3U5fEeDjyOoNaiVXb6c=",
           "depotKeySha256": "886e61a853ce717a66a1b7754f57dc90273b21aa5f25e55e7009d532b20a9924",
           "manifestSha256": "e25911a279fca5e71484e80da48187dbd219f66cf74bee67a6d9147009f846b0",
-          "title": "Baldur's Gate 3 (content, Steam)"
+          "title": "Baldur's Gate 3 (content, Steam)",
+          "steamApiInterfaces": []
         },
         {
           "pname": "baldurs-gate-3-1086942",
@@ -60,7 +127,8 @@
           "outputHash": "sha256-Ldm1lmd5zenAgrv7hprkD+seUgPiyHBTOffcfZNilu4=",
           "depotKeySha256": "442cd052181ef8796434b252f89aa5e62606717f3972166f2276f61772ad3365",
           "manifestSha256": "c341f6e8c0d9151c6009562d61618d58d20dc10bad322d7cd96ab45be4b64317",
-          "title": "Baldur's Gate 3 (language, Steam)"
+          "title": "Baldur's Gate 3 (language, Steam)",
+          "steamApiInterfaces": []
         }
       ]
     }

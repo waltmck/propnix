@@ -43,7 +43,7 @@
   portaudio,
 }:
 let
-  version = "2026_07_19";
+  version = "2026_09_27";
 
   # PROTOBUF IS LINKED STATICALLY, and that is not a packaging preference — it is load-bearing.
   #
@@ -99,7 +99,7 @@ stdenv.mkDerivation (finalAttrs: {
     owner = "Detanup01";
     repo = "gbe_fork";
     tag = "release-${finalAttrs.version}";
-    hash = "sha256-W1iIOcbmw+r4GlC0UzEJw+Ir9DUE0yt41GdvFVHXhsg=";
+    hash = "sha256-KHQ8AHYJJQB/NYeLY9jSh0F5mFGxCxi66UTwwWt4QGo=";
   };
 
   # protoc must run on the BUILD machine even when the library is cross-compiled for another host.

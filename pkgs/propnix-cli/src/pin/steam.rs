@@ -2239,6 +2239,7 @@ pub fn download_depot(
     // control plane is skipped and chunk fetches are anonymous HTTP.
     anchors: Option<(&str, &str)>,
     opts: &crate::pin::gog::HashOpts,
+    only: &[String],
 ) -> Result<crate::pin::download::Written, Box<dyn std::error::Error>> {
     let (key_sha, manifest_sha) = (anchors.map(|a| a.0), anchors.map(|a| a.1));
     let access = acquire(
@@ -2252,7 +2253,7 @@ pub fn download_depot(
         branch,
         auth,
     )?;
-    write_depot(access, manifest_id, dir, opts)
+    write_depot(access, manifest_id, dir, opts, only)
 }
 
 /// Write an already-acquired depot to disk. Split out of `download_depot` so the cache-hit path can be
@@ -2263,6 +2264,13 @@ pub fn write_depot(
     manifest_id: u64,
     dir: &std::path::Path,
     opts: &crate::pin::gog::HashOpts,
+    // Exact manifest-relative paths to LIMIT the download to (empty = the whole depot). A path matching
+    // nothing in this manifest is not an error: a multi-depot pair ships each file in exactly one depot,
+    // so a caller probing "which depot carries bin/x64/steam_api64.dll" needs the empty answer, not a
+    // refusal — `fingerprint_depot_any` records `[]` for a depot that ships no steam_api library. What
+    // IS matched downloads only those files' chunks: the point is fetching a shim-sized file out of a
+    // multi-GB depot.
+    only: &[String],
 ) -> Result<crate::pin::download::Written, Box<dyn std::error::Error>> {
     use crate::pin::download;
     use std::os::unix::fs::FileExt;
@@ -2277,10 +2285,16 @@ pub fn write_depot(
     // Built for its REFUSALS: `tree` is what rejects a malformed manifest, and download must refuse
     // exactly what hashing refuses or the two could disagree about a depot.
     let _ = tree(&files)?;
+    let wanted = |path: &str| only.is_empty() || only.iter().any(|o| o == path);
+    if !only.is_empty() {
+        let matched = only.iter().filter(|o| files.iter().any(|f| f.size != u64::MAX && &f.path == *o)).count();
+        eprintln!("  --only: {matched} of {} requested path(s) present in this manifest", only.len());
+    }
     let mut written = download::Written::default();
     // Explicit directory entries first: an EMPTY directory is part of the tree the pin hashes, so one
-    // that no file happens to create must still exist.
-    for f in files.iter().filter(|f| f.size == u64::MAX) {
+    // that no file happens to create must still exist. Under `--only` the tree is deliberately partial
+    // and `create_file` makes the matched files' parents, so explicit dirs are skipped.
+    for f in files.iter().filter(|f| only.is_empty() && f.size == u64::MAX) {
         download::ensure_dir(dir, &f.path)?;
         written.dirs += 1;
     }
@@ -2295,7 +2309,7 @@ pub fn write_depot(
     let mut slot_of: std::collections::HashMap<([u8; 20], u32), usize> =
         std::collections::HashMap::new();
     let mut occurrences = 0usize;
-    for f in files.iter().filter(|f| f.size != u64::MAX) {
+    for f in files.iter().filter(|f| f.size != u64::MAX && wanted(&f.path)) {
         let file = download::create_file(dir, &f.path, f.executable)?;
         file.set_len(f.size)
             .map_err(|e| format!("set size of {}: {e}", f.path))?;
@@ -2405,6 +2419,7 @@ pub fn download_depot_any(
     dir: &std::path::Path,
     anchors: Option<(&str, &str)>,
     opts: &crate::pin::gog::HashOpts,
+    only: &[String],
 ) -> Result<crate::pin::download::Written, Box<dyn std::error::Error>> {
     // Cache-first, BEFORE any credential: a warm anchored cache fetches with no login AND no token read
     // at all. This is what the whole cache exists for — and it means a sandboxed FOD can fetch a depot
@@ -2416,7 +2431,7 @@ pub fn download_depot_any(
             manifest_sha256: Some(ms),
         }];
         if let Some(access) = acquire_cached(depot_id, &wants, Some(ks)) {
-            return write_depot(access, manifest_id, dir, opts);
+            return write_depot(access, manifest_id, dir, opts, only);
         }
     }
     if anonymous {
@@ -2429,6 +2444,7 @@ pub fn download_depot_any(
             dir,
             anchors,
             opts,
+            only,
         );
     }
     let creds = credentials_from_store(&opts.credential_dir, opts.steam_account.as_deref())?;
@@ -2459,6 +2475,7 @@ pub fn download_depot_any(
                 dir,
                 anchors,
                 opts,
+                only,
             )
         },
     )
@@ -2976,4 +2993,255 @@ pub fn verify_depot_any(
             )
         },
     )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────
+// THE STEAMWORKS SDK FINGERPRINT of a depot: every interface-revision string its shipped steam_api
+// libraries name, recorded on the pin row as `steamApiInterfaces`. Its one consumer is a check with no
+// credential and no payload (ci/gbe-interface-check.sh): does the pinned gbe_fork SERVE all of them —
+// asked of the shim by running it (gbeFork.interfaceOracle)? That is why the fingerprint is captured
+// HERE, at pin time, when the bytes are being fetched anyway with the pinner's own credential (the same
+// trust model as the hash beside it): the check can then run on every push and pull request, fork PRs
+// included.
+//
+// MULTIPLE LIBRARIES, ONE SET. A depot can ship several steam_api libraries (per-arch subtrees), and a
+// game's platforms ship different ones; each row records the UNION over the libraries in ITS depot. For
+// the question the check asks — "is every revision any of them names implemented?" — a union loses
+// nothing: if ANY shipped library names a revision the shim lacks, that build dies at SteamAPI init with
+// a silent exit 73. Per-library precision is the ENTITLEMENT's business (it scans the real bytes at build
+// time and places one list beside each library); this is only the gate.
+//
+// RAW, deliberately: upstream's generate_interfaces collapses several SteamClient revisions to 017
+// (right for the file gbe READS — modern steam_api's versionless SteamClient() returns the 017 shape),
+// but a game can still ask for the collapsed-away revision by name, so the gate must see all of them.
+//
+// SCOPE: interface revisions only — the thing the shim exits 73 over. The flat `SteamAPI_*` export
+// surface is not fingerprinted: a game binary importing an export the shim lacks fails at LOAD (missing
+// entry point under wine, symbol lookup error under a Linux loader), a failure mode only a run catches.
+
+/// gbe_fork's `tools/generate_interfaces` pattern list, verbatim, kept in steam-api-interface-patterns.txt
+/// beside this crate — one regex body per line — so that ci/gbe-interface-check.sh can diff the same file
+/// against the pinned shim's generator on every push: a new interface family upstream then fails CI
+/// instead of silently going unrecorded. Every entry is a literal prefix followed by `\d+`, except bare
+/// literals (STEAMCONTROLLER_INTERFACE_VERSION), so a prefix search plus a greedy ASCII-digit run
+/// reproduces the regexes exactly, with no regex engine. Parsed on every call: it is 37 short lines.
+const STEAM_API_INTERFACE_PATTERNS_SRC: &str = include_str!("../../steam-api-interface-patterns.txt");
+
+/// (prefix, digits-required) per pattern. Comment and blank lines are skipped.
+fn steam_api_interface_patterns() -> Vec<(&'static str, bool)> {
+    STEAM_API_INTERFACE_PATTERNS_SRC
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| match l.strip_suffix("\\d+") {
+            Some(prefix) => (prefix, true),
+            None => (l, false),
+        })
+        .collect()
+}
+
+/// Every interface-revision string in `bytes`, sorted and deduplicated.
+pub fn scan_steam_api_interfaces(bytes: &[u8]) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for (prefix, digits) in steam_api_interface_patterns() {
+        let p = prefix.as_bytes();
+        let mut i = 0;
+        while i + p.len() <= bytes.len() {
+            if &bytes[i..i + p.len()] == p {
+                if digits {
+                    let mut j = i + p.len();
+                    while j < bytes.len() && bytes[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    // `\d+`: at least one digit, else this occurrence is a longer name's prefix
+                    // (e.g. "SteamNetworking" inside "SteamNetworkingSockets012"), which its own
+                    // pattern reports.
+                    if j > i + p.len() {
+                        out.insert(String::from_utf8_lossy(&bytes[i..j]).into_owned());
+                    }
+                } else {
+                    out.insert(prefix.to_string());
+                }
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Is this manifest path a shipped Steamworks API library? By basename, so it needs no knowledge of
+/// the game module — the same files `steam.emu.libPaths` later names.
+pub fn is_steam_api_lib(path: &str) -> bool {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    matches!(
+        base,
+        "libsteam_api.so" | "steam_api.dll" | "steam_api64.dll" | "libsteam_api.dylib"
+    )
+}
+
+/// Depot access by whatever route works: the anchored cache (no login, no credential read) when the
+/// caller has the pin's anchors and the cache is warm, else the stored accounts in turn. The acquire-only
+/// counterpart of `download_depot_any`, for callers that then do their own small thing with the access.
+pub fn acquire_any(
+    app_id: u32,
+    depot_id: u32,
+    manifest_id: u64,
+    branch: &str,
+    anchors: Option<(&str, &str)>,
+    opts: &crate::pin::gog::HashOpts,
+) -> Result<DepotAccess, Box<dyn std::error::Error>> {
+    let wants = [Want {
+        manifest: manifest_id,
+        manifest_sha256: anchors.map(|a| a.1),
+    }];
+    if let Some((ks, _)) = anchors {
+        if let Some(access) = acquire_cached(depot_id, &wants, Some(ks)) {
+            return Ok(access);
+        }
+    }
+    let creds = credentials_from_store(&opts.credential_dir, opts.steam_account.as_deref())?;
+    crate::pin::try_accounts(
+        &creds,
+        |c| c.account.clone(),
+        is_not_owned,
+        |tried, refusals| {
+            exhausted_steam(
+                format!(
+                    "no stored Steam account can fetch app {app_id} depot {depot_id} manifest \
+                     {manifest_id} (tried: {}). Last refusal: {}",
+                    tried.join(", "),
+                    last_refusal(&refusals)
+                ),
+                &refusals,
+            )
+        },
+        |c| {
+            acquire(
+                app_id,
+                depot_id,
+                &wants,
+                anchors.map(|a| a.0),
+                branch,
+                Auth::Account(c.clone()),
+            )
+            .map_err(Into::into)
+        },
+    )
+}
+
+/// The depot's SDK fingerprint: fetch ONLY its steam_api libraries (`write_depot` with a path filter —
+/// a few hundred KiB out of a multi-GB depot), scan each, union. A depot that ships none (a DLC or
+/// data-only depot) fingerprints as the empty list — recorded as such, which is distinct from a row
+/// pinned before this field existed.
+pub fn fingerprint_depot_any(
+    app_id: u32,
+    depot_id: u32,
+    manifest_id: u64,
+    branch: &str,
+    anchors: Option<(&str, &str)>,
+    opts: &crate::pin::gog::HashOpts,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let access = acquire_any(app_id, depot_id, manifest_id, branch, anchors, opts)?;
+    let agent = http_agent();
+    let files = access.manifest(&agent, manifest_id)?.files;
+    let paths: Vec<String> = files
+        .iter()
+        .filter(|f| f.size != u64::MAX && is_steam_api_lib(&f.path))
+        .map(|f| f.path.clone())
+        .collect();
+    if paths.is_empty() {
+        eprintln!("      fingerprint: depot ships no steam_api library");
+        return Ok(Vec::new());
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "propnix-fingerprint-{depot_id}-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir)?;
+    // Quiet: the progress bar belongs to the hash that ran just before this; the fetch is tiny.
+    let quiet = opts.quiet();
+    let scanned = (|| -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        write_depot(access, manifest_id, &dir, &quiet, &paths)?;
+        let mut set = std::collections::BTreeSet::new();
+        for p in &paths {
+            let bytes = std::fs::read(dir.join(p))
+                .map_err(|e| format!("reading fetched {p}: {e}"))?;
+            set.extend(scan_steam_api_interfaces(&bytes));
+        }
+        Ok(set.into_iter().collect())
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    let fp = scanned?;
+    eprintln!(
+        "      fingerprint: {} interface revision(s) from {}",
+        fp.len(),
+        paths.join(", ")
+    );
+    Ok(fp)
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::steam_api_interface_patterns;
+
+    #[test]
+    fn the_pattern_file_is_upstreams_list() {
+        let pats = steam_api_interface_patterns();
+        // 37 distinct entries in the pinned generator (its inline comparison repeats SteamClient).
+        assert_eq!(pats.len(), 37, "{pats:?}");
+        let bare: Vec<_> = pats.iter().filter(|(_, d)| !*d).map(|(p, _)| *p).collect();
+        assert_eq!(bare, ["STEAMCONTROLLER_INTERFACE_VERSION"]);
+        for (p, _) in &pats {
+            assert!(
+                p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+                "{p}: a prefix must be a plain literal — anything else needs a regex engine"
+            );
+        }
+        assert!(pats.iter().any(|(p, d)| *p == "SteamClient" && *d));
+    }
+
+    use super::{is_steam_api_lib, scan_steam_api_interfaces};
+
+    #[test]
+    fn finds_every_revision_once_and_keeps_all_steamclients() {
+        // Names embedded in binary junk, some twice, both SteamClient revisions present.
+        let blob = b"\x00\x01SteamClient017\x00junkSteamClient023\x00SteamUser023\x00SteamUser023\x00\
+                     SteamNetworkingSockets012\x00STEAMUGC_INTERFACE_VERSION021\x00\
+                     STEAMHTMLSURFACE_INTERFACE_VERSION_005\x00STEAMCONTROLLER_INTERFACE_VERSION\x00\
+                     SteamMatchMakingServers003\x00SteamMatchMaking009\x00";
+        let got: Vec<String> = scan_steam_api_interfaces(blob).into_iter().collect();
+        assert_eq!(
+            got,
+            vec![
+                "STEAMCONTROLLER_INTERFACE_VERSION",
+                "STEAMHTMLSURFACE_INTERFACE_VERSION_005",
+                "STEAMUGC_INTERFACE_VERSION021",
+                "SteamClient017",
+                "SteamClient023",
+                "SteamMatchMaking009",
+                "SteamMatchMakingServers003",
+                "SteamNetworkingSockets012",
+                "SteamUser023",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_longer_name_does_not_leak_its_prefix() {
+        // "SteamNetworking" + "Sockets012": the short pattern must NOT emit "SteamNetworking".
+        let got = scan_steam_api_interfaces(b"xxSteamNetworkingSockets012xx");
+        assert_eq!(got.into_iter().collect::<Vec<_>>(), vec!["SteamNetworkingSockets012"]);
+        // …but the short name on its own, with digits, is a hit.
+        let got = scan_steam_api_interfaces(b"SteamNetworking006");
+        assert_eq!(got.into_iter().collect::<Vec<_>>(), vec!["SteamNetworking006"]);
+    }
+
+    #[test]
+    fn library_basenames() {
+        assert!(is_steam_api_lib("bin/arm64/libsteam_api.so"));
+        assert!(is_steam_api_lib("Base/Binaries/Win64Steam/steam_api64.dll"));
+        assert!(is_steam_api_lib("steam_api.dll"));
+        assert!(!is_steam_api_lib("libsteam_api.so.bak"));
+        assert!(!is_steam_api_lib("hollow_knight_Data/Plugins/libgalaxy.so"));
+    }
 }

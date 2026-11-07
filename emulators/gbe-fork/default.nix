@@ -57,7 +57,7 @@
   mingwThreads32 ? null,
 }:
 let
-  version = "2026_07_19";
+  version = "2026_09_27";
 
   # The i686 cross set, with the THREE test suites nixpkgs runs only here switched off.
   #
@@ -141,8 +141,10 @@ let
     pname = "gbe-fork-win-prebuilt";
     inherit version;
     src = fetchurl {
-      url = "https://github.com/Detanup01/gbe_fork/releases/download/release-${version}/emu-win-release.7z";
-      hash = "sha256-O6hV75YiBRNqVPsyUZpGNi4MxbQvwrs2Z+TSEwfZcuU=";
+      # The 2026_09 releases ship the Windows artifacts once per MSVC toolchain; vs22 is the same
+      # toolchain the single pre-rename artifact was built with.
+      url = "https://github.com/Detanup01/gbe_fork/releases/download/release-${version}/emu-win-release-vs22.7z";
+      hash = "sha256-MAGGw09Jqep1szzirymSZ8wdrQIlz0XoGiKVeNThHIU=";
     };
     nativeBuildInputs = [ p7zip ];
     dontUnpack = true;
@@ -170,12 +172,89 @@ let
     meta.sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
   };
 
+  # Upstream's own interface-revision scanner (tools/generate_interfaces): a regex scan over a shipped
+  # steam_api library, INCLUDING its one semantic quirk — when several SteamClient revisions match and
+  # 017 is among them, only 017 is kept, because modern steam_api's versionless SteamClient() still
+  # returns the 017 shape. Compiled from the SAME pinned source as the shims, so what the scan emits can
+  # never drift from what the shim's parser expects. steam-emu's entitlement builder runs it at BUILD
+  # time over a game's own shipped library; the builder then asks `interfaceOracle` below whether this
+  # shim serves each revision found, refusing — legibly, at build time — a game whose SDK names one it
+  # does not. Without that gate the failure is a silent exit 73 at launch (report_missing_impl_and_exit:
+  # 0x4155149 & 0xFF), which is exactly how factorio's 2.1.2x SDK bump presented before this existed.
+  generateInterfaces = stdenv.mkDerivation {
+    pname = "gbe-fork-generate-interfaces";
+    inherit version;
+    src = (shimFor stdenv.hostPlatform.system).src;
+    dontConfigure = true;
+    buildPhase = ''
+      runHook preBuild
+      $CXX -O2 -std=c++17 tools/generate_interfaces/generate_interfaces.cpp -o generate_interfaces
+      runHook postBuild
+    '';
+    installPhase = ''
+      runHook preInstall
+      install -Dm555 generate_interfaces "$out/bin/generate_interfaces"
+      runHook postInstall
+    '';
+    meta.description = "gbe_fork's generate_interfaces tool — emits a shipped steam_api library's interface revisions as steam_interfaces.txt";
+  };
+
+  # The interface ORACLE: which revisions does THIS pinned shim serve? Answered by running the host's
+  # own build of it (interface-oracle.c has the argument for executing over reading the source: the
+  # dispatcher routes by prefix, then exact ladders, with fatal exits in some families and NULL in
+  # others, and the one grep-able table in dll/ is a dump of the real Steam client's, not the shim's —
+  # which is how a revision the shim exits on once passed the gate). Both gates consume it: the
+  # entitlement builder at build time and ci/gbe-interface-check.sh on every push, so they cannot
+  # drift from each other or from the artifact. Upstream's generate_interfaces pattern list rides along
+  # (share/…/patterns.txt) for the check's drift test against the CLI's copy.
+  hostShim = linuxShims.${if stdenv.hostPlatform.isAarch64 then "aarch64" else "x64"};
+  interfaceOracle = stdenv.mkDerivation {
+    pname = "gbe-fork-interface-oracle";
+    inherit version;
+    src = hostShim.src;
+    dontConfigure = true;
+    buildPhase = ''
+      runHook preBuild
+      $CC -std=gnu11 -O2 -Wall -DSHIM_PATH='"${hostShim}/lib/libsteam_api.so"' \
+        ${./interface-oracle.c} -o gbe-interface-oracle -ldl
+      # Whole-line R"(...)" entries of the generator's pattern list — the inline comparison further down
+      # that file repeats one of them, hence the dedup — in upstream order.
+      sed -nE 's/^[[:space:]]*R"\((.*)\)",?[[:space:]]*$/\1/p' tools/generate_interfaces/generate_interfaces.cpp \
+        | awk '!seen[$0]++' > patterns.txt
+      [ "$(wc -l < patterns.txt)" -ge 30 ] || { echo "generate_interfaces.cpp: pattern list not found where expected" >&2; exit 1; }
+      runHook postBuild
+    '';
+    installPhase = ''
+      runHook preInstall
+      install -Dm555 gbe-interface-oracle "$out/bin/gbe-interface-oracle"
+      install -Dm444 patterns.txt "$out/share/gbe-interface-oracle/patterns.txt"
+      runHook postInstall
+    '';
+    # A self-check against the artifact it ships with: a current revision is served, an unknown family
+    # exits 73 (the verdict this exists to predict), a known-dropped SteamClient rung is NULL.
+    doInstallCheck = true;
+    installCheckPhase = ''
+      runHook preInstallCheck
+      out=$("$out/bin/gbe-interface-oracle" SteamUser023 SteamFoo001 SteamClient099 || true)
+      echo "$out"
+      grep -qx $'SteamUser023\tserved' <<<"$out" && grep -qx $'SteamFoo001\texit73' <<<"$out" \
+        && grep -qx $'SteamClient099\tnull' <<<"$out"
+      runHook postInstallCheck
+    '';
+    meta.description = "asks the pinned gbe_fork shim, by running it, which Steamworks interface revisions it serves";
+  };
+
 in
 # The assembled tree is for DISCOVERY and CI (`nix build .#gbeFork` builds every shim this host can use in
 # one command, so cachix gets them). Games never reference it — see `linuxShims` above.
 symlinkJoin {
   name = "gbe-fork-${version}";
-  paths = [ winPrebuilt ];
+  paths = [
+    winPrebuilt
+    # In the join so the cachix job builds and pushes them: every entitlement build runs both.
+    generateInterfaces
+    interfaceOracle
+  ];
   postBuild =
     lib.concatStringsSep "\n" (
       lib.mapAttrsToList (arch: shim: ''
@@ -196,6 +275,8 @@ symlinkJoin {
       version
       linuxShims
       winPrebuilt
+      generateInterfaces
+      interfaceOracle
       ;
     # The SteamStub arm, as a FUNCTION (steam-emu calls it per declared `.dll` libPath). Lazy like
     # `linuxShims`: a game that never sets `steam.emu.steamStub` pulls no mingw toolchain.

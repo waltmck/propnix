@@ -11,7 +11,40 @@
           "outputHash": "sha256-wgFoZ8qUJrW1hvqzsQRgU2zgsTsR3w2n+okMWjIZEs0=",
           "title": "Space Engineers (windows, Steam)",
           "depotKeySha256": "270067cfb510f842e2b6f69038890bc7aa346bde8ae930c96beac93434310572",
-          "manifestSha256": "20953f659b9b4d3ed242fd070dbe3a258e6c52b25d192cc6ac07b95c5484bee0"
+          "manifestSha256": "20953f659b9b4d3ed242fd070dbe3a258e6c52b25d192cc6ac07b95c5484bee0",
+          "steamApiInterfaces": [
+            "STEAMAPPLIST_INTERFACE_VERSION001",
+            "STEAMAPPS_INTERFACE_VERSION008",
+            "STEAMHTMLSURFACE_INTERFACE_VERSION_005",
+            "STEAMHTTP_INTERFACE_VERSION003",
+            "STEAMINVENTORY_INTERFACE_V003",
+            "STEAMMUSICREMOTE_INTERFACE_VERSION001",
+            "STEAMMUSIC_INTERFACE_VERSION001",
+            "STEAMPARENTALSETTINGS_INTERFACE_VERSION001",
+            "STEAMREMOTEPLAY_INTERFACE_VERSION001",
+            "STEAMREMOTESTORAGE_INTERFACE_VERSION016",
+            "STEAMSCREENSHOTS_INTERFACE_VERSION003",
+            "STEAMUGC_INTERFACE_VERSION016",
+            "STEAMUSERSTATS_INTERFACE_VERSION012",
+            "STEAMVIDEO_INTERFACE_V002",
+            "SteamClient017",
+            "SteamClient020",
+            "SteamController008",
+            "SteamFriends017",
+            "SteamGameServer014",
+            "SteamGameServerStats001",
+            "SteamInput006",
+            "SteamMatchGameSearch001",
+            "SteamMatchMaking009",
+            "SteamMatchMakingServers002",
+            "SteamNetworking006",
+            "SteamNetworkingMessages002",
+            "SteamNetworkingSockets012",
+            "SteamNetworkingUtils004",
+            "SteamParties002",
+            "SteamUser021",
+            "SteamUtils010"
+          ]
         }
       ]
     }

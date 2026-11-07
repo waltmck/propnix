@@ -9,7 +9,32 @@
           "manifestId": "2922595189637474747",
           "version": "22724702",
           "outputHash": "sha256-UFblKJONo/OLkM9MjKbpfES7s+E4KCHGX2XRIYoUKDg=",
-          "title": "Cities: Skylines (windows, Steam)"
+          "title": "Cities: Skylines (windows, Steam)",
+          "steamApiInterfaces": [
+            "STEAMAPPLIST_INTERFACE_VERSION001",
+            "STEAMAPPS_INTERFACE_VERSION007",
+            "STEAMHTMLSURFACE_INTERFACE_VERSION_003",
+            "STEAMHTTP_INTERFACE_VERSION002",
+            "STEAMINVENTORY_INTERFACE_V001",
+            "STEAMMUSICREMOTE_INTERFACE_VERSION001",
+            "STEAMMUSIC_INTERFACE_VERSION001",
+            "STEAMREMOTESTORAGE_INTERFACE_VERSION013",
+            "STEAMSCREENSHOTS_INTERFACE_VERSION002",
+            "STEAMUGC_INTERFACE_VERSION007",
+            "STEAMUNIFIEDMESSAGES_INTERFACE_VERSION001",
+            "STEAMUSERSTATS_INTERFACE_VERSION011",
+            "STEAMVIDEO_INTERFACE_V001",
+            "SteamClient017",
+            "SteamController003",
+            "SteamFriends015",
+            "SteamGameServer012",
+            "SteamGameServerStats001",
+            "SteamMatchMaking009",
+            "SteamMatchMakingServers002",
+            "SteamNetworking005",
+            "SteamUser018",
+            "SteamUtils007"
+          ]
         }
       ]
     }
@@ -23,7 +48,8 @@
       "manifestId": "1134142675767592641",
       "version": "22724702",
       "outputHash": "sha256-KYJM4LBgmh4U2xMYjPsh0TQYv2OFa8DyVdtuHTi6pPI=",
-      "title": "Cities: Skylines - Relaxation Station (Steam)"
+      "title": "Cities: Skylines - Relaxation Station (Steam)",
+      "steamApiInterfaces": []
     },
     "concerts": {
       "pname": "cities-skylines-dlc-255720-255720",
@@ -33,7 +59,8 @@
       "manifestId": "852385160178766697",
       "version": "22724702",
       "outputHash": "sha256-tgx1Z5WdehA59CHxjLE5S0irr2FpEF3d5rPYJrEutm4=",
-      "title": "Cities: Skylines - Concerts (Steam)"
+      "title": "Cities: Skylines - Concerts (Steam)",
+      "steamApiInterfaces": []
     },
     "rock-city-radio": {
       "pname": "cities-skylines-dlc-255717-255717",
@@ -43,7 +70,8 @@
       "manifestId": "457366953280935037",
       "version": "22724702",
       "outputHash": "sha256-aT9M1tDmV0e5n3RimDY1vow/lLCCDiupFmwPChJoxtI=",
-      "title": "Cities: Skylines - Rock City Radio (Steam)"
+      "title": "Cities: Skylines - Rock City Radio (Steam)",
+      "steamApiInterfaces": []
     },
     "all-that-jazz": {
       "pname": "cities-skylines-dlc-255726-255726",
@@ -53,7 +81,8 @@
       "manifestId": "7459269725805026117",
       "version": "22724702",
       "outputHash": "sha256-uuFEwC9eyhDMoo11CsEYtcjYjzzg1yDbNEj2fvHgKN0=",
-      "title": "Cities: Skylines - All That Jazz (Steam)"
+      "title": "Cities: Skylines - All That Jazz (Steam)",
+      "steamApiInterfaces": []
     }
   }
 }

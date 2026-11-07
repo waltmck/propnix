@@ -340,7 +340,8 @@ mkApp {
   # beside the exe, the rest are prefix-lower system32 or apiset forwarders), and all 17 steam_api64.dll
   # entry points the exe imports STATICALLY are exported by the pinned gbe_fork PE shim. Note what that
   # second check is NOT worth: it is about the FLAT api, while a vtable-revision mismatch (the
-  # pkgs/games/cities-skylines failure, and what `steam.emu.interfaces` exists for) shifts slots and would
+  # pkgs/games/cities-skylines failure, which the entitlement's per-library interface scan exists to
+  # prevent) shifts slots and would
   # pass an export-table diff untouched. It simply did not arise here — this title's front end comes up on
   # the default interface list.
   #

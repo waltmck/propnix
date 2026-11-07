@@ -11,7 +11,40 @@
           "outputHash": "sha256-jfOYpLjk2d0KlZQMt9kvynW2VwEQ1txYaUUsiVFLKqw=",
           "title": "Rust (windows, Steam)",
           "depotKeySha256": "3072a81ab1fe9b8b883f51af94d09e43b8819eed6ea0701e5c038fd63980accf",
-          "manifestSha256": "4df9ace2e9ce30de117ecfdd39a83ab980d5227c556ed10569f1a8b1d72e3940"
+          "manifestSha256": "4df9ace2e9ce30de117ecfdd39a83ab980d5227c556ed10569f1a8b1d72e3940",
+          "steamApiInterfaces": [
+            "STEAMAPPS_INTERFACE_VERSION008",
+            "STEAMHTMLSURFACE_INTERFACE_VERSION_005",
+            "STEAMHTTP_INTERFACE_VERSION003",
+            "STEAMINVENTORY_INTERFACE_V003",
+            "STEAMMUSICREMOTE_INTERFACE_VERSION001",
+            "STEAMMUSIC_INTERFACE_VERSION001",
+            "STEAMPARENTALSETTINGS_INTERFACE_VERSION001",
+            "STEAMREMOTEPLAY_INTERFACE_VERSION002",
+            "STEAMREMOTESTORAGE_INTERFACE_VERSION016",
+            "STEAMSCREENSHOTS_INTERFACE_VERSION003",
+            "STEAMTIMELINE_INTERFACE_V004",
+            "STEAMUGC_INTERFACE_VERSION020",
+            "STEAMUSERSTATS_INTERFACE_VERSION013",
+            "STEAMVIDEO_INTERFACE_V007",
+            "SteamClient017",
+            "SteamClient021",
+            "SteamController008",
+            "SteamFriends017",
+            "SteamGameServer015",
+            "SteamGameServerStats001",
+            "SteamInput006",
+            "SteamMatchGameSearch001",
+            "SteamMatchMaking009",
+            "SteamMatchMakingServers002",
+            "SteamNetworking006",
+            "SteamNetworkingMessages002",
+            "SteamNetworkingSockets012",
+            "SteamNetworkingUtils004",
+            "SteamParties002",
+            "SteamUser023",
+            "SteamUtils010"
+          ]
         },
         {
           "pname": "rust-252494",
@@ -22,7 +55,8 @@
           "outputHash": "sha256-vCfn4ThKsovrC6Hr+ZMKa77VL4hT6dAJp4nr+ALBAAg=",
           "title": "Rust (content, Steam)",
           "depotKeySha256": "d4198248ce9b53689a21f0e8fbd03a507506b8c7fc0483f461beb38e91beeb71",
-          "manifestSha256": "77cca51fcbc84ef25df735769289bd6ea6f79ce4f678d23042733d2eee1145ea"
+          "manifestSha256": "77cca51fcbc84ef25df735769289bd6ea6f79ce4f678d23042733d2eee1145ea",
+          "steamApiInterfaces": []
         }
       ]
     }

@@ -66,6 +66,9 @@
   # hard enough that per-FOD logins broke real bulk runs, which is the whole reason this exists.
   depotKeySha256 ? null,
   manifestSha256 ? null,
+  # The depot's Steamworks-SDK fingerprint (`propnix pin` writes it; ci/gbe-interface-check.sh reads it).
+  # Row data only — nothing here consumes it — but a row carrying it must still be accepted.
+  steamApiInterfaces ? null,
 }:
 runCommand (lib.strings.sanitizeDerivationName "${pname}")
   {

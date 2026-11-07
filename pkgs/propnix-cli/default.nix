@@ -23,7 +23,7 @@
 {
   lib,
   rustPlatform,
-  makeWrapper,
+  makeBinaryWrapper,
   depotdownloader,
   gnutar,
 
@@ -49,7 +49,11 @@ rustPlatform.buildRustPackage {
         rel = lib.removePrefix (toString ../. + "/") (toString path);
         top = lib.head (lib.splitString "/" rel);
       in
-      builtins.elem top crates && !(builtins.elem (baseNameOf path) [ "target" ".cargo-home" ]);
+      builtins.elem top crates
+      && !(builtins.elem (baseNameOf path) [
+        "target"
+        ".cargo-home"
+      ]);
   };
   sourceRoot = "propnix-cli-src/propnix-cli";
   cargoLock.lockFile = ./Cargo.lock;
@@ -70,7 +74,7 @@ rustPlatform.buildRustPackage {
   # decoders. No external network and no credentials, so this stays on and the package is a real CI gate.
   doCheck = true;
 
-  nativeBuildInputs = [ makeWrapper ];
+  nativeBuildInputs = [ makeBinaryWrapper ];
   # `propnix cred add steam` drives DepotDownloader (the interactive Steam Guard login) and `tar` (to capture
   # its account.config). It is ONLY used to obtain the token — the depot download itself is this crate's own
   # (pin/engine.rs). PIN it anyway: the .NET isolated-storage path is part of the on-disk layout that
@@ -78,18 +82,18 @@ rustPlatform.buildRustPackage {
   # that path would strand every credential already captured.
   # (`xdg-open`/`sudo`/`install`/`rm` stay unpinned host tools — see the header of the GOG login path.)
   postInstall = ''
+    # A BINARY wrapper (no shell fork per invocation — this binary also runs inside FOD build sandboxes,
+    # once per depot fetch). The old `--run` snippet that seated SSL_CERT_FILE is gone: makeBinaryWrapper
+    # cannot branch on an env var's value, so the sentinel/override logic lives in main.rs
+    # (`seat_ca_bundle`), and the wrapper only names the bundle to seat.
     wrapProgram $out/bin/propnix \
-      --prefix PATH : ${lib.makeBinPath [ depotdownloader gnutar ]} \
-      --run ${lib.escapeShellArg ''
-        # Point reqwest's platform verifier at a CA bundle, but only when nothing real is configured.
-        # `--set-default` is not enough: a Nix BUILD sandbox pre-sets SSL_CERT_FILE to the sentinel
-        # /no-cert-file.crt (deliberately, to stop builders trusting anything), which would win and leave
-        # reqwest with "No CA certificates were loaded from the system". A genuine user override — a
-        # corporate proxy bundle, say — is still respected.
-        if [ -z "''${SSL_CERT_FILE:-}" ] || [ "$SSL_CERT_FILE" = /no-cert-file.crt ]; then
-          export SSL_CERT_FILE=${cacert}/etc/ssl/certs/ca-bundle.crt
-        fi
-      ''}
+      --prefix PATH : ${
+        lib.makeBinPath [
+          depotdownloader
+          gnutar
+        ]
+      } \
+      --set PROPNIX_CA_BUNDLE ${cacert}/etc/ssl/certs/ca-bundle.crt
   '';
 
   meta.description = "propnix CLI: credential management and O(1)-disk content-pin refresh (propnix cred / propnix pin)";

@@ -45,6 +45,23 @@ pub struct Opts {
     pub steam_account: Option<String>,
 }
 
+impl Opts {
+    /// The streaming-hash knobs this run carries, with stderr progress on or off (`progress`; the `@nix`
+    /// form is never chosen here — that is the FODs' setting). One place, so a new knob reaches every
+    /// caller.
+    pub fn hash_opts(&self, progress: bool) -> gog::HashOpts {
+        gog::HashOpts {
+            workers: self.workers,
+            window_bytes: self.window_bytes,
+            credential_dir: self.credential_dir.clone(),
+            gog_account: self.gog_account.clone(),
+            steam_account: self.steam_account.clone(),
+            progress,
+            nix_progress: false,
+        }
+    }
+}
+
 /// Try each stored account until one can do the job — the ONE implementation of that policy, shared by
 /// both stores because it is the fetchers' behaviour and getting it subtly different per store is how a
 /// multi-account host ends up with "GOG works, Steam doesn't".
@@ -474,16 +491,8 @@ pub fn emit(opts: &Opts) -> Result<String, Box<dyn std::error::Error>> {
         return Ok(file.render());
     }
 
-    let hopts = gog::HashOpts {
-        workers: opts.workers,
-        window_bytes: opts.window_bytes,
-        credential_dir: opts.credential_dir.clone(),
-        gog_account: opts.gog_account.clone(),
-        steam_account: opts.steam_account.clone(),
-        // stdout is a document here; keep the noise on stderr but make it useful.
-        progress: true,
-        nix_progress: false,
-    };
+    // stdout is a document here; keep the noise on stderr but make it useful.
+    let hopts = opts.hash_opts(true);
 
     // Stage every recomputation first; only touch the file once all of them succeeded.
     let mut staged: Vec<(PinLoc, Vec<(String, String)>)> = Vec::new();
@@ -533,6 +542,11 @@ pub fn emit(opts: &Opts) -> Result<String, Box<dyn std::error::Error>> {
             fields.push(("depotKeySha256".to_string(), key_sha));
             fields.push(("manifestSha256".to_string(), manifest_sha));
         }
+        // The SDK fingerprint travels with the hash too (an insert-allowlisted ARRAY field — see
+        // versions.rs `insert_value`): a row that moves gets the fingerprint of what it moved to.
+        if let Some(fp) = &hashed.steam_api_interfaces {
+            fields.push(("steamApiInterfaces".to_string(), serde_json::to_string(fp)?));
+        }
         staged.push((c.loc.clone(), fields));
     }
 
@@ -570,6 +584,10 @@ struct Hashed {
     /// Steam cache trust anchors (depotKeySha256, manifestSha256) — recorded so the FOD that fetches
     /// this pin can take the loginless cache path. None for the GOG stores.
     anchors: Option<(String, String)>,
+    /// The depot's Steamworks SDK fingerprint (`steam::fingerprint_depot_any`): every interface
+    /// revision its shipped steam_api libraries name, recorded as `steamApiInterfaces` so a pure
+    /// check can hold it against the pinned gbe_fork. None for the GOG stores.
+    steam_api_interfaces: Option<Vec<String>>,
 }
 
 /// Identity of the CONTENT a pin resolves to — everything `hash_pin` would feed the hasher, and nothing
@@ -631,6 +649,7 @@ fn hash_pin(
                     sri,
                     deps_build_id: plan.deps_build_id,
                     anchors: None,
+                    steam_api_interfaces: None,
                 }),
                 Err(e) => Err(classify(e, pin, game, dlc.is_some())),
             }
@@ -644,11 +663,25 @@ fn hash_pin(
             let branch = steam_branch(opts, pin);
             let previous = previous_manifest(opts.mode, pin);
             match steam::hash_depot_any(app, depot, manifest, previous, &branch, hopts) {
-                Ok((sri, _, _, anchors)) => Ok(Hashed {
-                    sri,
-                    deps_build_id: None,
-                    anchors: Some((anchors.depot_key_sha256, anchors.manifest_sha256)),
-                }),
+                Ok((sri, _, _, anchors)) => {
+                    // The fingerprint rides on the hash's freshly-written cache anchors, so it costs
+                    // no second login — only the steam_api libraries' chunks.
+                    let fp = steam::fingerprint_depot_any(
+                        app,
+                        depot,
+                        manifest,
+                        &branch,
+                        Some((&anchors.depot_key_sha256, &anchors.manifest_sha256)),
+                        hopts,
+                    )
+                    .map_err(|e| classify(e, pin, game, pin.is_dlc()))?;
+                    Ok(Hashed {
+                        sri,
+                        deps_build_id: None,
+                        anchors: Some((anchors.depot_key_sha256, anchors.manifest_sha256)),
+                        steam_api_interfaces: Some(fp),
+                    })
+                }
                 Err(e) => Err(classify(e, pin, game, pin.is_dlc())),
             }
         }
@@ -778,6 +811,63 @@ fn classify(
     }
 }
 
+/// The `--fingerprint` counterpart of `classify`: same human-actionable sorting, different verdict.
+/// Fingerprinting is per row — a row no stored account can fetch is left untouched while every other
+/// row is written — so neither "re-pinned" nor the all-or-nothing DLC clause would be true of it.
+fn classify_fingerprint(e: Box<dyn std::error::Error>, pin: &Pin, game: &str) -> Box<dyn std::error::Error> {
+    let what = format!("{game} {} could not be fingerprinted: {e}", pin.loc);
+    match blocked_from(e.as_ref(), what.clone()) {
+        Some(b) => Box::new(b),
+        None => what.into(),
+    }
+}
+
+/// `propnix pin <game> --fingerprint`: record `steamApiInterfaces` on every Steam row WITHOUT moving
+/// any pin — the backfill for rows pinned before the field existed, and the way to re-derive a
+/// fingerprint from real bytes on demand. Fetches only each depot's steam_api libraries, login-free
+/// wherever the row's cache anchors are warm. Rows the stored accounts cannot fetch are collected as
+/// `blocked` and left untouched while every other row is written (the pin-refresh convention); the
+/// caller turns a non-empty `blocked` into the exit-4 "a human must act" class.
+pub fn fingerprint(opts: &Opts) -> Result<(String, Vec<String>), Box<dyn std::error::Error>> {
+    let mut file = VersionsFile::load(&versions_path(&opts.repo, &opts.game))?;
+    let pins = file.pins()?;
+    let hopts = opts.hash_opts(false);
+    let mut edits: Vec<(PinLoc, String, String)> = Vec::new();
+    let mut blocked: Vec<String> = Vec::new();
+    for pin in pins.iter().filter(|p| matches!(p.store, Store::Steam)) {
+        let app = pin.u64_field("appId")? as u32;
+        let depot = pin.u64_field("depotId")? as u32;
+        let manifest: u64 = pin
+            .str_field("manifestId")?
+            .parse()
+            .map_err(|_| format!("{}: manifestId is not a number", pin.loc))?;
+        let branch = steam_branch(opts, pin);
+        let anchors = match (pin.opt_str("depotKeySha256"), pin.opt_str("manifestSha256")) {
+            (Some(k), Some(m)) => Some((k, m)),
+            _ => None,
+        };
+        eprintln!("  {}: app {app} depot {depot} manifest {manifest}", pin.loc);
+        match steam::fingerprint_depot_any(app, depot, manifest, &branch, anchors, &hopts) {
+            Ok(fp) => edits.push((
+                pin.loc.clone(),
+                "steamApiInterfaces".to_string(),
+                serde_json::to_string(&fp)?,
+            )),
+            Err(e) => {
+                let e = classify_fingerprint(e, pin, &opts.game);
+                if is_human_actionable(e.as_ref()) {
+                    eprintln!("      blocked: {e}");
+                    blocked.push(e.to_string());
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    file.apply_all(&edits)?;
+    Ok((file.render(), blocked))
+}
+
 /// Every game directory in the repo, in a stable order. The error NAMES the path it tried — a bare
 /// "No such file or directory" from a `propnix games` run outside a repo checkout points at nothing.
 pub fn all_games(repo: &std::path::Path) -> std::io::Result<Vec<String>> {
@@ -823,15 +913,7 @@ pub enum NewSpec {
 /// Resolving the newest build and hashing it is the part a human cannot do by hand; the `pname`s and the
 /// GOG `version` string this produces are reasonable placeholders, not house style, so rename them.
 pub fn scaffold(opts: &Opts, spec: &NewSpec) -> Result<String, Box<dyn std::error::Error>> {
-    let hopts = gog::HashOpts {
-        workers: opts.workers,
-        window_bytes: opts.window_bytes,
-        credential_dir: opts.credential_dir.clone(),
-        gog_account: opts.gog_account.clone(),
-        steam_account: opts.steam_account.clone(),
-        progress: true,
-        nix_progress: false,
-    };
+    let hopts = opts.hash_opts(true);
     let mut root = serde_json::Map::new();
     let mut fetch_info = serde_json::Map::new();
 
@@ -946,6 +1028,14 @@ pub fn scaffold(opts: &Opts, spec: &NewSpec) -> Result<String, Box<dyn std::erro
                 eprintln!("  app {app} depot {depot} manifest {} ({plat})", d.gid);
                 let (sri, _, _, anchors) =
                     steam::hash_depot_any(*app, *depot, manifest, None, &branch, &hopts)?;
+                let fp = steam::fingerprint_depot_any(
+                    *app,
+                    *depot,
+                    manifest,
+                    &branch,
+                    Some((&anchors.depot_key_sha256, &anchors.manifest_sha256)),
+                    &hopts,
+                )?;
                 let mut row = serde_json::json!({
                     "pname": format!("{}-{}", opts.game, depot),
                     "appId": app,
@@ -960,6 +1050,9 @@ pub fn scaffold(opts: &Opts, spec: &NewSpec) -> Result<String, Box<dyn std::erro
                     // fetch this pin without a single Steam login when the cache is warm.
                     "depotKeySha256": anchors.depot_key_sha256,
                     "manifestSha256": anchors.manifest_sha256,
+                    // The SDK fingerprint (see steam::fingerprint_depot_any): what the pure PR check
+                    // holds against the pinned gbe_fork.
+                    "steamApiInterfaces": fp,
                     "title": format!("{} ({}, Steam)", opts.game, d.oslist.as_deref().unwrap_or("?")),
                 });
                 // A public pin carries no `branch` key at all — absent IS public, and every existing

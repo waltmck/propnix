@@ -11,7 +11,40 @@
           "outputHash": "sha256-jKsEwQ4tGev343xstFOaNXI4V1roOZp6VwMyQ+YTSNw=",
           "title": "Stellaris (Linux, Steam)",
           "depotKeySha256": "c4afc23459f1a268dbf249e85abacc551d4bd7ee4da15a45df9f42b6f92166a0",
-          "manifestSha256": "e0a65f541ea719273a60beaa981d6ba7d5eafa4930944b9c6fe0f55c3c4ed85f"
+          "manifestSha256": "e0a65f541ea719273a60beaa981d6ba7d5eafa4930944b9c6fe0f55c3c4ed85f",
+          "steamApiInterfaces": [
+            "STEAMAPPLIST_INTERFACE_VERSION001",
+            "STEAMAPPS_INTERFACE_VERSION008",
+            "STEAMHTMLSURFACE_INTERFACE_VERSION_005",
+            "STEAMHTTP_INTERFACE_VERSION003",
+            "STEAMINVENTORY_INTERFACE_V003",
+            "STEAMMUSICREMOTE_INTERFACE_VERSION001",
+            "STEAMMUSIC_INTERFACE_VERSION001",
+            "STEAMPARENTALSETTINGS_INTERFACE_VERSION001",
+            "STEAMREMOTEPLAY_INTERFACE_VERSION001",
+            "STEAMREMOTESTORAGE_INTERFACE_VERSION016",
+            "STEAMSCREENSHOTS_INTERFACE_VERSION003",
+            "STEAMUGC_INTERFACE_VERSION016",
+            "STEAMUSERSTATS_INTERFACE_VERSION012",
+            "STEAMVIDEO_INTERFACE_V002",
+            "SteamClient017",
+            "SteamClient020",
+            "SteamController008",
+            "SteamFriends017",
+            "SteamGameServer014",
+            "SteamGameServerStats001",
+            "SteamInput006",
+            "SteamMatchGameSearch001",
+            "SteamMatchMaking009",
+            "SteamMatchMakingServers002",
+            "SteamNetworking006",
+            "SteamNetworkingMessages002",
+            "SteamNetworkingSockets012",
+            "SteamNetworkingUtils004",
+            "SteamParties002",
+            "SteamUser021",
+            "SteamUtils010"
+          ]
         },
         {
           "pname": "stellaris-linux-data",
@@ -22,7 +55,8 @@
           "outputHash": "sha256-Oc93rC6SWvu5QBZwl1s/XxnawRuxjC8odMXUnz6430I=",
           "title": "Stellaris (Linux, Steam)",
           "depotKeySha256": "4e11012016545171c7e240de4ec8142718a9897ef93ec526251ecde8ed2537d5",
-          "manifestSha256": "a8ce26fa07f851652ef3e8035e6cb60825e44d11480514648e3bbd24b07580ab"
+          "manifestSha256": "a8ce26fa07f851652ef3e8035e6cb60825e44d11480514648e3bbd24b07580ab",
+          "steamApiInterfaces": []
         }
       ]
     }
@@ -35,7 +69,8 @@
       "manifestId": "5289062830139194176",
       "version": "4.4.6",
       "outputHash": "sha256-oU0ywcDrHwZRekzsDUxGu8tZspqPzvx9PjfbKSzk2Mg=",
-      "title": "Stellaris: Plantoids Species Pack (Steam)"
+      "title": "Stellaris: Plantoids Species Pack (Steam)",
+      "steamApiInterfaces": []
     },
     "leviathans": {
       "pname": "stellaris-dlc-leviathans",
@@ -44,7 +79,8 @@
       "manifestId": "2771826165032019499",
       "version": "4.4.6",
       "outputHash": "sha256-XlO6ZZolLasQAVhUyYCoN4kmCAWhOzHjMam/Jk/237g=",
-      "title": "Stellaris: Leviathans Story Pack (Steam)"
+      "title": "Stellaris: Leviathans Story Pack (Steam)",
+      "steamApiInterfaces": []
     },
     "utopia": {
       "pname": "stellaris-dlc-utopia",
@@ -53,7 +89,8 @@
       "manifestId": "94231584423973538",
       "version": "4.4.6",
       "outputHash": "sha256-tpB+1calMOaLWdaxyrenVl704JA1ELr+0reK7NiQw5A=",
-      "title": "Stellaris: Utopia (Steam)"
+      "title": "Stellaris: Utopia (Steam)",
+      "steamApiInterfaces": []
     },
     "horizon-signal": {
       "pname": "stellaris-dlc-horizon-signal",
@@ -62,7 +99,8 @@
       "manifestId": "6329361971126473517",
       "version": "4.4.6",
       "outputHash": "sha256-axys241Pz5mBbQFrvMPUw4JNWVNMHKosfMW2BiXBAUs=",
-      "title": "Stellaris: Horizon Signal (Steam)"
+      "title": "Stellaris: Horizon Signal (Steam)",
+      "steamApiInterfaces": []
     },
     "synthetic-dawn": {
       "pname": "stellaris-dlc-synthetic-dawn",
@@ -71,7 +109,8 @@
       "manifestId": "8487770189849309225",
       "version": "4.4.6",
       "outputHash": "sha256-OvaaZuJyrwpxJ6CVAr85qE+fk//MRq9/nSxtZeXbO/w=",
-      "title": "Stellaris: Synthetic Dawn Story Pack (Steam)"
+      "title": "Stellaris: Synthetic Dawn Story Pack (Steam)",
+      "steamApiInterfaces": []
     },
     "apocalypse": {
       "pname": "stellaris-dlc-apocalypse",
@@ -80,7 +119,8 @@
       "manifestId": "2874777228579213431",
       "version": "4.4.6",
       "outputHash": "sha256-SHdlpgnAn45qbAT0OcamHnbFHGvXl4SkpmEorhBsVos=",
-      "title": "Stellaris: Apocalypse (Steam)"
+      "title": "Stellaris: Apocalypse (Steam)",
+      "steamApiInterfaces": []
     },
     "humanoids": {
       "pname": "stellaris-dlc-humanoids",
@@ -89,7 +129,8 @@
       "manifestId": "7057785433501895820",
       "version": "4.4.6",
       "outputHash": "sha256-tRYlifZcY+pHX+dWpRcVqO+wkUI4cANS2uJqHZLzaTM=",
-      "title": "Stellaris: Humanoids Species Pack (Steam)"
+      "title": "Stellaris: Humanoids Species Pack (Steam)",
+      "steamApiInterfaces": []
     },
     "distant-stars": {
       "pname": "stellaris-dlc-distant-stars",
@@ -98,7 +139,8 @@
       "manifestId": "265938213461916546",
       "version": "4.4.6",
       "outputHash": "sha256-rFT5xQr3XyCDAQYKgx7lIZ7qm+rviu+q5If5wa39ZrU=",
-      "title": "Stellaris: Distant Stars Story Pack (Steam)"
+      "title": "Stellaris: Distant Stars Story Pack (Steam)",
+      "steamApiInterfaces": []
     },
     "megacorp": {
       "pname": "stellaris-dlc-megacorp",
@@ -107,7 +149,8 @@
       "manifestId": "5027959061154273567",
       "version": "4.4.6",
       "outputHash": "sha256-OKOjpQ5v9DIezyZqQ8QNJbfB4VDiFajTFdRf175Gn3A=",
-      "title": "Stellaris: MegaCorp (Steam)"
+      "title": "Stellaris: MegaCorp (Steam)",
+      "steamApiInterfaces": []
     },
     "ancient-relics": {
       "pname": "stellaris-dlc-ancient-relics",
@@ -116,7 +159,8 @@
       "manifestId": "6196140321844137812",
       "version": "4.4.6",
       "outputHash": "sha256-QN0PF7NWgDg2o+x4zn4SbnxkAERDvVpGrj6NN1IRZvw=",
-      "title": "Stellaris: Ancient Relics Story Pack (Steam)"
+      "title": "Stellaris: Ancient Relics Story Pack (Steam)",
+      "steamApiInterfaces": []
     },
     "lithoids": {
       "pname": "stellaris-dlc-lithoids",
@@ -125,7 +169,8 @@
       "manifestId": "1707277670014098752",
       "version": "4.4.6",
       "outputHash": "sha256-OUzRFlvel60R6TVSg/yIe9LYtrk2Qp6rZLTbMIIhYMM=",
-      "title": "Stellaris: Lithoids Species Pack (Steam)"
+      "title": "Stellaris: Lithoids Species Pack (Steam)",
+      "steamApiInterfaces": []
     },
     "federations": {
       "pname": "stellaris-dlc-federations",
@@ -134,7 +179,8 @@
       "manifestId": "6552287492865536968",
       "version": "4.4.6",
       "outputHash": "sha256-FctcjpoNgjWRkD7Rn75sJU70NMqTyyJciL9GTw9Nguk=",
-      "title": "Stellaris: Federations (Steam)"
+      "title": "Stellaris: Federations (Steam)",
+      "steamApiInterfaces": []
     },
     "necroids": {
       "pname": "stellaris-dlc-necroids",
@@ -143,7 +189,8 @@
       "manifestId": "3322127761481394644",
       "version": "4.4.6",
       "outputHash": "sha256-Q6Cukf479ZPZmgM7ZXZ9RpHVxwwley60akX7lHUxITk=",
-      "title": "Stellaris: Necroids Species Pack (Steam)"
+      "title": "Stellaris: Necroids Species Pack (Steam)",
+      "steamApiInterfaces": []
     },
     "nemesis": {
       "pname": "stellaris-dlc-nemesis",
@@ -152,7 +199,8 @@
       "manifestId": "1464825983963181123",
       "version": "4.4.6",
       "outputHash": "sha256-37moviWHJRByZyyNC2Bhbz7kR5CsEohxcTAW/9luZc0=",
-      "title": "Stellaris: Nemesis (Steam)"
+      "title": "Stellaris: Nemesis (Steam)",
+      "steamApiInterfaces": []
     },
     "aquatics": {
       "pname": "stellaris-dlc-aquatics",
@@ -161,7 +209,8 @@
       "manifestId": "2352410094773288579",
       "version": "4.4.6",
       "outputHash": "sha256-1kBvYpMVoeLXnI6qFHp/r6r5yZx3sKOMPnO7vRYLr/k=",
-      "title": "Stellaris: Aquatics Species Pack (Steam)"
+      "title": "Stellaris: Aquatics Species Pack (Steam)",
+      "steamApiInterfaces": []
     },
     "overlord": {
       "pname": "stellaris-dlc-overlord",
@@ -170,7 +219,8 @@
       "manifestId": "1949988533210430480",
       "version": "4.4.6",
       "outputHash": "sha256-Sjm4CQDXNVbENf09qeZLsZaSUbvJcUqcPsyCUuQ/w7I=",
-      "title": "Stellaris: Overlord (Steam)"
+      "title": "Stellaris: Overlord (Steam)",
+      "steamApiInterfaces": []
     },
     "toxoids": {
       "pname": "stellaris-dlc-toxoids",
@@ -179,7 +229,8 @@
       "manifestId": "1045801664911037736",
       "version": "4.4.6",
       "outputHash": "sha256-7JYMboGC2tvnJat/AdCkPKgYiYpuhLRTycUa/zIMAp8=",
-      "title": "Stellaris: Toxoids Species Pack (Steam)"
+      "title": "Stellaris: Toxoids Species Pack (Steam)",
+      "steamApiInterfaces": []
     },
     "first-contact": {
       "pname": "stellaris-dlc-first-contact",
@@ -188,7 +239,8 @@
       "manifestId": "4930317276946265521",
       "version": "4.4.6",
       "outputHash": "sha256-XBJm3WeJvJmoCeNXYQ2VrWRqcFRPHxWIQ3HkZH3OE9E=",
-      "title": "Stellaris: First Contact Story Pack (Steam)"
+      "title": "Stellaris: First Contact Story Pack (Steam)",
+      "steamApiInterfaces": []
     },
     "galactic-paragons": {
       "pname": "stellaris-dlc-galactic-paragons",
@@ -197,7 +249,8 @@
       "manifestId": "6939619431392031129",
       "version": "4.4.6",
       "outputHash": "sha256-qd7afHwVcW6nLwUJXwb+X9+Q5Y1frHxXaG3aIwu6F4A=",
-      "title": "Stellaris: Galactic Paragons (Steam)"
+      "title": "Stellaris: Galactic Paragons (Steam)",
+      "steamApiInterfaces": []
     },
     "astral-planes": {
       "pname": "stellaris-dlc-astral-planes",
@@ -206,7 +259,8 @@
       "manifestId": "3656631936342514829",
       "version": "4.4.6",
       "outputHash": "sha256-/zpgAG6ZSctT3pK6re1PzHEhvq//Hyw0IsP+LTJAX6A=",
-      "title": "Stellaris: Astral Planes (Steam)"
+      "title": "Stellaris: Astral Planes (Steam)",
+      "steamApiInterfaces": []
     },
     "machine-age": {
       "pname": "stellaris-dlc-machine-age",
@@ -215,7 +269,8 @@
       "manifestId": "5013502338098449837",
       "version": "4.4.6",
       "outputHash": "sha256-M3+ChWgcX9cgdY3dCO2tUYmNMMi31myng2IYAI6DjUI=",
-      "title": "Stellaris: The Machine Age (Steam)"
+      "title": "Stellaris: The Machine Age (Steam)",
+      "steamApiInterfaces": []
     },
     "cosmic-storms": {
       "pname": "stellaris-dlc-cosmic-storms",
@@ -224,7 +279,8 @@
       "manifestId": "8797712741214948916",
       "version": "4.4.6",
       "outputHash": "sha256-M9EXerMHRlqqx9bhl+GAmYn4d7ZNqiWmXCEepyHkEPs=",
-      "title": "Stellaris: Cosmic Storms (Steam)"
+      "title": "Stellaris: Cosmic Storms (Steam)",
+      "steamApiInterfaces": []
     },
     "grand-archive": {
       "pname": "stellaris-dlc-grand-archive",
@@ -233,7 +289,8 @@
       "manifestId": "8947542081300706521",
       "version": "4.4.6",
       "outputHash": "sha256-dVAdK/9eIjkjSdqLFi1bH+upf9/6vSwXc4aJdROMJj4=",
-      "title": "Stellaris: Grand Archive Story Pack (Steam)"
+      "title": "Stellaris: Grand Archive Story Pack (Steam)",
+      "steamApiInterfaces": []
     },
     "rick-the-cube": {
       "pname": "stellaris-dlc-rick-the-cube",
@@ -242,7 +299,8 @@
       "manifestId": "9052823765448867156",
       "version": "4.4.6",
       "outputHash": "sha256-9N4VmCiJD6xNKvKhUcq45UXmDY6nkZVuD8m7xoT9FcY=",
-      "title": "Stellaris: Rick the Cube Species Portrait (Steam)"
+      "title": "Stellaris: Rick the Cube Species Portrait (Steam)",
+      "steamApiInterfaces": []
     },
     "infernals": {
       "pname": "stellaris-dlc-infernals",
@@ -251,7 +309,8 @@
       "manifestId": "4373441752470778623",
       "version": "4.4.6",
       "outputHash": "sha256-EGPqZ9/VQGf3YxNTKTZEV6zoCV6MOT8aCaRMcvLzSkE=",
-      "title": "Stellaris: Infernals Species Pack (Steam)"
+      "title": "Stellaris: Infernals Species Pack (Steam)",
+      "steamApiInterfaces": []
     },
     "biogenesis": {
       "pname": "stellaris-dlc-biogenesis",
@@ -260,7 +319,8 @@
       "manifestId": "8331750570302919154",
       "version": "4.4.6",
       "outputHash": "sha256-LLCXcMzuSlQIFNsgJmygM4ArPEb5fILDwpZECFxU3jM=",
-      "title": "Stellaris: BioGenesis (Steam)"
+      "title": "Stellaris: BioGenesis (Steam)",
+      "steamApiInterfaces": []
     },
     "shadows-of-the-shroud": {
       "pname": "stellaris-dlc-shadows-of-the-shroud",
@@ -269,7 +329,8 @@
       "manifestId": "8092327340853379843",
       "version": "4.4.6",
       "outputHash": "sha256-wbYnP83x7r0cTi0ymtewL1KdUPuwtkLy+kbveaaYzHY=",
-      "title": "Stellaris: Shadows of the Shroud (Steam)"
+      "title": "Stellaris: Shadows of the Shroud (Steam)",
+      "steamApiInterfaces": []
     },
     "stargazer": {
       "pname": "stellaris-dlc-stargazer",
@@ -278,7 +339,8 @@
       "manifestId": "3240748767659651608",
       "version": "4.4.6",
       "outputHash": "sha256-tN8sFmNxu6oQuDaX/K0lRG5G0GoujBgwI6ND/vuDAuo=",
-      "title": "Stellaris: Stargazer Species Portrait (Steam)"
+      "title": "Stellaris: Stargazer Species Portrait (Steam)",
+      "steamApiInterfaces": []
     },
     "nomads": {
       "pname": "stellaris-dlc-nomads",
@@ -287,7 +349,8 @@
       "manifestId": "4308526494459266879",
       "version": "4.4.6",
       "outputHash": "sha256-xXTH67fMH3Cqg+g8AxVH3xyeZIAajlON+Oc+Gg6rgrk=",
-      "title": "Stellaris: Nomads (Steam)"
+      "title": "Stellaris: Nomads (Steam)",
+      "steamApiInterfaces": []
     }
   }
 }

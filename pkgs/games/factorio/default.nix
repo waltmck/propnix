@@ -120,6 +120,12 @@ mkApp (
       "bin/x64_/libsteam_api.so"
       "bin/x64/steam_api64.dll"
     ];
+    # Interface revisions are scanned from each shipped library above at build time (the entitlement's
+    # only mechanism), so the weekly pin refresh can carry a Steamworks SDK bump without hand-edits here.
+    # The other half of such a bump — the game's SDK outrunning the pinned shim — is refused by the scan's
+    # build-time gate; its runtime form was a silent exit 73 at "Initializing Steam API" (gbe_fork
+    # report_missing_impl_and_exit), which is how the 2.1.2x bump presented before the gate existed.
+    # Factorio 2.1.2x needs gbe_fork >= 2026_09_27.
 
     # Save: Factorio's user-data dir (saves + mods + blueprints + config + player-data + log). Both OS
     # layouts bind to the SAME host dir, which is right — the formats are cross-platform, so a save made by

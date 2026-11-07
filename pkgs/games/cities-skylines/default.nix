@@ -135,72 +135,16 @@ mkApp {
   # PE mechanism (no preload exists), and mk-app.nix refuses `steam.emu` on wine without a `.dll` path
   # rather than shipping a silently-inert shim.
   #
-  # THE OLD SDK DOES COST SOMETHING, BUT NOT HERE — and the shape of the gap is worth stating exactly,
-  # because the obvious reading of it is wrong and sent one session down a dead end. The shipped dll
-  # advertises `SteamClient017` / `SteamUser018` (2015-era Steamworks), and an export-table diff finds 12
-  # entry points it has and gbe_fork does not: `SteamAPI_ISteamUnifiedMessages_*` (5),
-  # `SteamAPI_ISteamClient_RunFrame`, `…_Set_SteamAPI_CCheckCallbackRegisteredInProcess`,
-  # `…_{Set,Remove}_SteamAPI_CPostAPIResultInProcess`, `SteamAPI_ISteamUtils_RunFrame`, and
-  # `SteamAPI_ISteamApps_{Get,Request}PublisherOwnedAppData`. Those are FLAT-API exports, none of them
-  # appears in ColossalNative's name table, and a GetProcAddress miss returns NULL rather than faulting the
-  # loader — so as EXPORTS they really are unused, exactly as first reasoned.
-  #
-  # What that reasoning missed is that ISteamUnifiedMessages also occupies a VTABLE SLOT, and a slot cannot
-  # be "unused": a method the shim's class does not declare shifts every method after it. That is what
-  # actually broke this title, and `steam.emu.interfaces` below is the fix. Read that block before treating
-  # any export-table diff as an all-clear for an old-SDK game.
+  # THE OLD SDK (2015-era: SteamClient017/SteamUser018) IS WHAT BROKE THIS TITLE, and the shape of the
+  # break is worth keeping: an export-table diff found 12 flat-API entry points the shipped dll has and
+  # gbe_fork lacks, all provably unused (GetProcAddress miss = NULL) — sound reasoning that MISSED the
+  # vtable. ISteamUnifiedMessages also occupies a vtable SLOT, and a slot cannot be "unused": a method the
+  # shim's class does not declare shifts every method after it, which answered slot 25 of what the engine
+  # believed was SteamClient017 with GetISteamController → modal "Missing interface" + exit (OBSERVED,
+  # 2026-09-03). The fix is serving the vtable revisions the SHIPPED dll advertises — which the
+  # entitlement now does by scanning that dll at build time (steam-offline-entitlement's `scanned`), so
+  # this title needs no hand-kept list for it.
   steam.emu.libPaths = [ "steam_api64.dll" ];
-
-  # ── THE SHIM MUST HAND OUT THE 2015 VTABLES, NOT TODAY'S ──────────────────────────────────────────────
-  # Every line here is read out of the payload's OWN `steam_api64.dll` (`strings`), which is what upstream's
-  # `generate_interfaces_file` tool does and what makes this list a FACT about the binary rather than a
-  # guess: this build links Steamworks SDK 1.34.
-  #
-  # WHY IT IS REQUIRED, MEASURED. Without it the shim keeps the revisions it was compiled against, and
-  # `SteamClient()` hands ColossalNative a modern `ISteamClient`. Modern `ISteamClient` DROPPED
-  # `GetISteamUnifiedMessages`, which `SteamClient017` still has at slot 25 — so the game's slot-25 call
-  # lands on the shim's `GetISteamController`, which does not recognise the version string it is handed and
-  # calls gbe_fork's `report_missing_impl_and_exit()`: a MODAL MessageBox followed by
-  # `std::exit(0x4155149)`. OBSERVED on x86_64-linux 2026-09-03 and screenshotted out of the compositor —
-  # a window titled "Missing interface" reading, verbatim:
-  #
-  #   INTERFACE=STEAMUNIFIEDMESSAGES_INTERFACE_VERSION001
-  #   CALLER FN=Steam_Client::GetISteamController()
-  #   APPID=255710
-  #
-  # That is the whole "stops at the splash" symptom: with no visible desktop the modal is never dismissed,
-  # so the process sits at 0% CPU with a full DXVK/Unity thread set and an unpainted window, forever.
-  #
-  # This also RETIRES the note that used to live on `steam.emu.libPaths`, which reasoned from the export
-  # table that the 12 entry points gbe_fork lacks — the five `SteamAPI_ISteamUnifiedMessages_*` among them —
-  # would be "unused, not broken" because a GetProcAddress miss returns NULL. That reasoning was sound about
-  # the FLAT API and wrong about this title, which reaches ISteamUnifiedMessages through the C++ vtable,
-  # where a missing method is not a NULL but a SHIFT of every slot after it.
-  steam.emu.interfaces = [
-    "SteamClient017"
-    "SteamUser018"
-    "SteamFriends015"
-    "SteamUtils007"
-    "SteamMatchMaking009"
-    "SteamMatchMakingServers002"
-    "SteamGameServer012"
-    "SteamGameServerStats001"
-    "SteamNetworking005"
-    "SteamController003"
-    "STEAMAPPS_INTERFACE_VERSION007"
-    "STEAMUSERSTATS_INTERFACE_VERSION011"
-    "STEAMREMOTESTORAGE_INTERFACE_VERSION013"
-    "STEAMSCREENSHOTS_INTERFACE_VERSION002"
-    "STEAMHTTP_INTERFACE_VERSION002"
-    "STEAMUNIFIEDMESSAGES_INTERFACE_VERSION001"
-    "STEAMUGC_INTERFACE_VERSION007"
-    "STEAMAPPLIST_INTERFACE_VERSION001"
-    "STEAMMUSIC_INTERFACE_VERSION001"
-    "STEAMMUSICREMOTE_INTERFACE_VERSION001"
-    "STEAMHTMLSURFACE_INTERFACE_VERSION_003"
-    "STEAMINVENTORY_INTERFACE_V001"
-    "STEAMVIDEO_INTERFACE_V001"
-  ];
 
   # ── DLC ── Four RADIO-STATION packs, each shipped as its own depot of the BASE app (255710) rather than
   # under the DLC's own appid. Each tree is a PURE ADDITIVE directory union into the game's content root —
@@ -295,7 +239,7 @@ mkApp {
   #      init is such an IOCTL, which is exactly why the log used to stop one line after
   #      `Mono config path = …`. Fixed in lib/backends/wine/defaults.nix (ephemeral overlay); the fix
   #      unblocked several titles at once.
-  #   2. THIS TITLE'S: the gbe_fork interface-revision mismatch — see `steam.emu.interfaces` above.
+  #   2. THIS TITLE'S: the gbe_fork interface-revision mismatch — see THE OLD SDK above.
   #
   # CORRECTING THE RECORD, because the earlier reading of the empty run was recorded here as fact and it
   # was wrong. It said the title "stops BEFORE ColossalNative's LoadLibrary + SteamAPI_Init", inferred from

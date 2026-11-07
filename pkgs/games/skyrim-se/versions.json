@@ -25,7 +25,8 @@
           "manifestId": "4886117324142477814",
           "version": "24914197",
           "outputHash": "sha256-NC+7Zzw3dopyXsSO8y3rYZExqErxa7CKmyl+IcIpfFo=",
-          "title": "Skyrim Special Edition (windows exe, Steam)"
+          "title": "Skyrim Special Edition (windows exe, Steam)",
+          "steamApiInterfaces": []
         },
         {
           "pname": "skyrim-se-489832",
@@ -34,7 +35,40 @@
           "manifestId": "5728778377666085157",
           "version": "24914197",
           "outputHash": "sha256-jVnHEvzB8CHfj0UNh2vaNWhlXXGYFQaCQDuqwbqNq80=",
-          "title": "Skyrim Special Edition (windows root, Steam)"
+          "title": "Skyrim Special Edition (windows root, Steam)",
+          "steamApiInterfaces": [
+            "STEAMAPPLIST_INTERFACE_VERSION001",
+            "STEAMAPPS_INTERFACE_VERSION008",
+            "STEAMHTMLSURFACE_INTERFACE_VERSION_005",
+            "STEAMHTTP_INTERFACE_VERSION003",
+            "STEAMINVENTORY_INTERFACE_V003",
+            "STEAMMUSICREMOTE_INTERFACE_VERSION001",
+            "STEAMMUSIC_INTERFACE_VERSION001",
+            "STEAMPARENTALSETTINGS_INTERFACE_VERSION001",
+            "STEAMREMOTEPLAY_INTERFACE_VERSION001",
+            "STEAMREMOTESTORAGE_INTERFACE_VERSION016",
+            "STEAMSCREENSHOTS_INTERFACE_VERSION003",
+            "STEAMUGC_INTERFACE_VERSION016",
+            "STEAMUSERSTATS_INTERFACE_VERSION012",
+            "STEAMVIDEO_INTERFACE_V002",
+            "SteamClient017",
+            "SteamClient020",
+            "SteamController008",
+            "SteamFriends017",
+            "SteamGameServer014",
+            "SteamGameServerStats001",
+            "SteamInput006",
+            "SteamMatchGameSearch001",
+            "SteamMatchMaking009",
+            "SteamMatchMakingServers002",
+            "SteamNetworking006",
+            "SteamNetworkingMessages002",
+            "SteamNetworkingSockets012",
+            "SteamNetworkingUtils004",
+            "SteamParties002",
+            "SteamUser021",
+            "SteamUtils010"
+          ]
         },
         {
           "pname": "skyrim-se-489831",
@@ -43,7 +77,8 @@
           "manifestId": "4940892828028256588",
           "version": "24914197",
           "outputHash": "sha256-dSfxAlGLqvpaacF42+y9T0lPhSUV9Q05WxyyVousfmw=",
-          "title": "Skyrim Special Edition (content, Steam)"
+          "title": "Skyrim Special Edition (content, Steam)",
+          "steamApiInterfaces": []
         }
       ]
     }

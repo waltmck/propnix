@@ -282,7 +282,7 @@ impl VersionsFile {
             return self.set_existing(loc, key, value);
         }
         let slot = self.slot_mut(loc)?;
-        slot.insert(key.to_string(), Value::String(value.to_string()));
+        slot.insert(key.to_string(), insert_value(key, value));
         Ok(())
     }
 
@@ -417,7 +417,25 @@ impl VersionsFile {
 /// break evaluation. The per-store pairing is enforced by construction in `emit`, not here: anchors are
 /// staged only for Steam rows (`hashed.anchors`), depsBuildId only for GOG ones. Everything else stays
 /// update-only.
-const INSERTABLE: &[&str] = &["depsBuildId", "depotKeySha256", "manifestSha256"];
+const INSERTABLE: &[&str] = &[
+    "depsBuildId",
+    "depotKeySha256",
+    "manifestSha256",
+    "steamApiInterfaces",
+];
+
+/// The value a row field is written as. Every field the tool writes is a string — except
+/// `steamApiInterfaces`, a JSON ARRAY of revision strings that travels through the string-typed edit
+/// batch as its JSON text and is stored as the array it denotes. A string that does not parse as an
+/// array is stored verbatim, so the schema error surfaces in the file rather than being masked here.
+fn insert_value(key: &str, value: &str) -> Value {
+    if key == "steamApiInterfaces" {
+        if let Ok(v @ Value::Array(_)) = serde_json::from_str::<Value>(value) {
+            return v;
+        }
+    }
+    Value::String(value.to_string())
+}
 
 /// A payload row's store, from its `fetchInfo` key. The key is what decides which fetcher the row is
 /// handed to at eval time, so duck-typing the fields instead would let a row disagree with the fetcher
@@ -934,6 +952,32 @@ mod tests {
             e.to_string().contains("epic"),
             "the error must name the key: {e}"
         );
+    }
+
+    #[test]
+    fn steam_api_interfaces_is_stored_as_an_array() {
+        let p = write_tmp(FACTORIO);
+        let mut f = VersionsFile::load(&p).unwrap();
+        let loc = PinLoc::Payload {
+            fetcher: "gog".into(),
+            platform: "x86_64-windows".into(),
+            index: 0,
+        };
+        f.apply_all(&[(
+            loc.clone(),
+            "steamApiInterfaces".into(),
+            r#"["SteamUser023","SteamUtils011"]"#.into(),
+        )])
+        .unwrap();
+        let rendered = f.render();
+        // An array, not the array's text as a string.
+        assert!(rendered.contains("\"steamApiInterfaces\": ["), "{rendered}");
+        assert!(rendered.contains("\"SteamUtils011\""), "{rendered}");
+        assert!(!rendered.contains("\"[\\\""), "{rendered}");
+        // The empty fingerprint (a depot shipping no steam_api library) is an array too.
+        f.apply_all(&[(loc, "steamApiInterfaces".into(), "[]".into())])
+            .unwrap();
+        assert!(f.render().contains("\"steamApiInterfaces\": []"));
     }
 
     #[test]

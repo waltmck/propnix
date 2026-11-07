@@ -82,10 +82,23 @@
   # Whether the shim should PRETEND THE STEAM CLIENT IS IN OFFLINE MODE (`[main::connectivity] offline`).
   # `true` matches the module default; see `mainIni` below for what the key actually reaches.
   steamOffline ? true,
-  # The `steam_interfaces.txt` contents, or `null` for `defaultInterfaces` below (the modern revisions).
-  # A game whose SHIPPED steam_api dll advertises an OLDER SDK must pass its own list — see the
-  # `defaultInterfaces` comment for why that is a correctness requirement and not a nicety.
-  interfaces ? null,
+  scanner,
+  scanJobs,
+  # gbeFork.interfaceOracle: asks the pinned shim, by running it, whether it serves a revision. The
+  # compat gate below is its verdict, not a grep over the source — see the oracle's own header.
+  oracle,
+  # Revisions the shipped libraries NAME but this game is known never to REQUEST (steam.emu.neverRequested):
+  # the oracle's "not served" for these is tolerated rather than fatal. The claim is the game module's.
+  neverRequested ? [ ],
+  # Whether the ROOT list — the tree-root `steam_settings/steam_interfaces.txt` — is the one list EVERY
+  # guest process reads. True for the guest-loader thin backends, where the lookup never reaches a declared
+  # path's directory: FEX's guest ld.so resolves the preloaded root copy (the bind at the declared path is
+  # that same inode, so it dedups to the preload), and box64 resolves the CWD, the game root. There every
+  # required-flavour lib must name the same revisions, since one file serves them all. False where the
+  # loader reads the list beside the library it actually loaded (wine's mirrors, native's binds): then only
+  # libs SHARING a directory must agree, and libs in different directories may differ — Baldur's Gate 3
+  # ships `bin/steam_api64.dll` and `Launcher/steam_api64.dll` from different SDK releases.
+  preloadRoot ? false,
   pname ? "steam-offline-entitlement",
 }:
 let
@@ -157,25 +170,209 @@ let
   # `report_missing_impl_and_exit()` — a MODAL "Missing interface" MessageBox followed by
   # `std::exit(0x4155149)`. OBSERVED, screenshotted, x86_64-linux 2026-09-03.
   #
-  # The list below is the MODERN default, which is right for every title packaged so far whose shipped
-  # steam_api dll advertises the current SDK (pkgs/games/civilization-6 names it explicitly). A title on an
-  # older SDK passes `interfaces` — read the revisions out of ITS OWN shipped `steam_api(64).dll`, which is
-  # exactly what upstream's `generate_interfaces_file` tool does.
-  defaultInterfaces = [
-    "STEAMAPPS_INTERFACE_VERSION008"
-    "SteamUser020"
-    "SteamFriends017"
-    "SteamUtils009"
-    "STEAMUGC_INTERFACE_VERSION013"
-    "STEAMREMOTESTORAGE_INTERFACE_VERSION014"
-    "STEAMUSERSTATS_INTERFACE_VERSION011"
-    "SteamMatchMaking009"
-    "SteamMatchMakingServers002"
-    "SteamNetworking005"
-    "STEAMHTTP_INTERFACE_VERSION003"
-    "SteamGameServer012"
-  ];
-  itfs = if interfaces == null then defaultInterfaces else interfaces;
+  # The revisions are READ OUT OF THE GAME'S OWN SHIPPED LIBRARIES at build
+  # time, which is the ground truth the paragraph above demands — upstream's generate_interfaces tool,
+  # compiled from the pinned shim's source so its emission quirks (notably: several SteamClient revisions
+  # collapse to 017, because modern steam_api's versionless SteamClient() still returns the 017 shape)
+  # can never drift from the parser that reads the file. One scan per libPath; the results are placed
+  # per-DIRECTORY — beside each lib AND inside that directory's own `steam_settings/`, because gbe_fork
+  # reads `<module dir>/steam_settings/steam_interfaces.txt` FIRST and the beside-the-library copy only
+  # when that is absent (dll/settings_parser.cpp parse_old_steam_interfaces). A per-directory list placed
+  # beside the lib alone would be shadowed by the root list in the directory's settings copy.
+  #
+  # Two deliberate hard failures, both at BUILD time, both naming their remedy:
+  #   * a REQUIRED-flavour lib that is missing, or two same-flavour scans that disagree where one file
+  #     must stand for both: two libs sharing a directory, or — under `preloadRoot` — any two, since the
+  #     root list is then the one every guest process reads. Otherwise libs in different directories may
+  #     differ, each directory carrying its own list;
+  #   * a scanned revision the pinned shim does NOT SERVE — asked of the shim itself through
+  #     `oracle` — because at runtime that is a SILENT exit 73 (report_missing_impl_and_exit:
+  #     0x4155149 & 0xFF) or a NULL vtable the moment the game asks for it, which is how factorio's
+  #     2.1.2x SDK bump presented. Bump emulators/gbe-fork, or — when the game provably never asks
+  #     (a library naming a family the game does not use) — declare it in `steam.emu.neverRequested`.
+  scanned = runCommandLocal "${pname}-${toString appId}-interfaces" { } (
+    ''
+      set -euo pipefail
+      mkdir -p "$out/by-dir" scans
+    ''
+    + lib.concatStrings (
+      lib.imap0 (idx: job: ''
+        # ── ${job.path} ──
+        found=
+        for c in ${lib.escapeShellArgs job.candidates}; do
+          if [ -e "$c" ]; then found="$c"; break; fi
+        done
+        if [ -n "$found" ]; then
+          d=$(mktemp -d)
+          # Upstream exits 1 ("No interfaces were found") on a library naming NO revision — a stub, a
+          # packed image, an empty placeholder. Name the file and the remedy rather than die on its
+          # one-liner; a required-flavour lib the shim cannot be told about is the same wall as a
+          # missing one.
+          if ! (cd "$d" && ${scanner}/bin/generate_interfaces "$found" >/dev/null 2>"$d/err"); then
+            echo "steam-offline-entitlement(${pname}): ${job.path} names no Steamworks interface revision (generate_interfaces: $(cat "$d/err"))." >&2
+            ${
+              if job.required then
+                ''
+                  echo "It is the flavour this backend loads, so the shim cannot be told which revisions to serve. If the file is not a real steam_api library, drop it from steam.emu.libPaths." >&2
+                  exit 1
+                ''
+              else
+                ''
+                  echo "Not the flavour this backend loads; its directory gets the root list." >&2
+                  : > "$d/steam_interfaces.txt"
+                ''
+            }
+          fi
+          awk '!seen[$0]++' "$d/steam_interfaces.txt" > "scans/${toString idx}"
+          echo "${job.path}: $(grep -c . "scans/${toString idx}") revisions (from $found)"
+        ${
+          if job.required then
+            ''
+                            else
+                              echo "steam-offline-entitlement(${pname}): no payload of this build carries ${job.path}," >&2
+                              echo "so its interface revisions cannot be scanned. Candidates probed:" >&2
+                              printf '  %s
+              ' ${lib.escapeShellArgs job.candidates} >&2
+                              echo "Fix the steam.emu.libPaths entry (the declared path must exist in the payloads of its own flavour)." >&2
+                              exit 1
+                            fi
+            ''
+          else
+            ''
+              fi
+            ''
+        }
+      '') scanJobs
+    )
+    + ''
+              # The ROOT list — what the tree-root `steam_settings/steam_interfaces.txt` carries. It is read by a
+              # lib loaded FROM the root: a declared root-level path, and under `preloadRoot` every guest process
+              # (see that argument). So the scans that must agree here are the root directory's own required
+              # group, or under `preloadRoot` every required scan. With nothing loaded from the root the file is
+              # unread; it then carries the first required scan (else any scan, else nothing) so it is never absent.
+              # Agreement is of SETS: the scanner lists revisions in the order the strings sit in each
+              # image, and a 32- and a 64-bit build of one SDK can differ there without differing at all.
+              same_set() { cmp -s <(sort -u "$1") <(sort -u "$2"); }
+              root=
+              for i in ${lib.escapeShellArgs (map (j: toString j.i) rootAgreeIdx)}; do
+                [ -e "scans/$i" ] || continue
+                if [ -z "$root" ]; then
+                  root="scans/$i"
+                elif ! same_set "$root" "scans/$i"; then
+                  echo "steam-offline-entitlement(${pname}): the shipped steam_api libraries of this build's own flavour disagree about their SDK revisions:" >&2
+                  diff "$root" "scans/$i" >&2 || true
+                  ${
+                    if preloadRoot then
+                      ''
+                        echo "This backend preloads ONE shim copy into every guest process, which reads ONE list (the root steam_settings/steam_interfaces.txt), so it cannot serve both. Declare in steam.emu.libPaths only the library the game process itself loads — a launcher's or tool's copy from another SDK must not be listed for a guest-loader backend." >&2
+                      ''
+                    else
+                      ''
+                        echo "Both sit at the game root, where one steam_interfaces.txt stands for every lib (gbe_fork reads one file per directory, with no override); such a payload cannot be served as laid out." >&2
+                      ''
+                  }
+                  exit 1
+                fi
+              done
+              if [ -z "$root" ]; then
+                for i in ${lib.escapeShellArgs (map (j: toString j.i) (requiredIdx ++ indexed))}; do
+                  [ -e "scans/$i" ] && { root="scans/$i"; break; }
+                done
+              fi
+              if [ -n "$root" ]; then
+                cp "$root" "$out/root.txt"
+              else
+                echo "steam-offline-entitlement(${pname}): no steam_api library was scanned; the root interface list is empty (gbe_fork's built-in defaults apply)"
+                : > "$out/root.txt"
+              fi
+
+              # Per-DIRECTORY placement. gbe_fork reads ONE steam_interfaces.txt per directory and offers no
+              # other location — the lookup is hard-wired to beside-the-loaded-library (+ its steam_settings/),
+              # settings_parser.cpp parse_old_steam_interfaces; no environment override exists (local_storage's
+              # only getenv calls are XDG_DATA_HOME/HOME, for saves). So when a .so and a .dll share a
+              # directory, the file is resolved BY FLAVOUR AT EVAL TIME instead: this entitlement is built per
+              # resolved config, so the flavour this backend actually loads (`required`) wins the directory —
+              # the other flavour's lib is never loaded by this backend, and on thin the per-path BIND rows
+              # override the merged view besides. Agreement is enforced only WITHIN the consumed flavour
+              # (steam_api.dll + steam_api64.dll sharing a dir must agree); a directory holding only the other
+              # flavour gets that flavour's own scan, or the root list when these payloads do not carry it.
+              ${lib.concatStrings (
+                lib.mapAttrsToList (dir: grp: ''
+                  best=
+                  for i in ${lib.escapeShellArgs grp.req}; do
+                    [ -e "scans/$i" ] || continue
+                    if [ -z "$best" ]; then
+                      best="scans/$i"
+                    elif ! same_set "$best" "scans/$i"; then
+                      echo "steam-offline-entitlement(${pname}): two shipped steam_api libraries of this build's own flavour share the directory '${dir}' but disagree about their SDK revisions; gbe_fork reads ONE steam_interfaces.txt per directory, with no override — such a payload cannot be served as laid out." >&2
+                      exit 1
+                    fi
+                  done
+                  if [ -z "$best" ]; then
+                    for i in ${lib.escapeShellArgs grp.other}; do
+                      [ -e "scans/$i" ] && { best="scans/$i"; break; }
+                    done
+                  fi
+                  install -Dm444 "''${best:-$out/root.txt}" "$out/by-dir/${dir}/steam_interfaces.txt"
+                '') jobDirs
+              )}
+
+              # The compat gate: every scanned revision must be SERVED by the pinned shim — asked of the shim
+              # itself (the oracle runs it; "exit73" is report_missing_impl_and_exit, "null" a NULL vtable —
+              # either kills the game the moment it asks). Tolerated only when the game declares it never asks.
+              revs=$(cat scans/* | sort -u | grep . || true)
+              unknown=
+              if [ -n "$revs" ]; then
+                # shellcheck disable=SC2086
+                verdicts=$(${oracle}/bin/gbe-interface-oracle $revs) || [ $? -eq 1 ] || { echo "steam-offline-entitlement(${pname}): the interface oracle failed to run (see above)" >&2; exit 1; }
+                while IFS=$'\t' read -r v verdict; do
+                  [ "$verdict" = served ] && continue
+                  case " ${lib.concatStringsSep " " neverRequested} " in
+                    *" $v "*) echo "$v: not served by the pinned gbe_fork ($verdict) — tolerated, steam.emu.neverRequested says the game never asks" ;;
+                    *) unknown="$unknown $v($verdict)" ;;
+                  esac
+                done <<<"$verdicts"
+              fi
+              if [ -n "$unknown" ]; then
+                echo "steam-offline-entitlement(${pname}): this game's Steamworks SDK names interface revisions the pinned gbe_fork (${scanner.version or "?"}) does not serve:" >&2
+                printf '  %s
+      ' $unknown >&2
+                echo "At runtime that is a silent exit 73 (or a NULL vtable) the moment the game asks for one. Bump emulators/gbe-fork — or, if the game provably never asks (a family it does not use), declare it in steam.emu.neverRequested with the evidence." >&2
+                exit 1
+              fi
+    ''
+  );
+  # The scan jobs by index; the required-flavour ones; the ones whose agreement the root list demands (see
+  # `preloadRoot`); and the per-directory index groups.
+  indexed = lib.imap0 (i: job: {
+    inherit i;
+    inherit (job) path required;
+  }) scanJobs;
+  requiredIdx = lib.filter (j: j.required) indexed;
+  rootAgreeIdx =
+    if preloadRoot then requiredIdx else lib.filter (j: builtins.dirOf j.path == ".") requiredIdx;
+  jobDirs = lib.foldl' (
+    acc: j:
+    let
+      parent = builtins.dirOf j.path;
+      slot = if j.required then "req" else "other";
+      cur =
+        acc.${parent} or {
+          req = [ ];
+          other = [ ];
+        };
+    in
+    if parent == "." then
+      acc
+    else
+      acc
+      // {
+        ${parent} = cur // {
+          ${slot} = cur.${slot} ++ [ (toString j.i) ];
+        };
+      }
+  ) { } indexed;
+
 in
 runCommandLocal "${pname}-${toString appId}"
   {
@@ -192,9 +389,12 @@ runCommandLocal "${pname}-${toString appId}"
     cd "$out"
     ${lib.optionalString (shim != null) "cp ${shim} libsteam_api.so"}
     # Both spots: inside steam_settings/ (gbe_fork's documented location) AND beside the lib (the
-    # ancestor's spot; harmless, and the libPaths bind rows reference the root copy).
-    printf '%s\n' ${lib.escapeShellArg (lib.concatStringsSep "\n" itfs)} > steam_interfaces.txt
+    # ancestor's spot; the root-level placements and the CWD-probe fallback read this copy).
+    cp ${scanned}/root.txt steam_interfaces.txt
     cp steam_interfaces.txt steam_settings/steam_interfaces.txt
+    # PER-DIRECTORY interface lists, one beside every declared libPath (gbe_fork reads the file beside
+    # the library it was loaded as — each flavour gets the list scanned from ITS OWN lib, see `scanned`).
+    cp -r --no-preserve=mode ${scanned}/by-dir/. .
 
     cd steam_settings
     printf '%s' ${lib.escapeShellArg (toString appId)} > steam_appid.txt
@@ -204,10 +404,21 @@ runCommandLocal "${pname}-${toString appId}"
     cp "$appIniPath" configs.app.ini
     cd ..
 
+    # PER-DIRECTORY settings: every directory holding a declared lib gets its own `steam_settings/` — the
+    # root settings (appid, inis) with THAT directory's scanned list in place of the root one. This is the
+    # copy gbe_fork reads first (`<module dir>/steam_settings/steam_interfaces.txt`, see `scanned`), so it
+    # is what makes the per-directory lists real; wine's mirrors and the thin bind rows both resolve
+    # `<dir>/steam_settings` here.
+    ${lib.concatMapStrings (dir: ''
+      install -d ${lib.escapeShellArg "${dir}/steam_settings"}
+      cp --no-preserve=mode steam_settings/* ${lib.escapeShellArg "${dir}/steam_settings/"}
+      cp --no-preserve=mode ${lib.escapeShellArg "${dir}/steam_interfaces.txt"} ${lib.escapeShellArg "${dir}/steam_settings/steam_interfaces.txt"}
+    '') (lib.attrNames jobDirs)}
 
-    # The union-replacement mirrors (see the `mirror` param): the replacement lib at the shipped path,
-    # settings + interfaces beside it. A root-level entry ("." parent) needs only the lib — the root
-    # settings/interfaces above already sit beside it.
+
+    # The union-replacement mirrors (see the `mirror` param): the replacement lib at the shipped path. Its
+    # settings + interfaces were placed beside it above (the root ones for a root-level entry, the
+    # directory's own otherwise).
     ${lib.concatStrings (
       lib.mapAttrsToList (
         p: replacement:
@@ -234,10 +445,6 @@ runCommandLocal "${pname}-${toString appId}"
               install -Dm444 ${sp.extra} ${lib.escapeShellArg "${dir}${sp.extraName}"}
             ''
         )
-        + lib.optionalString (parent != ".") ''
-          cp -r steam_settings ${lib.escapeShellArg "${parent}/steam_settings"}
-          cp steam_interfaces.txt ${lib.escapeShellArg "${parent}/steam_interfaces.txt"}
-        ''
       ) mirror
     )}
     echo "steam-offline-entitlement: app ${toString appId}, $(($(grep -c . steam_settings/configs.app.ini) - 2)) owned DLC, ${toString (lib.length (lib.attrNames mirror))} mirror(s)"

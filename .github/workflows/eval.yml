@@ -1,11 +1,38 @@
 # Pure-eval gates — nothing is built or fetched, and `nix eval` is host-independent, so BOTH systems'
-# matrices run on cheap x86_64 runners. Two gates per system:
+# matrices run on cheap x86_64 runners. Per system:
 #
 #   1. checks.<system>.config-resolution — the standing resolution-semantics matrix + guards
 #      (lib/tests/resolution.nix; forcing drvPath is what trips its errors, no build needed).
 #   2. the exhaustive pinned (game × fetcher × emulatedPlatform) sweep (flake `ci.<system>` output,
 #      driven by ci/eval-matrix.sh — one evaluator process per combo, so an infinite recursion in one
 #      combo can't mask the rest; meta.broken titles still evaluate via the matrix's allowBroken scope).
+#   3. cache coverage (ci/cache-audit.sh), plus — once, since they are host-independent — the pin-issue
+#      lifecycle test, the README tables, and the Steam-SDK-vs-gbe_fork fingerprint gate (its own job).
+#
+# WHEN IT RUNS: every push to any branch and every pull request. Three rules keep that from meaning
+# "twice per commit" or "once per already-superseded commit":
+#
+#   * concurrency — a newer push to the same branch (or PR) CANCELS the run still going for the older
+#     commit; a superseded commit's verdict is a record nobody reads. The work is pure, so cancelling it
+#     costs nothing (cachix.yml, which publishes, keeps its own cancel-in-progress: false).
+#   * one verdict per COMMIT — `memo` first looks for a PUSH run of this very commit (a same-repo PR's
+#     head was pushed here first; a fork's never was, and neither was one pushed by a token that
+#     triggers no workflow, like the weekly bot's — those simply run here). Succeeded: this run has
+#     nothing to add. Still
+#     going: wait for it rather than duplicate it. Failed or cancelled: run, so that the newest check on
+#     the commit is a real verdict — a skipped run concludes "success", and must never be the latest
+#     word over a failed one. (A pull_request run checks out the merge commit, so the commit it looks
+#     up is the PR head; branch protection's "require branches to be up to date" is what makes the
+#     head's verdict equal the merge's.)
+#   * one verdict per TREE — the suite is a pure function of the checked-out tree, so `memo` then
+#     compares HEAD's tree hash with the head commits of recent successful PUSH runs: a fast-forward to
+#     master, a rebase that changed nothing, an amended message all hit. Only push runs are evidence —
+#     a pull_request run evaluated a merge commit whose tree its head SHA does not name — and a run
+#     that was itself a memo hit is evidence only because its own witness was a real push run (the
+#     chain always ends in one). Hydra does the same at its evaluator ("jobset is unchanged,
+#     skipping"); on Actions it is what the skip-duplicate-actions action packages, hand-rolled here.
+#     `workflow_dispatch` is never memoized — a human asking for a run gets one. Skipped jobs count as
+#     passing for required status checks, and `memo` itself always completes.
 #
 # Deliberately NOT `nix flake check`: it force-evals packages.*, where meta.broken titles refuse
 # drvPath by design (see flake.nix).
@@ -13,16 +40,75 @@ name: eval
 
 on:
   push:
-    branches: [master]
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read # `memo` lists this workflow's runs
+
+concurrency:
+  # One group per branch (push) or per pull request. The PR NUMBER rather than the head ref, so two
+  # forks' identically named branches cannot cancel each other's runs.
+  group: eval-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  memo:
+    name: already evaluated?
+    runs-on: ubuntu-latest
+    timeout-minutes: 35 # a wait on an in-flight push run of the same commit is bounded below
+    outputs:
+      skip: ${{ steps.look.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: look
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          RUN_ID: ${{ github.run_id }}
+          # The commit whose verdict this run would be: HEAD on push, the PR head on pull_request
+          # (where HEAD is the merge commit GitHub made).
+          SUBJECT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          say() { echo "$1"; echo "skip=$2" >>"$GITHUB_OUTPUT"; exit 0; }
+          [ "$EVENT" = workflow_dispatch ] && say "workflow_dispatch: never memoized" false
+
+          # 1. a push run of this very commit (other than this run): its verdict is this commit's.
+          deadline=$((SECONDS + 1500))
+          while :; do
+            runs=$(gh run list --workflow eval.yml --event push --commit "$SUBJECT" --limit 10 \
+                     --json databaseId,status,conclusion \
+                     --jq "map(select(.databaseId != ($RUN_ID | tonumber)))")
+            if [ "$(jq 'map(select(.conclusion == "success")) | length' <<<"$runs")" -gt 0 ]; then
+              say "commit $SUBJECT already passed a push run; nothing to add" true
+            fi
+            # Wait only on runs that started BEFORE this one (a smaller id), so two runs of one commit
+            # cannot wait on each other.
+            pending=$(jq --argjson me "$RUN_ID" \
+              'map(select((.status == "in_progress" or .status == "queued" or .status == "waiting") and .databaseId < $me)) | length' <<<"$runs")
+            [ "$pending" -gt 0 ] && [ $SECONDS -lt $deadline ] || break
+            echo "a push run of $SUBJECT is still going; waiting rather than duplicating it"
+            sleep 30
+          done
+
+          # 2. the tree: any recent successful PUSH run whose head commit has the same tree.
+          mine=$(git rev-parse 'HEAD^{tree}')
+          for sha in $(gh run list --workflow eval.yml --event push --status success --limit 50 \
+                        --json headSha --jq '.[].headSha' | sort -u); do
+            # A head commit gone with its branch cannot be fetched: a miss, not an error.
+            git fetch -q --depth=1 origin "$sha" 2>/dev/null || continue
+            if [ "$(git rev-parse "$sha^{tree}")" = "$mine" ]; then
+              say "tree $mine already passed as commit $sha; nothing to evaluate" true
+            fi
+          done
+          say "no successful run covers commit $SUBJECT or tree $mine" false
+
   eval:
     name: eval (${{ matrix.system }})
+    needs: memo
+    if: needs.memo.outputs.skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -56,3 +142,28 @@ jobs:
       - name: README tables match the resolver
         if: ${{ matrix.system == 'x86_64-linux' }}
         run: ci/readme-tables.sh
+
+  # The Steam-SDK-vs-gbe_fork gate: every Steam pin carries `steamApiInterfaces` (the interface
+  # revisions its shipped steam_api libraries name, written by `propnix pin` at pin time), and each must
+  # be SERVED by the pinned gbe_fork — asked of the shim itself by running it (gbeFork.interfaceOracle,
+  # substituted from cachix) — or the game exits 73 at SteamAPI init with no other symptom. No
+  # credential, no payload, so fork PRs run it too, and the commit that moves a pin past the shim is
+  # the one that goes red, naming game, row and revisions (the fix, a gbe_fork bump, belongs on that
+  # same change). The script header has what it tolerates, exempts and does not cover. Once: the rows
+  # cover every platform and the shim's dispatch is the same on every host; the system named below
+  # picks the attribute path and labels the output.
+  gbe-interfaces:
+    name: Steam SDK fingerprints vs the pinned gbe_fork
+    needs: memo
+    if: needs.memo.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - run: ci/gbe-interface-check.sh x86_64-linux
+      # The gate's own regression test: every verdict it can give, driven against stubs.
+      - run: ci/gbe-interface-check-test.sh

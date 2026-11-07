@@ -162,6 +162,18 @@ let
       # would leak "(linux, Steam)" straight into the game's UI.
       title = stripProvenance (d.title or name);
     };
+  # One scan job per declared libPath (see the builder's `scanJobs` doc). `required` marks the flavour
+  # THIS resolved backend loads — .dll under wine, .so under every thin backend — which is the flavour
+  # whose scans must exist, must agree, and win a directory shared with the other flavour. Candidate
+  # existence is probed inside the scan DERIVATION, never at eval: a candidate string only interpolates
+  # the payload's store path, so unpinned combos still evaluate (and still throw their own availability
+  # error at build, exactly as the game itself does).
+  scanJobs = map (p: {
+    path = p;
+    required = if cfg.backend == "wine" then lib.hasSuffix ".dll" p else lib.hasSuffix ".so" p;
+    candidates = map (payload: "${payload}/${p}") cfg.payloads;
+  }) cfg.steam.emu.libPaths;
+
   settings = mkSteamOfflineEntitlement {
     appId =
       if cfg.steam.appId != null then
@@ -185,7 +197,14 @@ let
     # actually SteamStub-wrapped, and it is one more moving part everywhere else.
     stubProxies = lib.optionalAttrs cfg.steam.emu.steamStub (lib.genAttrs dllPaths winStubFor);
     steamOffline = cfg.steam.emu.offline;
-    interfaces = cfg.steam.emu.interfaces;
+    scanner = gbeFork.generateInterfaces;
+    oracle = gbeFork.interfaceOracle;
+    inherit scanJobs;
+    neverRequested = cfg.steam.emu.neverRequested;
+    # The guest-loader backends read ONE list for every process — FEX through the preloaded root copy,
+    # box64 through the CWD probe at the game root — so there every declared `.so` must agree; wine
+    # (mirrors) and native (binds) read the list beside the library they loaded, per directory.
+    preloadRoot = cfg.backend != "native" && cfg.backend != "wine";
     # The projected rows, then the game's own (`steam.emu.extraDlc` — an engine that gates on ids the pin
     # rows don't carry). Extra rows win a key collision, which is the useful direction: a game correcting
     # a projected claim states the correction and gets it.
@@ -244,31 +263,6 @@ in
         client is coming back" and block on a logon that will never arrive. Flipping it does not give the
         game a real Steam session and does not help it authenticate to any server that validates tickets
         with Valve — it only stops the shim from volunteering a "no".
-      '';
-    };
-    emu.interfaces = lib.mkOption {
-      type = knobTypes.lastWins;
-      default = null;
-      description = ''
-        The contents of the shim's `steam_interfaces.txt` (one interface-version string per line), or
-        `null` for the modern default in builders/steam-offline-entitlement.nix.
-
-        This is NOT cosmetic and it is NOT only about the "old" flat accessors: the version named here is
-        the VTABLE LAYOUT the shim's global accessors hand out. gbe_fork keeps one `old_<itf>` string per
-        interface, initialised to the revision it was compiled against and overwritten from this file;
-        `SteamClient()` returns `SteamInternal_CreateInterface(old_client)`, which casts the one
-        implementation object to that version's class — `ISteamClient001` … `ISteamClient017` … are
-        distinct, differently-shaped vtables. A game built against an older SDK walks that pointer with ITS
-        header's slot numbering, so the two layouts must agree.
-
-        SET THIS whenever the game's OWN shipped `steam_api(64).dll` advertises an older SDK than the
-        default list. Read the revisions straight out of that dll (`strings`; upstream's
-        `generate_interfaces_file` tool does exactly this) — that file is the ground truth for what the
-        engine beside it will call. pkgs/games/cities-skylines is the worked example, and the measured
-        failure of getting it wrong: modern `ISteamClient` dropped `GetISteamUnifiedMessages`, so
-        `SteamClient017`'s slot 25 landed on the shim's `GetISteamController`, which does not recognise
-        `STEAMUNIFIEDMESSAGES_INTERFACE_VERSION001` and answers with a MODAL "Missing interface" MessageBox
-        and `std::exit()`.
       '';
     };
     emu.steamStub = lib.mkOption {
@@ -352,6 +346,31 @@ in
         compose, and absence is no longer the goal).
       '';
     };
+    emu.neverRequested = lib.mkOption {
+      type = knobTypes.dedupList lib.types.str;
+      default = [ ];
+      example = [ "STEAMVIDEO_INTERFACE_V003" ];
+      description = ''
+        Interface revisions the shipped steam_api library NAMES but this game is known never to REQUEST.
+
+        The entitlement gate (and `ci/gbe-interface-check.sh`) asks the pinned gbe_fork shim, by running
+        it, whether it serves every revision the library names, because an unserved one is a silent
+        exit 73 the moment the game asks. The library is a superset of the game's requests, though: it
+        carries an accessor for every family of its SDK, and the shim skips revisions no game needed. A
+        game that never touches such a family (ISteamVideo in a title with no video) is not at risk from
+        that family's revision, and this is where that is stated — per game, with the evidence in a
+        comment: which family, why the game cannot ask, and that it runs. Not a place to silence a
+        revision the game does use; that is a gbe_fork bump.
+      '';
+    };
+    # REMOVED. The revisions are scanned from the shipped library at build time (steam-offline-entitlement's
+    # `scanned`), so there is nothing left to pin by hand; a definition is refused by name below.
+    emu.interfaces = lib.mkOption {
+      type = lib.types.nullOr (lib.types.listOf lib.types.str);
+      default = null;
+      visible = false;
+      description = "Removed: interface revisions are scanned from the game's shipped steam_api library at build time.";
+    };
   };
 
   config = lib.mkIf cfg.steam.emu.enable {
@@ -359,7 +378,10 @@ in
     # every spawned host process, and the bind-over rows below already replace the file the real ld.so
     # resolves. mk-app.nix enforces that a native build declares its `.so` path, mirroring the wine rule.
     box64.guestPreload = lib.optionals (cfg.backend != "native") [ "${settings}/libsteam_api.so" ];
-    extraLowers = [ settings ];
+    extraLowers =
+      lib.throwIf (cfg.steam.emu.interfaces != null)
+        "propnix (${cfg.pname}): `steam.emu.interfaces` was removed — the interface revisions are now scanned from the game's own shipped steam_api library at build time (see steam.emu.libPaths); drop the definition. A revision the library names but the game never requests goes in `steam.emu.neverRequested`."
+        [ settings ];
     # steamclient mode: the backend starts the LOADER, which starts the game. The loader is in the
     # settings tree, which unions into the game dir, so a bare filename is the right game-dir-relative
     # path. `exe` itself stays the game's own binary — it is the icon source and what the INI names.
@@ -373,6 +395,9 @@ in
         let
           parent = builtins.dirOf p;
           dir = if parent == "." then "game" else "game/${parent}";
+          # Where this path's own settings live in the tree: the root for a root-level path, else the
+          # directory's copy (the root inis with THIS directory's scanned list — see the builder).
+          sub = if parent == "." then "" else "${parent}/";
           row = src: dst: {
             src = "${settings}/${src}";
             inherit dst;
@@ -382,8 +407,12 @@ in
         in
         [
           (row "libsteam_api.so" "game/${p}")
-          (row "steam_settings" "${dir}/steam_settings")
-          (row "steam_interfaces.txt" "${dir}/steam_interfaces.txt")
+          # The PER-DIRECTORY settings and list, scanned from this .so itself — gbe_fork reads
+          # `steam_settings/steam_interfaces.txt` beside the loaded lib first, then the bare file. (Under a
+          # guest loader the lookup resolves to the root list regardless; the builder's `preloadRoot` makes
+          # every declared .so agree with it there.)
+          (row "${sub}steam_settings" "${dir}/steam_settings")
+          (row "${sub}steam_interfaces.txt" "${dir}/steam_interfaces.txt")
         ]
       ) soPaths
     );

@@ -1360,6 +1360,7 @@ pub fn newest_on_pinned_branch(
 
 /// The newest DEFAULT-branch build, for the human-facing `gog latest` command.
 /// Shared knobs for a streaming hash run.
+#[derive(Clone)]
 pub struct HashOpts {
     pub workers: usize,
     pub window_bytes: u64,
@@ -1377,6 +1378,17 @@ pub struct HashOpts {
 }
 
 impl HashOpts {
+    /// The same run with progress off — for a side fetch (the fingerprint's steam_api libraries) that
+    /// must not draw a second bar over the main one. One place to say it, so a new knob here cannot be
+    /// forgotten in a hand copy.
+    pub fn quiet(&self) -> HashOpts {
+        HashOpts {
+            progress: false,
+            nix_progress: false,
+            ..self.clone()
+        }
+    }
+
     /// The progress sink for a download loop. `seed` is the pin's identity (unique per FOD, since a FOD
     /// IS its content address) and becomes the activity id; `uri` is what the bar is labelled with.
     pub fn progress_sink(&self, seed: &str, uri: String) -> crate::pin::download::ProgressSink {

@@ -11,7 +11,16 @@
           "outputHash": "sha256-IM/m4Vf9G0vxx91RwRQv7mVLPAsByZFeyQe5cVxcH14=",
           "depotKeySha256": "cc4f1f41c71595c349914abfaefeaa77c2a268a7538ac6dbdd8407f4623136fc",
           "manifestSha256": "def2b420df2c3e95f76cf660aeefac96c961cd304efba571dc8d5f08b5169c25",
-          "title": "Sid Meier's Civilization VI (windows binaries, Steam)"
+          "title": "Sid Meier's Civilization VI (windows binaries, Steam)",
+          "steamApiInterfaces": [
+            "SteamClient017",
+            "SteamClient018",
+            "SteamController007",
+            "SteamGameServer012",
+            "SteamInput001",
+            "SteamUser020",
+            "SteamUtils009"
+          ]
         },
         {
           "pname": "civilization-6-289071",
@@ -22,7 +31,8 @@
           "outputHash": "sha256-77qhrhAFzpKtH79mroxzWwY3aFWxMWKik/mWyclHNWE=",
           "depotKeySha256": "0a758f8b4b5e0e3a7b4ccd115fa2de31d86a7788a197b39fa5dcc0c4ba38f6b1",
           "manifestSha256": "d69517e4e2aae53be3f3abbbd39f19ee4e39541bab98c603e1d1eaa962c067d8",
-          "title": "Sid Meier's Civilization VI (windows content, Steam)"
+          "title": "Sid Meier's Civilization VI (windows content, Steam)",
+          "steamApiInterfaces": []
         },
         {
           "pname": "civilization-6-289085",
@@ -33,7 +43,8 @@
           "outputHash": "sha256-I/1L0MXFvOQSz2S0Xxg8ecY+AlfRqdfsW/Y+7DFiv0c=",
           "depotKeySha256": "1cc13076bc3327747baa42b320bb6dcba05a5aeaf67876cc4bb837fe8db92d1b",
           "manifestSha256": "93a527fd4c916d9c3955a7f0c9b8f9ce4dbd28bfbcfdd55799df0f153ea911c0",
-          "title": "Sid Meier's Civilization VI (windows expansions, Steam)"
+          "title": "Sid Meier's Civilization VI (windows expansions, Steam)",
+          "steamApiInterfaces": []
         },
         {
           "pname": "civilization-6-289089",
@@ -44,7 +55,39 @@
           "outputHash": "sha256-qxVxiBAy01+nvceVH+46q78F9bRaF86kIzP5URyfIL8=",
           "depotKeySha256": "f8c10b74eaed7d4bf6f4a12cc05e6f6a48c44ca0ff2a345462e82c5ec6006ea1",
           "manifestSha256": "74cb3972dbf6835a7dd975bd29da04142f281aa6a1bbc2885bd7e7174ac25778",
-          "title": "Sid Meier's Civilization VI (2K LaunchPad, Steam)"
+          "title": "Sid Meier's Civilization VI (2K LaunchPad, Steam)",
+          "steamApiInterfaces": [
+            "STEAMAPPLIST_INTERFACE_VERSION001",
+            "STEAMAPPS_INTERFACE_VERSION008",
+            "STEAMHTMLSURFACE_INTERFACE_VERSION_005",
+            "STEAMHTTP_INTERFACE_VERSION003",
+            "STEAMINVENTORY_INTERFACE_V003",
+            "STEAMMUSICREMOTE_INTERFACE_VERSION001",
+            "STEAMMUSIC_INTERFACE_VERSION001",
+            "STEAMPARENTALSETTINGS_INTERFACE_VERSION001",
+            "STEAMREMOTEPLAY_INTERFACE_VERSION001",
+            "STEAMREMOTESTORAGE_INTERFACE_VERSION014",
+            "STEAMSCREENSHOTS_INTERFACE_VERSION003",
+            "STEAMUGC_INTERFACE_VERSION014",
+            "STEAMUSERSTATS_INTERFACE_VERSION011",
+            "STEAMVIDEO_INTERFACE_V002",
+            "SteamClient017",
+            "SteamClient020",
+            "SteamController007",
+            "SteamFriends017",
+            "SteamGameServer013",
+            "SteamGameServerStats001",
+            "SteamInput001",
+            "SteamMatchGameSearch001",
+            "SteamMatchMaking009",
+            "SteamMatchMakingServers002",
+            "SteamNetworking006",
+            "SteamNetworkingSockets008",
+            "SteamNetworkingUtils003",
+            "SteamParties002",
+            "SteamUser020",
+            "SteamUtils009"
+          ]
         }
       ]
     }
@@ -57,7 +100,8 @@
       "manifestId": "1307444271017398491",
       "version": "15296837",
       "outputHash": "sha256-uzm4UZasKq+7OckpcQE7JBD6s+3+ualu37Z6lbsE434=",
-      "title": "Civilization VI: Aztec Civilization Pack (Steam)"
+      "title": "Civilization VI: Aztec Civilization Pack (Steam)",
+      "steamApiInterfaces": []
     },
     "australia": {
       "pname": "civilization-6-dlc-512034-512034",
@@ -66,7 +110,8 @@
       "manifestId": "2152869585815545599",
       "version": "15296837",
       "outputHash": "sha256-UKLzF3t94/hbJDAdZeqOSagBuk0pZ2sXLjpxqcQvyPM=",
-      "title": "Civilization VI: Australia Civilization & Scenario Pack (Steam)"
+      "title": "Civilization VI: Australia Civilization & Scenario Pack (Steam)",
+      "steamApiInterfaces": []
     },
     "khmer-indonesia": {
       "pname": "civilization-6-dlc-645401-645401",
@@ -75,7 +120,8 @@
       "manifestId": "1323691328654612056",
       "version": "15296837",
       "outputHash": "sha256-xv7LPhIMZQvYOd/ZmyHMl4U+nwWPuyqkCdGEvB1SBFU=",
-      "title": "Civilization VI: Khmer and Indonesia Civilization & Scenario Pack (Steam)"
+      "title": "Civilization VI: Khmer and Indonesia Civilization & Scenario Pack (Steam)",
+      "steamApiInterfaces": []
     },
     "nubia": {
       "pname": "civilization-6-dlc-645400-645400",
@@ -84,7 +130,8 @@
       "manifestId": "6669591788022875766",
       "version": "15296837",
       "outputHash": "sha256-4ejHW3uKt/ipTyHasSVQTOIBqOOJELKdntbVVywg2+c=",
-      "title": "Civilization VI: Nubia Civilization & Scenario Pack (Steam)"
+      "title": "Civilization VI: Nubia Civilization & Scenario Pack (Steam)",
+      "steamApiInterfaces": []
     },
     "persia-macedon": {
       "pname": "civilization-6-dlc-512035-512035",
@@ -93,7 +140,8 @@
       "manifestId": "1790067132481013428",
       "version": "15296837",
       "outputHash": "sha256-dyosTBlQjtTUN1iYQvWhVZHP1nhFfn/xsHKtuZrHVV4=",
-      "title": "Civilization VI: Persia and Macedon Civilization & Scenario Pack (Steam)"
+      "title": "Civilization VI: Persia and Macedon Civilization & Scenario Pack (Steam)",
+      "steamApiInterfaces": []
     },
     "poland": {
       "pname": "civilization-6-dlc-512033-512033",
@@ -102,7 +150,8 @@
       "manifestId": "6543787341305416944",
       "version": "15296837",
       "outputHash": "sha256-SO9tQGbO30ZFQXQZlyhblWSmB9rYiP361gCMtUyfkLs=",
-      "title": "Civilization VI: Poland Civilization & Scenario Pack (Steam)"
+      "title": "Civilization VI: Poland Civilization & Scenario Pack (Steam)",
+      "steamApiInterfaces": []
     },
     "vikings": {
       "pname": "civilization-6-dlc-512032-512032",
@@ -111,7 +160,8 @@
       "manifestId": "289731471744368186",
       "version": "15296837",
       "outputHash": "sha256-Jd7jO2Dcmyk8tAbXSYc7RIGOUqfSBa+/wHoIIzqE0GQ=",
-      "title": "Civilization VI: Vikings Scenario Pack (Steam)"
+      "title": "Civilization VI: Vikings Scenario Pack (Steam)",
+      "steamApiInterfaces": []
     }
   }
 }

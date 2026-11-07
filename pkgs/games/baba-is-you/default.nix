@@ -137,43 +137,19 @@ mkApp (
         ];
     };
 
-    # ── STEAMWORKS ──────────────────────────────────────────────────────────────────────────────────────
-    # The engine links `bin64/libsteam_api.so` beside itself, so the shim is bound over that exact path.
-    # The interface list is read out of the shipped library with `strings` (what upstream's own
-    # `generate_interfaces_file` does), so it states what THIS build asks for rather than what the shim
-    # happens to default to. It is a recent SDK — SteamClient020/SteamUser023 — and both SteamClient
-    # revisions the library names are listed, since the engine may ask for either.
     steam.emu.libPaths = [ "bin64/libsteam_api.so" ];
-    steam.emu.interfaces = [
-      "SteamClient017"
-      "SteamClient020"
-      "SteamUser023"
-      "SteamFriends017"
-      "SteamUtils010"
-      "SteamMatchMaking009"
-      "SteamMatchMakingServers002"
-      "SteamGameServer015"
-      "SteamGameServerStats001"
-      "SteamNetworking006"
-      "SteamNetworkingMessages002"
-      "SteamNetworkingSockets012"
-      "SteamNetworkingUtils004"
-      "SteamController008"
-      "SteamInput006"
-      "SteamParties002"
-      "SteamMatchGameSearch001"
-      "STEAMAPPS_INTERFACE_VERSION008"
-      "STEAMAPPLIST_INTERFACE_VERSION001"
-      "STEAMUSERSTATS_INTERFACE_VERSION012"
-      "STEAMREMOTESTORAGE_INTERFACE_VERSION016"
-      "STEAMSCREENSHOTS_INTERFACE_VERSION003"
-      "STEAMHTTP_INTERFACE_VERSION003"
-      "STEAMUGC_INTERFACE_VERSION018"
-      "STEAMMUSIC_INTERFACE_VERSION001"
-      "STEAMMUSICREMOTE_INTERFACE_VERSION001"
-      "STEAMREMOTEPLAY_INTERFACE_VERSION002"
-      "STEAMPARENTALSETTINGS_INTERFACE_VERSION001"
-    ];
+
+    # The shipped libsteam_api.so names STEAMVIDEO_INTERFACE_V003, which the pinned gbe_fork does not serve
+
+    # (its ISteamVideo ladder is V001, V002 and the current V007 — asked of the shim by the oracle, not
+
+    # guessed). Baba is a Chowdren title with no video feature: nothing in it opens ISteamVideo, so the
+
+    # revision is never requested and the game runs (verified in play with the shim). The library carries
+
+    # the accessor merely because its SDK has the family.
+
+    steam.emu.neverRequested = [ "STEAMVIDEO_INTERFACE_V003" ];
 
     # ── SDL'S VIDEO DRIVER: PINNED TO X11 ───────────────────────────────────────────────────────────────
     # Without this the game EXITS 1 before drawing anything, and the reason is inherited state rather than

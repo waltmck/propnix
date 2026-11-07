@@ -98,6 +98,13 @@ struct PinArgs {
     /// Only report whether upstream has moved, as JSON. Anonymous — needs no credential.
     #[arg(long, conflicts_with_all = ["recompute", "latest", "new", "stdout"])]
     check: bool,
+    /// Record each Steam row's `steamApiInterfaces` — the interface revisions its shipped steam_api
+    /// libraries name — WITHOUT moving any pin. Fetches only those libraries (login-free where the
+    /// row's cache anchors are warm). `pin` and `pin --new` record the field as they go; this
+    /// backfills rows pinned before it existed, or re-derives one from real bytes on demand. Rows no
+    /// stored account can fetch are reported blocked (exit 4) after every other row is written.
+    #[arg(long, conflicts_with_all = ["check", "recompute", "latest", "new", "stdout"])]
+    fingerprint: bool,
     /// Write the new document to stdout instead of rewriting versions.json in place.
     #[arg(long)]
     stdout: bool,
@@ -277,6 +284,13 @@ enum DownloadCmd {
         /// Cache trust anchor: sha256 (hex) of the raw manifest, from the pin's `manifestSha256`.
         #[arg(long)]
         manifest_sha256: Option<String>,
+        /// Limit the download to these exact manifest-relative paths (repeatable; chunks of other
+        /// files are never fetched). A path absent from the manifest is reported, not an error — a
+        /// multi-depot game ships each file in exactly one depot. The same filter is what `propnix pin`
+        /// uses to pull a depot's steam_api libraries alone for the `steamApiInterfaces` fingerprint
+        /// (pin::steam::fingerprint_depot_any); by hand it fetches one file out of a multi-GB depot.
+        #[arg(long)]
+        only: Vec<String>,
         /// Emit progress as `@nix` structured activities on stderr instead of a human bar, so a FOD
         /// build shows a real progress bar under `nix build` / `nom`. Set by fetchSteamDepot /
         /// fetchGogGalaxyBuild; leave it off for an interactive run.
@@ -322,9 +336,10 @@ enum DownloadCmd {
 enum CredAction {
     /// List stored credentials, grouped by account type and labelled by username.
     List,
-    /// Add an account of the given type (e.g. `gog`) via an interactive browser login.
+    /// Add an account of the given type via its interactive login: `gog` opens a browser login and reads
+    /// back the redirect URL; `steam` runs a one-time Steam Guard login and stores the reusable token.
     Add {
-        /// Account type: `gog` (more later).
+        /// Account type: `gog` or `steam`.
         #[arg(value_name = "TYPE")]
         r#type: String,
     },
@@ -348,7 +363,33 @@ enum CredAction {
     },
 }
 
+/// Point reqwest's platform verifier at the CA bundle the wrapper names in `PROPNIX_CA_BUNDLE`, but
+/// only when nothing real is configured. This used to be a `--run` shell snippet in the wrapper; it
+/// lives here so the wrapper can be a BINARY wrapper (makeBinaryWrapper has no `--run` — it cannot
+/// branch on an env var's VALUE, and `--set-default` is not enough: a Nix BUILD sandbox pre-sets
+/// SSL_CERT_FILE to the sentinel /no-cert-file.crt — deliberately, to stop builders trusting anything —
+/// which would win and leave reqwest with "No CA certificates were loaded from the system"; `propnix
+/// download` runs inside exactly such sandboxes). A genuine user override — a corporate proxy bundle,
+/// say — is still respected.
+fn seat_ca_bundle(current: Option<&str>, bundle: Option<&str>) -> Option<String> {
+    match (current, bundle) {
+        // Unset, set-but-EMPTY (`export SSL_CERT_FILE="$unset_var"` is common), or the build
+        // sandbox's sentinel: nothing real is configured, seat the bundle.
+        (None, Some(b)) | (Some(""), Some(b)) | (Some("/no-cert-file.crt"), Some(b)) => {
+            Some(b.to_owned())
+        }
+        _ => None,
+    }
+}
+
 fn main() -> ExitCode {
+    if let Some(bundle) = seat_ca_bundle(
+        std::env::var("SSL_CERT_FILE").ok().as_deref(),
+        std::env::var("PROPNIX_CA_BUNDLE").ok().as_deref(),
+    ) {
+        // Single-threaded this early; nothing has read the environment yet.
+        std::env::set_var("SSL_CERT_FILE", bundle);
+    }
     let cli = Cli::parse();
     let result: Result<(), Box<dyn std::error::Error>> = match cli.command {
         Command::Cred { action } => match action {
@@ -455,6 +496,18 @@ fn cmd_pin(a: PinArgs) -> Result<(), Box<dyn std::error::Error>> {
         opts.gog_account.as_deref(),
         opts.steam_account.as_deref(),
     )?;
+    if a.fingerprint {
+        let (doc, blocked) = pin::fingerprint(&opts)?;
+        land(&opts, &doc, false, false)?;
+        if !blocked.is_empty() {
+            return Err(Box::new(pin::Blocked::NotOwned(format!(
+                "{} Steam row(s) could not be fingerprinted by any stored account: {}",
+                blocked.len(),
+                blocked.join("; ")
+            ))));
+        }
+        return Ok(());
+    }
     if a.new {
         // Refuse BEFORE the expensive resolve-and-hash, not at landing time. A scaffold is generic
         // placeholders, and — since `pin` writes in place — landing one over an existing versions.json
@@ -606,6 +659,7 @@ fn cmd_download(what: DownloadCmd) -> Result<(), Box<dyn std::error::Error>> {
             window_mib,
             depot_key_sha256,
             manifest_sha256,
+            only,
             nix_progress,
         } => {
             std::fs::create_dir_all(&dir)?;
@@ -627,7 +681,7 @@ fn cmd_download(what: DownloadCmd) -> Result<(), Box<dyn std::error::Error>> {
             // half-pair through would just make `acquire` probe the cache for nothing.
             let anchors = depot_key_sha256.as_deref().zip(manifest_sha256.as_deref());
             let w = steam::download_depot_any(
-                app, depot, manifest, &branch, anonymous, &dir, anchors, &opts,
+                app, depot, manifest, &branch, anonymous, &dir, anchors, &opts, &only,
             )?;
             eprintln!(
                 "  wrote {} files, {} dirs, {} content bytes to {}",
@@ -999,5 +1053,33 @@ fn cmd_verify(what: VerifyCmd) -> Result<(), Box<dyn std::error::Error>> {
                 .into())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod ca_bundle_tests {
+    use super::seat_ca_bundle;
+
+    #[test]
+    fn unset_takes_the_bundle() {
+        assert_eq!(seat_ca_bundle(None, Some("/ca.crt")), Some("/ca.crt".into()));
+    }
+    #[test]
+    fn sandbox_sentinel_is_overridden() {
+        assert_eq!(
+            seat_ca_bundle(Some("/no-cert-file.crt"), Some("/ca.crt")),
+            Some("/ca.crt".into())
+        );
+    }
+    #[test]
+    fn a_real_user_value_is_respected() {
+        assert_eq!(seat_ca_bundle(Some("/corp/proxy.pem"), Some("/ca.crt")), None);
+        // set but empty is "nothing configured", exactly as the old `[ -z "${SSL_CERT_FILE:-}" ]` read it
+        assert_eq!(seat_ca_bundle(Some(""), Some("/ca.crt")), Some("/ca.crt".into()));
+    }
+    #[test]
+    fn no_bundle_means_no_op() {
+        assert_eq!(seat_ca_bundle(Some("/no-cert-file.crt"), None), None);
+        assert_eq!(seat_ca_bundle(None, None), None);
     }
 }

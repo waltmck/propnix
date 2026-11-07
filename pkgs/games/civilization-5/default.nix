@@ -187,36 +187,6 @@ mkApp (
     # `online = false` would remove. Single-player users lose nothing by taking it away:
     # `civilization-5.apply { online = false; }`.
 
-    # THE SHIM MUST HAND OUT THE VTABLES THIS BUILD ASKS FOR. Every string is read out of the payload's own
-    # `libsteam_api.so` with `strings` — which is what upstream's `generate_interfaces_file` does, so this
-    # is a fact about the binary rather than a guess. Left at the shim's own defaults, a game whose
-    # requested version string the modern class doesn't recognise gets `report_missing_impl_and_exit()` — a
-    # modal MessageBox and a dead process, which pkgs/games/cities-skylines documents from the other side.
-    #
-    # NOTE these are NOT the Windows build's numbers: Aspyr's port was built against a later SDK, and nine
-    # of the sixteen differ (SteamUser017 vs 016, SteamFriends014 vs 011, SteamUtils006 vs 005,
-    # REMOTESTORAGE 012 vs 006, USERSTATS 011 vs 010, APPS 006 vs 005, SCREENSHOTS/HTTP 002 vs 001, plus
-    # UGC and UnifiedMessages, which the Windows build's dll doesn't mention at all). Copying the Windows
-    # list over would have been a silent, hard-to-trace wrong answer.
-    steam.emu.interfaces = [
-      "SteamClient012"
-      "SteamUser017"
-      "SteamFriends014"
-      "SteamUtils006"
-      "SteamMatchMaking009"
-      "SteamMatchMakingServers002"
-      "SteamGameServer011"
-      "SteamGameServerStats001"
-      "SteamNetworking005"
-      "STEAMAPPS_INTERFACE_VERSION006"
-      "STEAMUSERSTATS_INTERFACE_VERSION011"
-      "STEAMREMOTESTORAGE_INTERFACE_VERSION012"
-      "STEAMSCREENSHOTS_INTERFACE_VERSION002"
-      "STEAMHTTP_INTERFACE_VERSION002"
-      "STEAMUGC_INTERFACE_VERSION001"
-      "STEAMUNIFIEDMESSAGES_INTERFACE_VERSION001"
-    ];
-
     # The engine links `libsteam_api.so` from the game root (the i386 build of it — the framework picks
     # gbe_fork's matching ABI from the resolved platform). On a thin backend the mechanism is a BIND-OVER:
     # steam-emu binds its own shim copy, with its settings beside it, onto this exact game-dir-relative

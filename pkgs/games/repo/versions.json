@@ -9,7 +9,40 @@
           "manifestId": "8225435692675993447",
           "version": "23363152",
           "outputHash": "sha256-/tue1px3NtIl2JYv0Bo0iw95ZpBIqu4GlDTsXXJK+SU=",
-          "title": "R.E.P.O. (windows, Steam)"
+          "title": "R.E.P.O. (windows, Steam)",
+          "steamApiInterfaces": [
+            "STEAMAPPS_INTERFACE_VERSION008",
+            "STEAMHTMLSURFACE_INTERFACE_VERSION_005",
+            "STEAMHTTP_INTERFACE_VERSION003",
+            "STEAMINVENTORY_INTERFACE_V003",
+            "STEAMMUSICREMOTE_INTERFACE_VERSION001",
+            "STEAMMUSIC_INTERFACE_VERSION001",
+            "STEAMPARENTALSETTINGS_INTERFACE_VERSION001",
+            "STEAMREMOTEPLAY_INTERFACE_VERSION002",
+            "STEAMREMOTESTORAGE_INTERFACE_VERSION016",
+            "STEAMSCREENSHOTS_INTERFACE_VERSION003",
+            "STEAMTIMELINE_INTERFACE_V004",
+            "STEAMUGC_INTERFACE_VERSION020",
+            "STEAMUSERSTATS_INTERFACE_VERSION013",
+            "STEAMVIDEO_INTERFACE_V007",
+            "SteamClient017",
+            "SteamClient021",
+            "SteamController008",
+            "SteamFriends017",
+            "SteamGameServer015",
+            "SteamGameServerStats001",
+            "SteamInput006",
+            "SteamMatchGameSearch001",
+            "SteamMatchMaking009",
+            "SteamMatchMakingServers002",
+            "SteamNetworking006",
+            "SteamNetworkingMessages002",
+            "SteamNetworkingSockets012",
+            "SteamNetworkingUtils004",
+            "SteamParties002",
+            "SteamUser023",
+            "SteamUtils010"
+          ]
         }
       ]
     }

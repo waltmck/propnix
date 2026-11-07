@@ -140,7 +140,7 @@ triple + the guard semantics.
 | `pkgs/propnix-launcher/` | the Rust launcher (GTK4 splash + single-instance + env-seal + mount-table orchestration, PREFIX + THIN modes); links `pkgs/propnix-mount/` (the userns bind/overlay layer) and `pkgs/propnix-prefetch/` (the `posix_fadvise` page-cache warmer — run by the wine INNER over the assembled prefix, PE modules only: `.dll`/`.drv`/`.exe`) as library crates — they are not separate packages |
 | `pkgs/games/<name>/` | one game per directory — `default.nix` (the `mkApp` module) + pinned `versions.json` (the `fetchInfo` fetch matrix) + optional `wine-tuning.nix`/`box64-tuning.nix`/`setup.sh`; auto-discovered into the scope + a flake package/app |
 | `nixos/propnix.nix` | host module: binds the credential dir into the build sandbox, loads `ntsync`, trusts `propnix.cachix.org`, installs the `propnix` CLI, materializes declared credentials (sops-nix/agenix) |
-| `ci/` | the gate scripts CI runs, each usable by hand: `eval-matrix.sh <system>` (one `nix eval` per pinned game × fetcher × platform), `cache-audit.sh <system>` (nothing non-unfree is left for users to compile), `pin-refresh.sh` + `pin-issue.sh` (weekly pin refresh and its issue lifecycle, with an offline `pin-issue-test.sh`), `readme-tables.sh` (the README's two supported-games tables regenerated from the resolver and diffed; `--write` rewrites them, which is how you add a game to them) |
+| `ci/` | the gate scripts CI runs, each usable by hand: `eval-matrix.sh <system>` (one `nix eval` per pinned game × fetcher × platform), `cache-audit.sh <system>` (nothing non-unfree is left for users to compile), `pin-refresh.sh` + `pin-issue.sh` (weekly pin refresh and its issue lifecycle, with an offline `pin-issue-test.sh`), `gbe-interface-check.sh <system>` (every Steam pin's recorded `steamApiInterfaces` fingerprint held against the pinned gbe_fork by *asking the shim* — `gbeFork.interfaceOracle` runs it — no credential, so `eval.yml` runs it on every push to any branch and every PR including forks; a row without the field is reported unverified, the fix being `propnix pin <game> --fingerprint`; `gbe-interface-check-test.sh` drives every verdict of it against stubs), `readme-tables.sh` (the README's two supported-games tables regenerated from the resolver and diffed; `--write` rewrites them, which is how you add a game to them) |
 | `tools/` | `unwind-guest-stack.py` — an exact x86_64 guest-stack unwinder for FEX-under-ARM64EC-wine, where neither winedbg nor FEX can produce a backtrace and stack-scanning yields false frames |
 | `config/` | credential model + host-capability facts (reference) |
 | `docs/DESIGN.md` | the architecture decision record |
@@ -156,6 +156,25 @@ Drop a directory under `pkgs/games/<name>/` — it's auto-discovered into the sc
   recursive SRI `outputHash`; Steam: `pname`/`appId`/`depotId`/`manifestId`/`outputHash`; several arg-sets
   = several depots, unioned read-only at launch, first wins). A populated pair *is* availability — an
   unpinned selection is a legible eval error.
+
+  Every Steam row also carries **`steamApiInterfaces`**: the interface-revision strings the depot's
+  shipped `steam_api` libraries name (the union over all of them — per-arch copies included), captured
+  by `propnix pin` while the bytes are in hand and held against the pinned gbe_fork by a CI check on
+  every push and pull request (`ci/gbe-interface-check.sh`, a job of `eval.yml`). The check asks the
+  shim itself: `gbeFork.interfaceOracle` runs the pinned build and requests each revision the way a
+  game would, because the shim's dispatcher routes by prefix and exact ladders with fatal exits in
+  some families and NULL in others, which no reading of its source reproduces. It is the pin-time
+  answer to a runtime wall that is otherwise silent — a game whose SDK names a revision the shim lacks
+  exits 73 at Steam init. The library names a *superset* of what the game requests, so a revision the
+  shim lacks in a family the game never uses is declared per game in `steam.emu.neverRequested` (with
+  the evidence) and reported as tolerated; a game with `steam.emu.enable = false` is exempt. Rows
+  pinned before the field existed are backfilled, without moving them, by `propnix pin <game>
+  --fingerprint`; a depot that ships no such library records `[]`. The scanner's pattern list
+  (`pkgs/propnix-cli/steam-api-interface-patterns.txt`) is diffed against the pinned generator's on
+  every run, so a new interface family upstream fails CI instead of going unrecorded. The gate covers
+  interface revisions only: the flat `SteamAPI_*` export surface is not fingerprinted, so a game
+  binary importing an export the shim lacks (a load-time failure, not the exit-73 init failure) is
+  still caught only by a run.
 
   Two optional sibling sections: **`dlc`** (name → one arg-set per pack, mounted above the base when
   enabled — see the DLC framework) and **`extra`** (name → one arg-set for an upstream artifact that is a
@@ -348,6 +367,17 @@ rely on the same distinction from every subcommand (`pin`, `hash`, `steam-probe`
   would otherwise race the very build that publishes it) re-checks every game and closes its "pin is
   behind upstream" issue once the pin genuinely matches upstream. It re-verifies rather than trusting the
   repo state, because editing the file is not the same as being current.
+- **`.github/workflows/eval.yml`** (every push to any branch, every pull request including forks) is
+  the pure gate: the resolution checks, the `ci/eval-matrix.sh` sweep and `ci/cache-audit.sh` per
+  system, the README tables, the pin-issue lifecycle test, and `ci/gbe-interface-check.sh` (each Steam
+  row's recorded `steamApiInterfaces` held against the pinned gbe_fork source, so the commit that
+  moves a pin past the shim goes red naming the game, the row and the revisions). Three rules keep
+  "every push" cheap without ever letting a skipped run outrank a real one: a newer push to the same
+  branch or PR cancels the superseded run; a `memo` job looks for a *push* run of the same commit
+  (a same-repo PR's head was pushed first; a fork's never was) and skips if it passed, waits if it is
+  still going, and runs if it failed, so the newest check on a commit is always a real verdict; and
+  it then skips when HEAD's *tree* already passed a recent push run — a fast-forward to master or a
+  no-op rebase is not re-evaluated. A manual `workflow_dispatch` is never memoized.
 
 The issue lifecycle (`ci/pin-issue.sh`) gives each game **exactly one open issue, ever**: it is edited in
 place when upstream moves again — and only then, so a long-stale game does not notify anyone weekly — and

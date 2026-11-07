@@ -1,0 +1,42 @@
+# gbe_fork's tools/generate_interfaces pattern list, VERBATIM (one regex body per line, upstream order):
+# the strings `propnix pin` scans a shipped steam_api library for when it records `steamApiInterfaces`.
+# Every entry is a literal prefix followed by \d+, or a bare literal. ci/gbe-interface-check.sh diffs
+# this file against the pinned shim's own generator on every push, so a family added upstream fails CI
+# instead of going unrecorded. After changing it, re-run `propnix pin <game> --fingerprint` everywhere.
+STEAMAPPS_INTERFACE_VERSION\d+
+SteamApps\d+
+STEAMAPPLIST_INTERFACE_VERSION\d+
+STEAMAPPTICKET_INTERFACE_VERSION\d+
+SteamClient\d+
+STEAMCONTROLLER_INTERFACE_VERSION
+SteamController\d+
+SteamFriends\d+
+SteamGameServerStats\d+
+SteamGameCoordinator\d+
+SteamGameServer\d+
+STEAMHTMLSURFACE_INTERFACE_VERSION_\d+
+STEAMHTTP_INTERFACE_VERSION\d+
+SteamInput\d+
+STEAMINVENTORY_INTERFACE_V\d+
+SteamMatchMakingServers\d+
+SteamMatchMaking\d+
+SteamMatchGameSearch\d+
+SteamParties\d+
+STEAMMUSIC_INTERFACE_VERSION\d+
+STEAMMUSICREMOTE_INTERFACE_VERSION\d+
+SteamNetworkingMessages\d+
+SteamNetworkingSockets\d+
+SteamNetworkingUtils\d+
+SteamNetworking\d+
+STEAMPARENTALSETTINGS_INTERFACE_VERSION\d+
+STEAMREMOTEPLAY_INTERFACE_VERSION\d+
+STEAMREMOTESTORAGE_INTERFACE_VERSION\d+
+STEAMSCREENSHOTS_INTERFACE_VERSION\d+
+STEAMTIMELINE_INTERFACE_V\d+
+STEAMUGC_INTERFACE_VERSION\d+
+SteamUser\d+
+STEAMUSERSTATS_INTERFACE_VERSION\d+
+SteamUtils\d+
+STEAMVIDEO_INTERFACE_V\d+
+STEAMUNIFIEDMESSAGES_INTERFACE_VERSION\d+
+SteamMasterServerUpdater\d+

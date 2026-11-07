@@ -152,18 +152,31 @@ jobs:
   # same change). The script header has what it tolerates, exempts and does not cover. Once: the rows
   # cover every platform and the shim's dispatch is the same on every host; the system named below
   # picks the attribute path and labels the output.
+  #
+  # NOT on master pushes: there cachix.yml runs the same job, ordered after its tools leg has pushed
+  # gbeFork, so a push that changes the shim never has two runners compiling it at once. Here it covers
+  # branches and pull requests, where cachix.yml never runs; the shim substitutes from the cache
+  # unless the change under test is a gbe_fork bump itself, in which case this is its one build.
   gbe-interfaces:
     name: Steam SDK fingerprints vs the pinned gbe_fork
     needs: memo
-    if: needs.memo.outputs.skip != 'true'
+    if: needs.memo.outputs.skip != 'true' && !(github.event_name == 'push' && github.ref == 'refs/heads/master')
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The one slow path is a branch or PR that bumps gbe_fork: the shim's static-protobuf stack is not on
+    # the cache yet and builds here, once (~20 min on a runner). Every other run substitutes in seconds.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+      # The oracle RUNS the real shim, so this job needs gbeFork's x86_64 build — from the propnix cachix,
+      # not compiled here. Pull-only, no token: fork PRs get the same substitution.
+      - uses: cachix/cachix-action@v16
+        with:
+          name: propnix
+          skipPush: 'true'
       - run: ci/gbe-interface-check.sh x86_64-linux
       # The gate's own regression test: every verdict it can give, driven against stubs.
       - run: ci/gbe-interface-check-test.sh

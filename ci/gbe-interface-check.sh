@@ -2,8 +2,10 @@
 # ci/gbe-interface-check.sh <system> — hold every Steam pin's recorded Steamworks-SDK fingerprint to the
 # pinned gbe_fork, by ASKING THE SHIM. No credential, no payload, no network beyond substituting the
 # shim's oracle (on cachix; built from source otherwise) — so it runs on every push and every pull
-# request, fork PRs included (a job of .github/workflows/eval.yml), and the commit that moves a pin past
-# the shim is the one that goes red, naming the game, the row and the revisions.
+# request, fork PRs included: a job of .github/workflows/eval.yml for branches and PRs, and of
+# cachix.yml for master pushes, there ordered after the tools leg has pushed the shim so nothing is
+# built twice. The commit that moves a pin past the shim is the one that goes red, naming the game,
+# the row and the revisions.
 #
 # THE QUESTION. `steamApiInterfaces` on each Steam row of versions.json is every interface-revision
 # string the depot's shipped steam_api libraries name, captured by `propnix pin` at pin time (when the

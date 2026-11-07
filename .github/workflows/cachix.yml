@@ -10,7 +10,7 @@
 #
 #   wine (both systems; the multi-hour long pole, nixpkgs-only deps) ─────────┐
 #   toolchain (aarch64 llvmMingw; fast prebuilt fetch) ─→ arm64ec fan-out ────┼─→ prefix-lower
-#   tools (Rust launcher/cli + box64 / x86_64 dxvk+vkd3d; independent roots)  │
+#   tools (Rust launcher/cli + box64 / x86_64 dxvk+vkd3d; independent roots) ─→ gbe-interfaces
 #   fex-linux (aarch64 FEXInterpreter; independent root)                      │
 #
 # (prefix-lower `needs` the whole wine + arm64ec jobs — GitHub can't express per-matrix-entry edges —
@@ -96,6 +96,31 @@ jobs:
   # guests, so it tests the page size the runner happens to have (4 KiB here, 16 KiB on the Asahi dev
   # host). That is extra coverage, not a caveat — if this leg ever fails where the dev host passes, the
   # runtime really is broken for small-page hosts and the fork's page-portability claim is false.
+  # The Steam-SDK-vs-gbe_fork gate for MASTER pushes, here rather than in eval.yml so that it runs
+  # AFTER the tools leg has pushed gbeFork: its oracle runs the real shim, and a push that changes the
+  # shim would otherwise have eval.yml compiling the same static-protobuf stack at the same moment this
+  # workflow builds it. Ordered by `needs`, it substitutes in seconds. eval.yml keeps the job for
+  # branches and pull requests, where this workflow never runs. A failure here fails this run like a
+  # broken build would — the pin that outran the shim is as unshippable as a package that will not
+  # compile — while pin-issues.yml, which keys on completion rather than success, still sweeps.
+  gbe-interfaces:
+    name: Steam SDK fingerprints vs the pinned gbe_fork
+    needs: tools
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - uses: cachix/cachix-action@v16
+        with:
+          name: propnix
+          skipPush: 'true'
+      - run: ci/gbe-interface-check.sh x86_64-linux
+      - run: ci/gbe-interface-check-test.sh
+
   fex-linux:
     name: fex-linux (aarch64-linux)
     runs-on: ubuntu-24.04-arm

@@ -140,7 +140,7 @@ triple + the guard semantics.
 | `pkgs/propnix-launcher/` | the Rust launcher (GTK4 splash + single-instance + env-seal + mount-table orchestration, PREFIX + THIN modes); links `pkgs/propnix-mount/` (the userns bind/overlay layer) and `pkgs/propnix-prefetch/` (the `posix_fadvise` page-cache warmer — run by the wine INNER over the assembled prefix, PE modules only: `.dll`/`.drv`/`.exe`) as library crates — they are not separate packages |
 | `pkgs/games/<name>/` | one game per directory — `default.nix` (the `mkApp` module) + pinned `versions.json` (the `fetchInfo` fetch matrix) + optional `wine-tuning.nix`/`box64-tuning.nix`/`setup.sh`; auto-discovered into the scope + a flake package/app |
 | `nixos/propnix.nix` | host module: binds the credential dir into the build sandbox, loads `ntsync`, trusts `propnix.cachix.org`, installs the `propnix` CLI, materializes declared credentials (sops-nix/agenix) |
-| `ci/` | the gate scripts CI runs, each usable by hand: `eval-matrix.sh <system>` (one `nix eval` per pinned game × fetcher × platform), `cache-audit.sh <system>` (nothing non-unfree is left for users to compile), `pin-refresh.sh` + `pin-issue.sh` (weekly pin refresh and its issue lifecycle, with an offline `pin-issue-test.sh`), `gbe-interface-check.sh <system>` (every Steam pin's recorded `steamApiInterfaces` fingerprint held against the pinned gbe_fork by *asking the shim* — `gbeFork.interfaceOracle` runs it — no credential, so `eval.yml` runs it on every push to any branch and every PR including forks; a row without the field is reported unverified, the fix being `propnix pin <game> --fingerprint`; `gbe-interface-check-test.sh` drives every verdict of it against stubs), `readme-tables.sh` (the README's two supported-games tables regenerated from the resolver and diffed; `--write` rewrites them, which is how you add a game to them) |
+| `ci/` | the gate scripts CI runs, each usable by hand: `eval-matrix.sh <system>` (one `nix eval` per pinned game × fetcher × platform), `cache-audit.sh <system>` (nothing non-unfree is left for users to compile), `pin-refresh.sh` + `pin-issue.sh` (weekly pin refresh and its issue lifecycle, with an offline `pin-issue-test.sh`), `gbe-interface-check.sh <system>` (every Steam pin's recorded `steamApiInterfaces` fingerprint held against the pinned gbe_fork by *asking the shim* — `gbeFork.interfaceOracle` runs it — no credential, so it runs on every push and every PR including forks (`eval.yml` for branches and PRs, `cachix.yml` for master pushes, after the shim is pushed); a row without the field is reported unverified, the fix being `propnix pin <game> --fingerprint`; `gbe-interface-check-test.sh` drives every verdict of it against stubs), `readme-tables.sh` (the README's two supported-games tables regenerated from the resolver and diffed; `--write` rewrites them, which is how you add a game to them) |
 | `tools/` | `unwind-guest-stack.py` — an exact x86_64 guest-stack unwinder for FEX-under-ARM64EC-wine, where neither winedbg nor FEX can produce a backtrace and stack-scanning yields false frames |
 | `config/` | credential model + host-capability facts (reference) |
 | `docs/DESIGN.md` | the architecture decision record |
@@ -354,7 +354,9 @@ rely on the same distinction from every subcommand (`pin`, `hash`, `steam-probe`
   reachable from a job in this workflow — by name in its `attrs` or through its closure (wineMono rides
   inside prefixLower). It reads the expectations out of the workflow, per system, so there is one list
   rather than two; the per-system precision is the point, since a package like `galaxyStub` is a
-  different derivation on each host and was once covered on only one of them.
+  different derivation on each host and was once covered on only one of them. After the tools leg has
+  pushed `gbeFork`, the same run performs the Steam-SDK-vs-gbe_fork check (`ci/gbe-interface-check.sh`,
+  whose oracle runs the just-pushed shim), so a master push never has two runners compiling the shim.
 - **`.github/workflows/auto-update.yml`** (weekly, plus `workflow_dispatch`) builds and pushes the CLI to
   cachix, then substitutes it (`--max-jobs 0`, so it fails loudly rather than quietly recompiling) and runs
   `ci/pin-refresh.sh`. Stage 1 checks every packaged game anonymously in a few seconds; only a game that moved
@@ -369,9 +371,10 @@ rely on the same distinction from every subcommand (`pin`, `hash`, `steam-probe`
   repo state, because editing the file is not the same as being current.
 - **`.github/workflows/eval.yml`** (every push to any branch, every pull request including forks) is
   the pure gate: the resolution checks, the `ci/eval-matrix.sh` sweep and `ci/cache-audit.sh` per
-  system, the README tables, the pin-issue lifecycle test, and `ci/gbe-interface-check.sh` (each Steam
-  row's recorded `steamApiInterfaces` held against the pinned gbe_fork source, so the commit that
-  moves a pin past the shim goes red naming the game, the row and the revisions). Three rules keep
+  system, the README tables, the pin-issue lifecycle test, and — on branches and PRs, master pushes
+  getting it from `cachix.yml` after the shim is pushed — `ci/gbe-interface-check.sh` (each Steam
+  row's recorded `steamApiInterfaces` held against the pinned gbe_fork by running it, so the commit
+  that moves a pin past the shim goes red naming the game, the row and the revisions). Three rules keep
   "every push" cheap without ever letting a skipped run outrank a real one: a newer push to the same
   branch or PR cancels the superseded run; a `memo` job looks for a *push* run of the same commit
   (a same-repo PR's head was pushed first; a fork's never was) and skips if it passed, waits if it is

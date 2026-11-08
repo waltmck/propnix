@@ -1,5 +1,6 @@
-# Space Engineers (Steam, Windows build) via wine — on aarch64 through FEX + native ARM64EC DXVK, on
-# x86_64 natively. Keen Software House's VRage 2 engine: a MANAGED .NET Framework game (Sandbox.*/VRage.*
+# Space Engineers (Steam, Windows build) via wine — on aarch64 with a NATIVE ARM64EC Mono runtime (the
+# managed game code is JIT-compiled to ARM64; emulators/wine-mono patches/0002), native ARM64EC DXVK, and
+# FEX only for the game's own x64 DLLs (Havok, steam_api64, …); on x86_64 natively. Keen Software House's VRage 2 engine: a MANAGED .NET Framework game (Sandbox.*/VRage.*
 # assemblies, Steamworks.NET, EmptyKeys UI, Roslyn for in-game scripting) driving native D3D11 through
 # SharpDX, with Havok and RecastDetour as native DLLs beside it. ARCH-AGNOSTIC: this spec is identical on
 # both hosts; mkApp + the scope pick the arch-appropriate emulator set and the SAME Windows payload (a
@@ -110,70 +111,14 @@ mkApp (
     # intro. NOT `-nosplash`: the WinForms splash works fine here.
     exeArgs = [ "-skipintro" ];
 
-    # ── aarch64: FIXED IN THE RUNTIME, NOT HERE ───────────────────────────────────────────────────────
-    # This title did not start on aarch64, and the cause was not in the game: Wine Mono kept a
-    # native-callable INSTANCE delegate alive with only a WEAK reference, so under ARM64EC+FEX — where the
-    # collector does not find managed roots in the frames of a thread sitting in a native call that
-    # re-enters managed code — the delegate was collected mid-callback and the callback ran with a null
-    # `this`. The fix is emulators/wine-mono/patches/0001, which rebuilds the x86_64 runtime from source;
-    # its header carries the measurements. Nothing is needed in this file, and nothing should be added
-    # here for it: a per-game workaround would hide the same defect in the next managed title.
-    #
-    # A `MONO_GC_PARAMS = "nursery-size=64m"` setting used to live here and is GONE deliberately. It made
-    # startup pass (0/4 → 4/4) by making a nursery collection unlikely inside the callback window, but it
-    # was probabilistic, not a fix — the standalone probe still failed with it under heavier allocation,
-    # and a larger nursery did not monotonically help (64m/128m/256m → 75/119/123 failures per 200). With
-    # the runtime patch the probe is clean at 200/200 and the game starts 3/3 with no GC tuning at all.
-
-    # ── aarch64: HOW THAT WAS FOUND, AND WHAT WAS RULED OUT ───────────────────────────────────────────────────
-    # On the UNPATCHED runtime the process dies ~2.5 s in, before any window, with the CLR up and
-    # managed `Main` already running. The failure, precisely:
-    #
-    #   TypeInitializationException: type initializer for 'VRageRender.MyRender11' threw
-    #     ---> NullReferenceException
-    #     at VRageRender.MySharedData..ctor [0x0002c] → MySwapQueue.Create<MyBillboardBatch<MyBillboard>>
-    #     at VRageRender.MyDX11Render..ctor → SpaceEngineers.MyProgram.InitializeRender → Main
-    #
-    # IL offset 0x2c in MySharedData..ctor is exactly the `Create<MyBillboardBatch<MyBillboard>>` call
-    # (the preceding `Create<HashSet<uint>>` at IL_000c succeeds, so generics and Activator are fine), and
-    # that batch's ctor calls `new MyObjectsPool<T>(3000, null, null)`, whose null-activator branch goes
-    # through VRage's `ExpressionExtension.CreateActivator<T>()` — a static field holding an
-    # IActivatorFactory, then `Expression.Lambda<Func<T>>(...).Compile()`, then 3000 `activator()` calls.
-    # `PROPNIX_WINEDEBUG=+seh` shows the native truth: EXCEPTION_ACCESS_VIOLATION, info[0]=0 (a READ) of
-    # address 0x10, rip inside JIT-generated x86_64 code (cs=0033). 0x10 is the first instance field of a
-    # 64-bit Mono object (vtable + sync block = 16 bytes), and it is also where an interface callvirt on a
-    # null receiver lands — consistent with either the static Factory or the compiled activator being null.
-    #
-    # INTERMITTENT, which is the strongest clue available: one launch out of roughly ten got all the way
-    # past render init — zero exceptions, DXVK adapter at feature_level 11.1, through
-    # MyGuiManager.LoadContent and into loading its 874 definition files, alive for 3+ minutes — while
-    # every other attempt died at the same 2.5 s point. So this is a race or an ordering effect, not a
-    # missing capability. (The x86_64 status block above records the same title being load-sensitive at
-    # cold start, which may be the same underlying flakiness with a far smaller window there.)
-    #
-    # RULED OUT, each by an isolated run on this host rather than by argument:
-    #   * Wine Mono itself — a managed exe runs fine (Environment.Version = 4.0.30319.42000).
-    #   * WRONGLY ruled out at first, and kept as the lesson: the frame the managed trace blamed
-    #     (System.Windows.Forms.Screen's monitor-enumeration callback) passed a probe exercising plain
-    #     P/Invoke, a managed callback invoked from native EnumDisplayMonitors, Screen.AllScreens and
-    #     PrimaryScreen — but only because that probe did not ALLOCATE while the callback was pending.
-    #     With allocation churn added, the same callback fails 138/150 on the upstream runtime, which is
-    #     exactly the defect patches/0001 fixes. The trace had pointed at the right place all along; a
-    #     probe rules a frame out only if it reproduces the workload around it.
-    #   * Runtime expression compilation: `Expression.Lambda(...).Compile()` and the whole
-    #     ExpressionExtension.Factory → ExpressionBaseActivatorFactory shape reproduce fine in isolation.
-    #   * The display backend: identical failure under PROPNIX_WINE_GRAPHICS=x11.
-    #   * `MONO_DEBUG=explicit-null-checks` (make the JIT compare instead of faulting on the null page):
-    #     it looked like a fix on the one lucky run, and an A/B of three launches each way then measured
-    #     0/3 surviving WITH it and 0/3 WITHOUT. Not a fix. Do not re-add it on the strength of one run —
-    #     any candidate here needs repeated launches, because a single success proves nothing.
-    #     (`MONO_DEBUG` IS honoured from the environment, unlike `MONO_ENV_OPTIONS`, which only the
-    #     standalone `mono` driver parses and which this embedded host silently ignores.)
-    #
-    # RESOLVED: the "race" was the collector clearing Wine Mono's weakly-held delegate while a thread sat
-    # inside a native call that re-enters managed code — intermittent because it needs a nursery
-    # collection to land inside that window. Mechanism, probe and measurements live in
-    # emulators/wine-mono/patches/0001.
+    # ── aarch64: nothing to configure here ───────────────────────────────────────────────────────────
+    # The title's aarch64 blockers were runtime defects, fixed in emulators/wine-mono: patches/0001 holds
+    # a native-callable instance delegate strongly (the collector could clear it while a native call was
+    # still inside the callback), and the runtime is the ARM64EC build (patches/0002), so managed code
+    # runs natively and only the game's own x64 DLLs are emulated. No per-game GC tuning (`MONO_GC_PARAMS`)
+    # or `MONO_DEBUG` setting belongs here: a workaround would hide the same defect in the next managed
+    # title. How the defect was found, what was ruled out and what the tuning did and did not do:
+    # docs/research/wine-mono-delegate-lifetime.md.
 
     # Full-colour icon auto-extracted from the exe's PE resources (the `icon.auto` default): the resource
     # directory of SpaceEngineers.exe carries RT_ICON (0x3) + RT_GROUP_ICON (0xe) in a ~52 KB .rsrc, which

@@ -91,6 +91,7 @@ pkgs.lib.makeScope pkgs.newScope (
     # emulators/wine-mono/patches (the native→managed callback fix managed titles need on ARM64EC+FEX).
     wineMono = callPackage ../emulators/wine-mono {
       mingwGccW64 = pkgs.pkgsCross.mingwW64.stdenv.cc;
+      llvmMingw = if isAarch64 then llvmMingw else null; # aarch64: the x64 runtime slot gets an ARM64EC build
     };
     prefixLower = callPackage ../emulators/wine-prefix-lower.nix { }; # RO system tree; FEX DLLs only on aarch64 (fexdlls ? null); CLR from wineMono
     dxvk =

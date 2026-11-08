@@ -45,7 +45,7 @@ managed title is packaged here — see emulators/wine-mono/default.nix).
 
 --- a/mono/metadata/marshal.c
 +++ b/mono/metadata/marshal.c
-@@ -466,7 +466,26 @@
+@@ -466,7 +466,24 @@
  			// Somehow, some other thread beat us to it ?
  			g_assert (mono_gchandle_target_equal (gchandle, MONO_HANDLE_CAST (MonoObject, d)));
  		} else {
@@ -61,9 +61,7 @@ managed title is packaged here — see emulators/wine-mono/default.nix).
 +			 * EnumDisplayMonitors invoking a MonitorEnumProc), the managed roots in those frames
 +			 * are not found, the delegate is collected mid-callback, its finalizer frees the
 +			 * native-to-managed wrapper and the wrapper's target handle, and the callback then runs
-+			 * with a NULL `this` — faulting on its first field access. Measured: an instance
-+			 * callback fails 138/150 iterations under allocation churn, while a STATIC callback
-+			 * (already strongly held here) fails 0/150.
++			 * with a NULL `this` — faulting on its first field access.
 +			 *
 +			 * .NET requires the application to keep a marshalled delegate alive for as long as
 +			 * native code may invoke it, so holding it cannot extend a lifetime the program was not

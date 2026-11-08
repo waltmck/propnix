@@ -1,0 +1,35 @@
+Subject: [PATCH] ARM64EC: poll the suspend doorbell before conditional backward branches
+
+The JIT polls the suspend doorbell (EmitSuspendInterruptCheck: load the doorbell word, cbz, brk #0xCAFE)
+at block entry and before a pending UNCONDITIONAL backward branch. CondJump emits its b.cond / cbz /
+cbnz / tbz / tbnz straight to the target, so a loop whose back-edge is the taken side of a conditional
+branch — the canonical spin-wait `pause; test; je 1b` — never observes a pending suspend while it spins;
+with multiblock compilation such a loop lives in one compiled unit, so no block-entry poll is reached
+either. Under the ARM64EC suspend contract (wine, like Windows, does not stop a thread in simulation: it
+rings the doorbell and GetThreadContext waits for the poll) a runtime that stops the world with
+SuspendThread + GetThreadContext therefore hangs whenever the target spins waiting on a thread that is
+already suspended.
+
+Poll before the conditional branch when its target is already emitted (a backward edge). The check is
+flag-neutral and uses a scratch register, so it is safe in front of a branch that consumes NZCV, and it
+sits at a guest instruction boundary: a trap there reconstructs the state at the branch and the branch
+re-executes on resume. Cost: one L1 load and one never-taken branch per loop iteration, the poll every
+safepoint-based managed runtime places on loop back-edges. Test and measurements: propnix
+emulators/wine-mono/tests/spin.c and docs/research/mono-arm64ec.md.
+--- a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+@@ -244,6 +244,14 @@
+ 
+   auto TrueTargetLabel = JumpTarget(Op->TrueBlock);
+ 
++  // A conditional branch to an already-emitted block is a loop back-edge: poll the suspend doorbell before
++  // it, as the block loop does before unconditional backward branches, so a loop closed by a conditional
++  // branch can be suspended. The check is flag-neutral and sits at a guest instruction boundary; the branch
++  // re-executes on resume.
++  if (TrueTargetLabel->Backward.Location) {
++    EmitSuspendInterruptCheck();
++  }
++
+   if (Op->FromNZCV) {
+     b_OrRestart(MapCC(Op->Cond), TrueTargetLabel);
+   } else {

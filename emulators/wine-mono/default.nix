@@ -37,6 +37,18 @@
 #     build for a file nothing in this suite loads. A 32-bit managed game arriving is the signal to extend
 #     `abis` below, not to rediscover the bug.
 #
+# ── ON aarch64 THE x86_64 RUNTIME SLOT HOLDS AN ARM64EC BUILD ─────────────────────────────────────────────
+# mscoree in an ARM64EC process asks for `libmono-2.0-x86_64.dll` and, given an x64 PE, runs the whole
+# runtime — and every byte of JIT output — through FEX. patches/0002 builds the SAME runtime as an ARM64EC
+# PE instead: the JIT emits native ARM64 for managed code, the runtime's C half is native, and only the
+# game's own x64 DLLs (Havok, steam_api64, …) are still emulated, behind per-signature thunks the patch adds
+# at the p/invoke boundary. The build uses this tree's llvm-mingw (`arm64ec-w64-mingw32-clang`) and
+# cooperative suspend: under the ARM64EC contract a thread in x64 code is suspended only at the emulator's
+# next poll, so a preemptive stop-the-world is safe only with an emulator that polls inside every loop
+# (emulators/fex patches/0003 makes FEX one); cooperative suspend does not depend on it (the patch header;
+# docs/research/mono-arm64ec.md). x86_64 hosts keep the x86_64 build.
+# The class-library tree is shared: both runtimes implement the same ABI version.
+#
 # The version and the release tarball's hash are unchanged from the prebuilt-only packaging this replaced,
 # so the class libraries are bit-identical to what upstream ships for this release.
 {
@@ -60,6 +72,9 @@
   # x86_64 PE, which is what wine's x86_64 mscoree loads (under FEX on aarch64), and nixpkgs' cross-GCC is
   # cached and native on both hosts.
   mingwGccW64,
+  # This tree's llvm-mingw (emulators/llvm-mingw): `arm64ec-w64-mingw32-clang` and friends. aarch64 hosts
+  # only; null on x86_64, where the x86_64 runtime above is the one installed.
+  llvmMingw ? null,
   wine, # only to CHECK the version against the wine we ship; nothing from it is installed
 }:
 let
@@ -84,12 +99,25 @@ let
   };
 
   # ── the native runtime, from source ────────────────────────────────────────────────────────────────────
-  runtime = stdenv.mkDerivation {
-    pname = "wine-mono-runtime-x86_64";
+  # One recipe, two targets: `triple` names the mingw tools (`<triple>-ld`, `-ar`, …), `cc`/`cxx` the
+  # compiler drivers (GCC for x86_64, clang for arm64ec), `extraFlags` what only one target needs, and
+  # `checkImage` asserts the produced PE is what the target promised.
+  mkRuntime =
+    {
+      name,
+      triple,
+      cc,
+      cxx,
+      toolchain,
+      extraFlags ? [ ],
+      checkImage,
+    }:
+    stdenv.mkDerivation {
+    pname = "wine-mono-runtime-${name}";
     inherit version src;
 
     nativeBuildInputs = [
-      mingwGccW64
+      toolchain
       autoconf
       automake
       libtool
@@ -116,9 +144,9 @@ let
     # mono's tarball ships no configure (only autogen.sh), and NOCONFIGURE keeps autogen from running it
     # with the wrong arguments before ours.
     preConfigure = ''
-      export CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ LD=x86_64-w64-mingw32-ld
-      export AR=x86_64-w64-mingw32-ar RANLIB=x86_64-w64-mingw32-ranlib STRIP=x86_64-w64-mingw32-strip
-      export DLLTOOL=x86_64-w64-mingw32-dlltool OBJDUMP=x86_64-w64-mingw32-objdump
+      export CC=${cc} CXX=${cxx} LD=${triple}-ld
+      export AR=${triple}-ar RANLIB=${triple}-ranlib STRIP=${triple}-strip
+      export DLLTOOL=${triple}-dlltool OBJDUMP=${triple}-objdump WINDRES=${triple}-windres
       NOCONFIGURE=1 ./autogen.sh
     '';
 
@@ -147,16 +175,17 @@ let
     # cc-wrapper setup hook runs AFTER the derivation env is applied and re-exports LD=ld for the BUILD
     # platform, which is exactly the clobber that sends libtool down the static path below.
     configureFlags = [
-      "CC=x86_64-w64-mingw32-gcc"
-      "CXX=x86_64-w64-mingw32-g++"
-      "LD=x86_64-w64-mingw32-ld"
-      "AR=x86_64-w64-mingw32-ar"
-      "RANLIB=x86_64-w64-mingw32-ranlib"
-      "STRIP=x86_64-w64-mingw32-strip"
-      "DLLTOOL=x86_64-w64-mingw32-dlltool"
-      "OBJDUMP=x86_64-w64-mingw32-objdump"
-      "--host=x86_64-w64-mingw32"
-      "--target=x86_64-w64-mingw32"
+      "CC=${cc}"
+      "CXX=${cxx}"
+      "LD=${triple}-ld"
+      "AR=${triple}-ar"
+      "RANLIB=${triple}-ranlib"
+      "STRIP=${triple}-strip"
+      "DLLTOOL=${triple}-dlltool"
+      "OBJDUMP=${triple}-objdump"
+      "WINDRES=${triple}-windres"
+      "--host=${triple}"
+      "--target=${triple}"
       "--build=${stdenv.buildPlatform.config}"
       "--enable-shared"
       "--with-tls=none"
@@ -168,7 +197,8 @@ let
       "mono_cv_clang=no"
       "mono_feature_disable_cleanup=yes"
       "lt_cv_deplibs_check_method=pass_all"
-    ];
+    ]
+    ++ extraFlags;
 
     # Subdirectory order is upstream's and is NOT optional, and neither is `built_sources`: asking make for
     # `libmonosgen-2.0.la` directly skips automake's BUILT_SOURCES, and the build then dies on a missing
@@ -192,18 +222,61 @@ let
       [ -f "$dll" ] || { echo "no shared runtime was produced — libtool fell back to a static build"; exit 1; }
       # writable first: the mingw strip rewrites the file in place, so a 444 install would fail here
       install -Dm644 "$dll" "$out/libmono-2.0-x86_64.dll"
-      x86_64-w64-mingw32-strip "$out/libmono-2.0-x86_64.dll"
+      ${triple}-strip "$out/libmono-2.0-x86_64.dll"
       chmod 444 "$out/libmono-2.0-x86_64.dll"
+      ${checkImage} "$out/libmono-2.0-x86_64.dll"
       runHook postInstall
     '';
 
     dontStrip = true; # the mingw strip above is the right one; the host strip would not understand a PE
 
     meta = {
-      description = "wine-mono ${version} native runtime (x86_64 PE), rebuilt from source with propnix's patches";
+      description = "wine-mono ${version} native runtime (${name} PE), rebuilt from source with propnix's patches";
       license = lib.licenses.mit;
     };
   };
+
+  # The x86_64 runtime: nixpkgs' cross-GCC, an ordinary x64 PE, the file upstream ships rebuilt.
+  runtimeX86_64 = mkRuntime {
+    name = "x86_64";
+    triple = "x86_64-w64-mingw32";
+    cc = "x86_64-w64-mingw32-gcc";
+    cxx = "x86_64-w64-mingw32-g++";
+    toolchain = mingwGccW64;
+    checkImage = ''
+      _chk() { ${mingwGccW64}/bin/x86_64-w64-mingw32-objdump -f "$1" | grep -q "file format pei-x86-64" \
+        || { echo "propnix: $1 is not an x86_64 PE"; ${mingwGccW64}/bin/x86_64-w64-mingw32-objdump -f "$1"; exit 1; }; }; _chk'';
+  };
+
+  # The ARM64EC runtime (aarch64 hosts): clang for the arm64ec triple; an image with the ARM64EC machine
+  # type and CHPE metadata in its load config, what wine's x64 personality loads as native code.
+  # `--enable-cooperative-suspend` is the configured policy (patches/0002's header).
+  runtimeArm64ec = mkRuntime {
+    name = "arm64ec";
+    triple = "arm64ec-w64-mingw32";
+    cc = "arm64ec-w64-mingw32-clang";
+    cxx = "arm64ec-w64-mingw32-clang++";
+    toolchain = llvmMingw;
+    extraFlags = [
+      "--enable-cooperative-suspend"
+      "--enable-nls=no"
+    ];
+    checkImage = ''
+      # Read each report into a variable first: `readobj | grep -q` lets grep close the pipe on the first
+      # match, readobj then dies of SIGPIPE, and under the builder's pipefail a PASSING check reads as failed.
+      _chk() {
+        local hdr cfg
+        hdr=$(${llvmMingw}/bin/llvm-readobj --file-headers "$1")
+        grep -q "IMAGE_FILE_MACHINE_ARM64EC" <<<"$hdr" \
+          || { echo "propnix: $1 is not an ARM64EC PE"; grep Machine <<<"$hdr"; exit 1; }
+        cfg=$(${llvmMingw}/bin/llvm-readobj --coff-load-config "$1")
+        grep -qi "CHPEMetadata" <<<"$cfg" \
+          || { echo "propnix: $1 has no CHPE metadata — a plain x64 PE, not ARM64EC"; exit 1; }
+      }; _chk'';
+  };
+
+  # What goes into bin/libmono-2.0-x86_64.dll on THIS host.
+  runtime = if llvmMingw != null then runtimeArm64ec else runtimeX86_64;
 in
 runCommand "wine-mono-${version}"
   {
@@ -214,7 +287,8 @@ runCommand "wine-mono-${version}"
       xz
     ];
     passthru = {
-      inherit version runtime;
+      inherit version runtime runtimeX86_64;
+      runtimeArm64ec = if llvmMingw != null then runtimeArm64ec else null;
       patches = patchesDir;
     };
     meta = {
@@ -223,7 +297,7 @@ runCommand "wine-mono-${version}"
       license = lib.licenses.mit; # MIT (Mono) + LGPL21 parts; see the tarball's own LICENSE files
       sourceProvenance = [
         lib.sourceTypes.binaryNativeCode # the release tarball's class libraries and 32-bit runtime
-        lib.sourceTypes.fromSource # the x86_64 runtime above
+        lib.sourceTypes.fromSource # the rebuilt runtime above (x86_64, or ARM64EC on aarch64)
       ];
     };
   }
@@ -237,8 +311,9 @@ runCommand "wine-mono-${version}"
     # ── the patched runtime replaces upstream's, and ONLY that file ──
     # Keeping the release bytes for everything else is the whole point of the hybrid (see the header): the
     # class libraries are unaffected by our patches, so there is no reason to rebuild — or to diverge from —
-    # them. Compare sizes on the way past: upstream ships this stripped at ~4 MB, and a silent 30 MB here
-    # would mean the strip in the runtime derivation stopped working.
+    # them. On aarch64 the file is the ARM64EC build (header): same name, because that is the name mscoree
+    # asks for. Compare sizes on the way past: upstream ships this stripped at ~4 MB, and a silent 30 MB
+    # here would mean the strip in the runtime derivation stopped working.
     [ -f "$out/bin/libmono-2.0-x86_64.dll" ] \
       || { echo "propnix: wine-mono ${version} release tarball has no bin/libmono-2.0-x86_64.dll to replace"; exit 1; }
     chmod u+w "$out/bin"

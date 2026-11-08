@@ -34,7 +34,7 @@ NOTE: FEX explicitly does not support large page sizes, so this may not be upstr
 here so the behaviour and the measurements are written down.
 --- a/Source/Windows/Common/CallRetStack.h
 +++ b/Source/Windows/Common/CallRetStack.h
-@@ -1,12 +1,37 @@
+@@ -1,12 +1,32 @@
  // SPDX-License-Identifier: MIT
  #pragma once
  
@@ -48,14 +48,9 @@ here so the behaviour and the measurements are written down.
 +// GUARD SIZING ON A LARGE-PAGE HOST.
 +//
 +// The guards either side of the shadow stack must be at least one HOST page, and the committed region
-+// must start on a host-page boundary — otherwise the host rounds the commit outwards and swallows them.
-+// Observed on a 16 KiB-page host (wine on aarch64): with 4 KiB guards, /proc/PID/maps shows the committed
-+// r/w region starting AT the leading guard's address and ending 12 KiB past the trailing one, i.e. NEITHER
-+// GUARD EXISTS. The shadow stack then silently overruns into the rounding slack and only faults once it
-+// leaves the whole reservation — an address outside the window HandleAccessViolation() checks, so the
-+// routine "call-ret stack inbalance" recovery declines and the overflow escapes to the guest as a fatal
-+// access violation. (RDR2's return-oriented obfuscator overflows this stack constantly, which is how this
-+// surfaced.)
++// must start on a host-page boundary — otherwise the host rounds the commit outwards and swallows them,
++// the shadow stack silently overruns into the rounding slack, and the eventual fault lands outside the
++// window HandleAccessViolation() recovers from (the imbalance escapes to the guest as a fatal fault).
 +//
 +// GetSystemInfo() cannot be used to size this: under wine it reports dwPageSize=4096 to the guest by
 +// design (x86 code assumes 4 KiB) regardless of the real host page size. dwAllocationGranularity IS
@@ -72,7 +67,7 @@ here so the behaviour and the measurements are written down.
  struct CallRetStackInfo {
    uint64_t AllocationBase;
    uint64_t AllocationEnd;
-@@ -16,21 +41,21 @@
+@@ -16,21 +36,21 @@
  CallRetStackInfo GetInfoThread(FEXCore::Core::InternalThreadState* Thread) {
    uint64_t Base = reinterpret_cast<uint64_t>(Thread->CallRetStackBase);
    // Leave some room from the base for the default location to allow for underflows without constant exceptions

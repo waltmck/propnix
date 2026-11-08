@@ -1,0 +1,1451 @@
+Subject: [PATCH] Build the runtime as ARM64EC (wine-mono on Hangover, aarch64 hosts)
+
+An ARM64EC build of libmono: the JIT emits plain ARM64 for managed code and the native half runs as
+native ARM64 under wine's ARM64EC personality, so no x64 code of the runtime or of managed code goes
+through the x86_64 emulator. Only the game's own x64 DLLs (Havok, steam_api64, ...) still do, behind
+per-signature exit/entry thunks that this patch adds to the JIT. Everything here is under
+`__arm64ec__`/the `arm64ec-*mingw*` host, so the x86_64 build of the same tree is unchanged.
+
+configure.ac
+  * `arm64ec-*mingw*` joins the `aarch64-*mingw*` case: TARGET/HOST ARM64 (the Windows-ARM64 port) with
+    an arm64ec-w64-mingw32 toolchain. configure forces CC="$host-gcc" for every cross build, so without
+    this an aarch64 host silently compiled plain ARM64 objects that wine refuses to load in an x64
+    process. Windows 10 API level for the ARM64 hosts (RtlAddGrowableFunctionTable and friends).
+
+Compiler-macro guards (mini-codegen.c, monobitset.c, valgrind.h, mono-memory-model.h, mono-context.{h,c},
+mono-codeman.c): clang's arm64ec target predefines __x86_64__ (not __aarch64__), so every conditional
+that means "x86 machine code" must exclude __arm64ec__.
+
+mono-context.c: the exception/suspend CONTEXT under ARM64EC is the x64-layout CONTEXT with the ARM64
+registers aliased into it (ARM64EC_NT_CONTEXT); map it to and from MonoContext. mono-context.h:
+MONO_WIN32_CONTEXT_PC for the two exceptions-arm64.c sites that read the PC.
+
+mono-mmap-windows.c / mono-codeman.c: JIT memory must be registered in the process's EC code bitmap or
+the emulator treats it as x64 bytes: allocate through NtAllocateVirtualMemoryEx with
+MEM_EXTENDED_PARAMETER_EC_CODE and never from an executable heap.
+
+mini-arm64.h: ARM64EC reserves x13, x14, x23, x24, x28 and v16-v31 for the emulator (absent from every
+captured CONTEXT, not preserved across x64 code); keep them out of the allocator, x27 is args_reg.
+
+mini-arm64.c, mini.c, cpu-arm64.md: the EC boundary.
+  * OUT: a p/invoke whose target is not EC code at JIT time loads x11 = target, x10 = an exit thunk for
+    the call's argument/return SHAPE, calls __os_arm64x_check_icall and then the address it returns
+    (the target itself, the EC implementation behind an ARM64X fast-forward stub, or the thunk with
+    x9 = the x64 target). Exit thunks re-marshal AAPCS64 arguments into the x64 convention: positional
+    rcx/rdx/r8/r9 = x0-x3, xmm0-3 = v0-3, the rest on the stack after the 32-byte shadow space,
+    aggregates by their REAL size (1/2/4/8 bytes in the integer slot, anything else as a pointer to a
+    copy); the call is `blr x16` to __os_arm64x_dispatch_call_no_redirect, as the emulator requires.
+  * IN: mono_codegen reserves a prefix in front of every native-to-managed wrapper holding an entry
+    thunk and the offset word at entry-4 that the emulator reads when x64 code calls the wrapper. The
+    thunk saves q6-q15 (x64 preserves them whole), builds the AAPCS64 layout from x0-x3/v0-v3 and the x64
+    stack (x4), calls the wrapper and returns through __os_arm64x_dispatch_ret with the result in x8.
+  * Both thunks copy every register source into a frame image first; a two-float HFA at position 0
+    occupies s0 AND s1, so no register-to-register order is safe.
+  * Thunks live in EC-marked code manager memory and are cached per shape.
+
+exceptions-arm64.c: UWOP_ALLOC_L for prologs allocating more than 512 KiB (a gap in the Windows-ARM64
+port, not EC-specific).
+
+Not handled: varargs p/invoke signatures (a trap with a warning at thunk creation).
+
+Suspend policy: the build is configured with --enable-cooperative-suspend. Under the ARM64EC contract a
+thread executing x64 code is not stopped by SuspendThread: the emulator suspends it at its next doorbell
+poll and GetThreadContext waits for that, so a preemptive (or hybrid) stop-the-world is safe only if the
+emulator polls inside every loop. Either removes the deadlock: cooperative suspend (threads stop at the
+runtime's own safepoints; SuspendThread is never called on a running thread) or an emulator that polls
+on conditional back-edges (propnix emulators/fex/patches/0003). This build takes the first and keeps the
+policy runtime-selectable (MONO_THREADS_SUSPEND). configure defaults hybrid on only for X86|AMD64 hosts,
+so the flag is explicit. Investigation and measurements: docs/research/mono-arm64ec.md.
+--- a/configure.ac
++++ b/configure.ac
+@@ -190,6 +190,14 @@
+ 
+ 		# Windows 7 or later is required
+ 		WIN32_CPPFLAGS="-DWINVER=0x0601 -D_WIN32_WINNT=0x0601 -D_WIN32_IE=0x0501 -D_UNICODE -DUNICODE -DWIN32_THREADS -DFD_SETSIZE=1024"
++		case "$host" in
++			aarch64-*mingw*|arm64ec-*mingw*)
++				# Windows on ARM64 is Windows 10 or later; the ARM64 port's growable function tables
++				# (RtlAddGrowableFunctionTable, Windows 8) and ARM64EC code allocation (VirtualAlloc2,
++				# Windows 10 RS4) are declared only at that API level.
++				WIN32_CPPFLAGS="-DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000005 -D_WIN32_IE=0x0501 -D_UNICODE -DUNICODE -DWIN32_THREADS -DFD_SETSIZE=1024"
++				;;
++		esac
+ 		CPPFLAGS="$CPPFLAGS $WIN32_CPPFLAGS"
+ 		WIN32_LDFLAGS="-lbcrypt -lmswsock -lws2_32 -lole32 -loleaut32 -lpsapi -lversion -ladvapi32 -lwinmm -lkernel32 -lntdll -liphlpapi"
+ 		LDFLAGS="$LDFLAGS $WIN32_LDFLAGS"
+@@ -4307,7 +4315,7 @@
+ 		BTLS_SUPPORTED=no
+ 		BTLS_PLATFORM=arm
+ 		;;
+-	aarch64-*mingw*)
++	aarch64-*mingw*|arm64ec-*mingw*)
+ 		TARGET=ARM64;
+ 		arch_target=arm64;
+ 		BTLS_SUPPORTED=no
+diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/cpu-arm64.md mono/mono/mini/cpu-arm64.md
+--- a/mono/mini/cpu-arm64.md
++++ b/mono/mini/cpu-arm64.md
+@@ -81,24 +81,24 @@
+ arglist: src1:i len:12
+ setlret: src1:i src2:i len:12
+ check_this: src1:b len:4
+-call: dest:a clob:c len:32
+-call_reg: dest:a src1:i len:32 clob:c
+-call_membase: dest:a src1:b len:32 clob:c
+-voidcall: len:32 clob:c
+-voidcall_reg: src1:i len:32 clob:c
+-voidcall_membase: src1:b len:32 clob:c
+-fcall: dest:f len:32 clob:c
+-fcall_reg: dest:f src1:i len:32 clob:c
+-fcall_membase: dest:f src1:b len:32 clob:c
+-rcall: dest:f len:32 clob:c
+-rcall_reg: dest:f src1:i len:32 clob:c
+-rcall_membase: dest:f src1:b len:32 clob:c
+-lcall: dest:l len:32 clob:c
+-lcall_reg: dest:l src1:i len:32 clob:c
+-lcall_membase: dest:l src1:b len:32 clob:c
+-vcall: len:32 clob:c
+-vcall_reg: src1:i len:32 clob:c
+-vcall_membase: src1:b len:32 clob:c
++call: dest:a clob:c len:64
++call_reg: dest:a src1:i len:64 clob:c
++call_membase: dest:a src1:b len:64 clob:c
++voidcall: len:64 clob:c
++voidcall_reg: src1:i len:64 clob:c
++voidcall_membase: src1:b len:64 clob:c
++fcall: dest:f len:64 clob:c
++fcall_reg: dest:f src1:i len:64 clob:c
++fcall_membase: dest:f src1:b len:64 clob:c
++rcall: dest:f len:64 clob:c
++rcall_reg: dest:f src1:i len:64 clob:c
++rcall_membase: dest:f src1:b len:64 clob:c
++lcall: dest:l len:64 clob:c
++lcall_reg: dest:l src1:i len:64 clob:c
++lcall_membase: dest:l src1:b len:64 clob:c
++vcall: len:64 clob:c
++vcall_reg: src1:i len:64 clob:c
++vcall_membase: src1:b len:64 clob:c
+ 
+ tailcall: len:255 clob:c # FIXME len
+ tailcall_membase: src1:b len:255 clob:c # FIXME len
+@@ -376,9 +376,9 @@
+ 
+ long_conv_to_ovf_i4_2: dest:i src1:i src2:i len:36
+ 
+-vcall2: len:40 clob:c
+-vcall2_reg: src1:i len:40 clob:c
+-vcall2_membase: src1:b len:40 clob:c
++vcall2: len:64 clob:c
++vcall2_reg: src1:i len:64 clob:c
++vcall2_membase: src1:b len:64 clob:c
+ dyn_call: src1:i src2:i len:216 clob:c
+ 
+ # This is different from the original JIT opcodes
+diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/exceptions-arm64.c mono/mono/mini/exceptions-arm64.c
+--- a/mono/mini/exceptions-arm64.c
++++ b/mono/mini/exceptions-arm64.c
+@@ -136,7 +136,7 @@
+ 				 * restore_stack will restore stack protection and then
+ 				 * resume control to the saved stack_restore_ctx */
+ 				mono_sigctx_to_monoctx (ctx, &jit_tls->stack_restore_ctx);
+-				ctx->Pc = (guint64)restore_stack;
++				MONO_WIN32_CONTEXT_PC (ctx) = (guint64)restore_stack;
+ 			}
+ 		} else {
+ 			info.handled = FALSE;
+@@ -765,6 +765,19 @@
+ 	DEBUG_UWOP ("UNWIND OP: %x\n", op);
+ }
+ 
++/* alloc_l: 11100000'xxxxxxxx'xxxxxxxx'xxxxxxxx — allocate x*16 bytes, x < 2^24 (frames above 512 KiB) */
++static void
++push_unwind_op3 (PUNWIND_INFO unwindinfo, guint32 op)
++{
++	unwindinfo->code_count+=3;
++	g_assert (unwindinfo->code_count <= MONO_MAX_UNWIND_CODES);
++	unwindinfo->unwind_codes[MONO_MAX_UNWIND_CODES - unwindinfo->code_count] = op >> 16;
++	unwindinfo->unwind_codes[MONO_MAX_UNWIND_CODES - unwindinfo->code_count + 1] = op >> 8;
++	unwindinfo->unwind_codes[MONO_MAX_UNWIND_CODES - unwindinfo->code_count + 2] = op;
++	unwindinfo->xdata.CodeWords = (unwindinfo->code_count + 3) >> 2;
++	DEBUG_UWOP ("UNWIND OP: %x\n", op);
++}
++
+ static void
+ initialize_unwind_info_internal_ex (GSList *unwind_ops, PUNWIND_INFO unwindinfo)
+ {
+@@ -843,8 +856,10 @@
+ 						push_unwind_op1 (unwindinfo, UWOP_ALLOC_S | (alloc_amount >> 4));
+ 					else if ((alloc_amount & 0xffff800f) == 0)
+ 						push_unwind_op2 (unwindinfo, UWOP_ALLOC_M | (alloc_amount >> 4));
++					else if ((alloc_amount & 0xf000000f) == 0)
++						push_unwind_op3 (unwindinfo, UWOP_ALLOC_L | (alloc_amount >> 4));
+ 					else
+-						g_assert_not_reached (); // TODO: UWOP_ALLOC_L
++						g_assert_not_reached ();
+ 					prev_when = unwind_op_data->when;
+ 					prev_cfa_ofs = unwind_op_data->val;
+ 					break;
+@@ -1453,7 +1468,7 @@
+ 	g_assert_not_reached ();
+ 	return NULL;
+ #elif defined(HOST_WIN32)
+-	return (gpointer)((CONTEXT*)sigctx)->Pc;
++	return (gpointer)MONO_WIN32_CONTEXT_PC ((CONTEXT*)sigctx);
+ #else
+ 	return (gpointer)UCONTEXT_REG_PC (sigctx);
+ #endif
+diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.c mono/mono/mini/mini-arm64.c
+--- a/mono/mini/mini-arm64.c
++++ b/mono/mini/mini-arm64.c
+@@ -17,6 +17,7 @@
+  */
+ 
+ #include "mini.h"
++#include <mono/metadata/debug-helpers.h>
+ #include "cpu-arm64.h"
+ #include "ir-emit.h"
+ #include "aot-runtime.h"
+@@ -249,9 +250,16 @@
+ {
+ }
+ 
++#ifdef __arm64ec__
++static mono_mutex_t arm64ec_thunk_mutex; /* guards the exit-thunk cache, see mono_arm64ec_get_exit_thunk */
++#endif
++
+ void
+ mono_arch_init (void)
+ {
++#ifdef __arm64ec__
++	mono_os_mutex_init (&arm64ec_thunk_mutex);
++#endif
+ #if defined(TARGET_IOS) || defined(TARGET_WATCHOS) || defined(TARGET_OSX)
+ 	ios_abi = TRUE;
+ #endif
+@@ -327,6 +335,726 @@
+ 	return emit_imm64 (code, dreg, imm);
+ }
+ 
++#ifdef __arm64ec__
++/*
++ * ARM64EC — the two transitions between JIT'd ARM64 code and x64 code.
++ *
++ * JIT'd managed code is plain ARM64 and calls other managed code and the runtime's own (EC) C code
++ * directly. The two places where x64 code can be on the other side are:
++ *
++ *   OUT: a p/invoke target. It may be an ARM64X system DLL's x64-facing export (a fast-forward stub
++ *        whose bytes are x64, with an EC implementation behind it) or a genuinely x64 DLL. Compiled EC
++ *        code routes every indirect call through the OS checker __os_arm64x_check_icall (wine:
++ *        arm64x_check_call): x11 = target, x10 = the exit thunk for this call's signature; it returns
++ *        x11 = an address safe to `blr` — the target itself when it is EC code, the EC implementation
++ *        behind a fast-forward stub (system calls stay native), or x10 with x9 = the x64 target. The
++ *        exit thunk re-marshals the EC-convention arguments into the x64 convention and runs the target
++ *        under the emulator (__os_arm64x_dispatch_call_no_redirect).
++ *
++ *   IN:  a native-to-managed wrapper whose address was handed to native code (delegate -> function
++ *        pointer). When x64 code calls it, the emulator looks for an ENTRY THUNK through the 4-byte
++ *        offset stored immediately before the function's first instruction (bit 0 set), so mono_codegen
++ *        reserves a prefix in front of every such wrapper and the thunk emitted there re-marshals the x64
++ *        arguments into the wrapper's AAPCS64 layout, calls it (x9), and returns through
++ *        __os_arm64x_dispatch_ret with the result in x8 (rax).
++ *
++ * Register mapping between the two conventions, which the thunks rely on: rcx/rdx/r8/r9 = x0-x3,
++ * rax = x8, xmm0-xmm15 = v0-v15 (positional for the first four x64 arguments, by class for AAPCS64),
++ * stack arguments after the 32-byte shadow space. x64 keeps xmm6-xmm15 whole across calls where AAPCS64
++ * keeps only d8-d15, so an entry thunk saves q6-q15. The emulator owns x13, x14, x23, x24, x28 and
++ * v16-v31 (never saved in an exception/suspend context, never preserved across x64 code), which is why
++ * the register allocator masks in mini-arm64.h exclude them under __arm64ec__.
++ *
++ * Structs: x64 passes 1/2/4/8-byte structs by value in the integer slot and every other size as a
++ * pointer to a caller-owned copy; AAPCS64 packs up to 16 bytes into registers (HFAs into v registers).
++ * The thunks spill such arguments to a slot in their own frame and pass the slot (or its 8 bytes).
++ * Not handled (a trap + warning instead): varargs signatures (the EC convention for them is different).
++ */
++extern void *__os_arm64x_check_icall;
++extern void *__os_arm64x_dispatch_call_no_redirect;
++extern void *__os_arm64x_dispatch_ret;
++
++static CallInfo* get_call_info (MonoMemPool *mp, MonoMethodSignature *sig);
++
++typedef enum { X64_NONE, X64_INT, X64_FP64, X64_FP32, X64_BYPTR } X64Class;
++
++typedef struct {
++	int pos;        /* x64 argument position */
++	X64Class cls;
++	ArgInfo *ainfo; /* the AAPCS64 side */
++	int size;       /* the REAL size of an aggregate (ArgInfo.size is the 8-aligned stack size) */
++	int slot;       /* frame offset of a spilled copy, or -1 */
++} ThunkArg;
++
++/*
++ * The x64 convention keys on an aggregate's real size (6 bytes: by pointer; 8: in a register), and
++ * ArgInfo.size is the 8-aligned stack size that add_valuetype computes, so the size must come from
++ * the type (a 6-byte struct of three shorts goes by pointer; ArgInfo.size would say 8, in a register).
++ */
++static int
++arm64ec_type_size (MonoType *t, gboolean pinvoke)
++{
++	MonoType *u = mini_get_underlying_type (t);
++	guint32 align;
++
++	if (u->type == MONO_TYPE_VALUETYPE || u->type == MONO_TYPE_TYPEDBYREF ||
++	    (u->type == MONO_TYPE_GENERICINST && mono_type_generic_inst_is_valuetype (u))) {
++		MonoClass *klass = mono_class_from_mono_type_internal (u);
++		return pinvoke ? mono_class_native_size (klass, &align) : mono_class_value_size (klass, &align);
++	}
++	return 8;
++}
++
++static int
++arm64ec_arg_size (MonoMethodSignature *sig, int i)
++{
++	if (sig->hasthis) {
++		if (i == 0)
++			return 8;
++		i--;
++	}
++	return arm64ec_type_size (sig->params [i], sig->pinvoke);
++}
++
++static int
++arm64ec_align16 (int v)
++{
++	return (v + 15) & ~15;
++}
++
++/* STP/LDP of a pair of Q registers: mode 1 = post-index, 2 = signed offset, 3 = pre-index */
++static guint8*
++emit_qpair (guint8 *code, gboolean load, int rt, int rt2, int rn, int imm, int mode)
++{
++	g_assert ((imm % 16) == 0 && imm >= -1024 && imm < 1024);
++	arm_emit (code, (2 << 30) | (5 << 27) | (1 << 26) | (mode << 23) | ((load ? 1 : 0) << 22) | (((imm / 16) & 0x7f) << 15) | (rt2 << 10) | (rn << 5) | rt);
++	return code;
++}
++
++static X64Class
++arm64ec_x64_class (ArgInfo *ainfo, int size)
++{
++	switch (ainfo->storage) {
++	case ArgNone:
++		return X64_NONE;
++	case ArgInIReg:
++	case ArgOnStack:
++		return X64_INT;
++	case ArgInFReg:
++	case ArgOnStackR8:
++		return X64_FP64;
++	case ArgInFRegR4:
++	case ArgOnStackR4:
++		return X64_FP32;
++	case ArgVtypeInIRegs:
++	case ArgVtypeOnStack:
++	case ArgHFA:
++	case ArgVtypeByRef:
++	case ArgVtypeByRefOnStack:
++		return (size == 1 || size == 2 || size == 4 || size == 8) ? X64_INT : X64_BYPTR;
++	default:
++		return X64_NONE;
++	}
++}
++
++static gboolean
++arm64ec_thunk_supported (MonoMethodSignature *sig, CallInfo *cinfo, const char *what)
++{
++	int i;
++	gboolean ok = sig->call_convention != MONO_CALL_VARARG;
++
++	for (i = 0; ok && i < cinfo->nargs; ++i)
++		if (arm64ec_x64_class (&cinfo->args [i], arm64ec_arg_size (sig, i)) == X64_NONE)
++			ok = FALSE;
++	if (ok && cinfo->ret.storage != ArgNone && arm64ec_x64_class (&cinfo->ret, arm64ec_type_size (sig->ret, sig->pinvoke)) == X64_NONE)
++		ok = FALSE;
++	if (!ok) {
++		char *name = mono_signature_get_desc (sig, TRUE);
++		g_warning ("ARM64EC: %s not supported for signature %s; a call through it traps", what, name);
++		g_free (name);
++	}
++	return ok;
++}
++
++/* Copy an AAPCS64-held aggregate into the thunk frame at [sp + slot]; entry-stack arguments live at [sp + stack_base + offset]. */
++static guint8*
++arm64ec_spill_to_slot (guint8 *code, ArgInfo *ainfo, int stack_base, int slot)
++{
++	int k;
++
++	switch (ainfo->storage) {
++	case ArgVtypeInIRegs:
++		for (k = 0; k < ainfo->nregs; ++k)
++			arm_strx (code, ainfo->reg + k, ARMREG_SP, slot + k * 8);
++		break;
++	case ArgHFA:
++		for (k = 0; k < ainfo->nregs; ++k) {
++			if (ainfo->esize == 4)
++				arm_strfpw (code, ainfo->reg + k, ARMREG_SP, slot + ainfo->foffsets [k]);
++			else
++				arm_strfpx (code, ainfo->reg + k, ARMREG_SP, slot + ainfo->foffsets [k]);
++		}
++		break;
++	case ArgVtypeOnStack:
++		for (k = 0; k < ainfo->size; k += 8) {
++			arm_ldrx (code, ARMREG_IP1, ARMREG_SP, stack_base + ainfo->offset + k);
++			arm_strx (code, ARMREG_IP1, ARMREG_SP, slot + k);
++		}
++		break;
++	default:
++		g_assert_not_reached ();
++	}
++	return code;
++}
++
++/*
++ * Both thunks first copy every register-held source into an IMAGE in their own frame and only then
++ * build the destinations with loads. A register-to-register schedule would need an order in which no
++ * destination clobbers a pending source, and aggregates break every simple order: a two-float HFA at
++ * x64 position 0 lands in s0 AND s1, so writing it clobbers the float at position 1 (xmm1); a 16-byte
++ * struct in x0/x1 shifts every later integer index past its position. The image costs a few stores
++ * per call, nothing next to the emulator transition it precedes.
++ */
++#define IMG_INT(off, r) ((off) + 8 * (r))      /* x0..x7 */
++#define IMG_FP(off, r)  ((off) + 64 + 8 * (r)) /* d0..d7 */
++#define IMG_SIZE 128
++
++/* Store @nbytes (1..8) of @xreg to [base + off]; a tail of 3/5/6/7 bytes goes through [sp + tmp]. */
++static guint8*
++arm64ec_store_bytes (guint8 *code, int xreg, int base, int off, int nbytes, int tmp)
++{
++	int k;
++
++	switch (nbytes) {
++	case 8: arm_strx (code, xreg, base, off); break;
++	case 4: arm_strw (code, xreg, base, off); break;
++	case 2: arm_strh (code, xreg, base, off); break;
++	case 1: arm_strb (code, xreg, base, off); break;
++	default:
++		arm_strx (code, xreg, ARMREG_SP, tmp);
++		for (k = 0; k < nbytes; ++k) {
++			arm_ldrb (code, ARMREG_IP1, ARMREG_SP, tmp + k);
++			arm_strb (code, ARMREG_IP1, base, off + k);
++		}
++		break;
++	}
++	return code;
++}
++
++/* Load the x64 form of argument @a (from the image, a spill slot or the entry stack) into xdst or fdst. */
++static guint8*
++arm64ec_exit_value (guint8 *code, ThunkArg *a, int img, int stack_base, int xdst, int fdst)
++{
++	ArgInfo *ai = a->ainfo;
++
++	switch (a->cls) {
++	case X64_INT:
++		if (a->slot >= 0)
++			arm_ldrx (code, xdst, ARMREG_SP, a->slot);
++		else if (ai->storage == ArgInIReg || ai->storage == ArgVtypeInIRegs)
++			arm_ldrx (code, xdst, ARMREG_SP, IMG_INT (img, ai->reg));
++		else
++			arm_ldrx (code, xdst, ARMREG_SP, stack_base + ai->offset);
++		break;
++	case X64_BYPTR:
++		if (a->slot >= 0)
++			arm_addx_imm (code, xdst, ARMREG_SP, a->slot);
++		else if (ai->storage == ArgVtypeByRef)
++			arm_ldrx (code, xdst, ARMREG_SP, IMG_INT (img, ai->reg));
++		else
++			arm_ldrx (code, xdst, ARMREG_SP, stack_base + ai->offset);
++		break;
++	case X64_FP64:
++		if (ai->storage == ArgInFReg)
++			arm_ldrfpx (code, fdst, ARMREG_SP, IMG_FP (img, ai->reg));
++		else
++			arm_ldrfpx (code, fdst, ARMREG_SP, stack_base + ai->offset);
++		break;
++	case X64_FP32:
++		if (ai->storage == ArgInFRegR4)
++			arm_ldrfpw (code, fdst, ARMREG_SP, IMG_FP (img, ai->reg));
++		else
++			arm_ldrfpw (code, fdst, ARMREG_SP, stack_base + ai->offset);
++		break;
++	default:
++		g_assert_not_reached ();
++	}
++	return code;
++}
++
++/*
++ * The exit thunk for @sig. Entered from the checker's return path with the EC-convention arguments in
++ * place, x9 = the x64 target and lr = the JIT'd caller.
++ */
++static guint8*
++arm64ec_emit_exit_thunk (guint8 *code, MonoMethodSignature *sig, CallInfo *cinfo)
++{
++	int nargs = cinfo->nargs, i, k;
++	int retsize = arm64ec_type_size (sig->ret, sig->pinvoke);
++	X64Class retcls = arm64ec_x64_class (&cinfo->ret, retsize);
++	gboolean hidden = (retcls == X64_BYPTR);
++	int nstack = MAX (0, nargs + hidden - 4);
++	int img = 0x20 + 8 * nstack;
++	int spill = img + IMG_SIZE;
++	int retslot = -1, frame, stack_base;
++	ThunkArg *args = g_newa (ThunkArg, nargs + 1);
++
++	if (!arm64ec_thunk_supported (sig, cinfo, "exit thunk")) {
++		arm_brk (code, 0xec);
++		return code;
++	}
++
++	for (i = 0; i < nargs; ++i) {
++		ArgInfo *ai = &cinfo->args [i];
++		gboolean need_slot;
++
++		args [i].pos = i + hidden;
++		args [i].size = arm64ec_arg_size (sig, i);
++		args [i].cls = arm64ec_x64_class (ai, args [i].size);
++		args [i].ainfo = ai;
++		args [i].slot = -1;
++		need_slot = ai->storage == ArgHFA || ai->storage == ArgVtypeOnStack || (ai->storage == ArgVtypeInIRegs && args [i].cls == X64_BYPTR);
++		if (need_slot) {
++			args [i].slot = spill;
++			spill += arm64ec_align16 (ai->size);
++		}
++	}
++	if (cinfo->ret.storage == ArgHFA || (hidden && cinfo->ret.storage != ArgVtypeByRef)) {
++		retslot = spill;
++		spill += arm64ec_align16 (cinfo->ret.size);
++	}
++	frame = arm64ec_align16 (spill + 16);
++	stack_base = frame;
++
++	arm_subx_imm (code, ARMREG_SP, ARMREG_SP, frame);
++	arm_strx (code, ARMREG_FP, ARMREG_SP, frame - 16);
++	arm_strx (code, ARMREG_LR, ARMREG_SP, frame - 8);
++	arm_addx_imm (code, ARMREG_FP, ARMREG_SP, frame - 16);
++
++	/* phase 1: every register source into the frame (image or aggregate slot) */
++	for (i = 0; i < nargs; ++i) {
++		ArgInfo *ai = args [i].ainfo;
++
++		if (args [i].slot >= 0) {
++			code = arm64ec_spill_to_slot (code, ai, stack_base, args [i].slot);
++			continue;
++		}
++		switch (ai->storage) {
++		case ArgInIReg:
++		case ArgVtypeInIRegs:
++		case ArgVtypeByRef:
++			arm_strx (code, ai->reg, ARMREG_SP, IMG_INT (img, ai->reg));
++			break;
++		case ArgInFReg:
++		case ArgInFRegR4:
++			arm_strfpx (code, ai->reg, ARMREG_SP, IMG_FP (img, ai->reg));
++			break;
++		default:
++			break; /* entry-stack arguments are read in place */
++		}
++	}
++
++	/* phase 2: destinations, loads only */
++	for (i = 0; i < nargs; ++i) {
++		ThunkArg *a = &args [i];
++
++		if (a->pos < 4) {
++			code = arm64ec_exit_value (code, a, img, stack_base, a->pos, a->pos);
++		} else {
++			int dst = 0x20 + 8 * (a->pos - 4);
++
++			code = arm64ec_exit_value (code, a, img, stack_base, ARMREG_IP1, ARMREG_D16);
++			if (a->cls == X64_FP64)
++				arm_strfpx (code, ARMREG_D16, ARMREG_SP, dst);
++			else if (a->cls == X64_FP32)
++				arm_strfpw (code, ARMREG_D16, ARMREG_SP, dst);
++			else
++				arm_strx (code, ARMREG_IP1, ARMREG_SP, dst);
++		}
++	}
++	if (hidden) {
++		if (cinfo->ret.storage == ArgVtypeByRef)
++			arm_movx (code, ARMREG_R0, ARMREG_R8);
++		else
++			arm_addx_imm (code, ARMREG_R0, ARMREG_SP, retslot);
++	}
++
++	code = emit_imm64 (code, ARMREG_IP0, (guint64)(gsize)&__os_arm64x_dispatch_call_no_redirect);
++	arm_ldrx (code, ARMREG_IP0, ARMREG_IP0, 0);
++	arm_blrx (code, ARMREG_IP0);
++
++	switch (cinfo->ret.storage) {
++	case ArgNone:
++	case ArgInFReg:
++	case ArgInFRegR4:
++	case ArgVtypeByRef: /* the x64 callee filled the caller's buffer */
++		break;
++	case ArgInIReg:
++		arm_movx (code, ARMREG_R0, ARMREG_R8);
++		break;
++	case ArgVtypeInIRegs:
++		if (retcls == X64_INT) {
++			arm_movx (code, ARMREG_R0, ARMREG_R8);
++		} else {
++			for (k = 0; k < cinfo->ret.nregs; ++k)
++				arm_ldrx (code, ARMREG_R0 + k, ARMREG_SP, retslot + 8 * k);
++		}
++		break;
++	case ArgHFA:
++		if (retcls == X64_INT)
++			arm_strx (code, ARMREG_R8, ARMREG_SP, retslot);
++		for (k = 0; k < cinfo->ret.nregs; ++k) {
++			if (cinfo->ret.esize == 4)
++				arm_ldrfpw (code, cinfo->ret.reg + k, ARMREG_SP, retslot + cinfo->ret.foffsets [k]);
++			else
++				arm_ldrfpx (code, cinfo->ret.reg + k, ARMREG_SP, retslot + cinfo->ret.foffsets [k]);
++		}
++		break;
++	default:
++		g_assert_not_reached ();
++	}
++
++	arm_ldrx (code, ARMREG_FP, ARMREG_SP, frame - 16);
++	arm_ldrx (code, ARMREG_LR, ARMREG_SP, frame - 8);
++	arm_addx_imm (code, ARMREG_SP, ARMREG_SP, frame);
++	arm_retx (code, ARMREG_LR);
++	return code;
++}
++
++/*
++ * The entry thunk for a native-to-managed wrapper. The emulator arrives here with x9 = the wrapper,
++ * x0-x3 / v0-v3 = the first four x64 arguments by position, x4 = the x64 stack pointer (shadow space at
++ * +0, the fifth argument at +0x20) and lr = the x64 return address.
++ */
++static guint8*
++arm64ec_emit_entry_thunk (guint8 *code, MonoMethodSignature *sig, CallInfo *cinfo)
++{
++	int nargs = cinfo->nargs, i, k;
++	int retsize = arm64ec_type_size (sig->ret, sig->pinvoke);
++	X64Class retcls = arm64ec_x64_class (&cinfo->ret, retsize);
++	gboolean hidden = (retcls == X64_BYPTR);
++	int img = cinfo->stack_usage;
++	int spill = img + IMG_SIZE;
++	int retsave, tmp, frame;
++	ThunkArg *args = g_newa (ThunkArg, nargs + 1);
++
++	if (!arm64ec_thunk_supported (sig, cinfo, "entry thunk")) {
++		arm_brk (code, 0xec);
++		return code;
++	}
++
++	code = emit_qpair (code, FALSE, 6, 7, ARMREG_SP, -176, 3);
++	code = emit_qpair (code, FALSE, 8, 9, ARMREG_SP, 32, 2);
++	code = emit_qpair (code, FALSE, 10, 11, ARMREG_SP, 64, 2);
++	code = emit_qpair (code, FALSE, 12, 13, ARMREG_SP, 96, 2);
++	code = emit_qpair (code, FALSE, 14, 15, ARMREG_SP, 128, 2);
++	arm_stpx (code, ARMREG_FP, ARMREG_LR, ARMREG_SP, 160);
++	arm_addx_imm (code, ARMREG_FP, ARMREG_SP, 160);
++
++	for (i = 0; i < nargs; ++i) {
++		ArgInfo *ai = &cinfo->args [i];
++
++		args [i].pos = i + hidden;
++		args [i].size = arm64ec_arg_size (sig, i);
++		args [i].cls = arm64ec_x64_class (ai, args [i].size);
++		args [i].ainfo = ai;
++		args [i].slot = -1;
++		if (ai->storage == ArgHFA && args [i].cls == X64_INT) {
++			/* an 8-byte HFA arrives as a bit pattern in an integer register: unpack it through memory */
++			args [i].slot = spill;
++			spill += 16;
++		}
++	}
++	retsave = spill;
++	tmp = spill + 8;
++	spill += 16;
++	frame = arm64ec_align16 (spill);
++	arm_subx_imm (code, ARMREG_SP, ARMREG_SP, frame);
++	arm_movx (code, ARMREG_IP0, ARMREG_R4); /* x16 = the x64 stack, kept across the argument moves */
++
++	/* phase 1: the x64 register image (only the positions that exist) */
++	for (i = 0; i < nargs + hidden && i < 4; ++i) {
++		arm_strx (code, i, ARMREG_SP, IMG_INT (img, i));
++		arm_strfpx (code, i, ARMREG_SP, IMG_FP (img, i));
++	}
++	if (hidden) {
++		arm_strx (code, ARMREG_R0, ARMREG_SP, retsave);
++		if (cinfo->ret.storage == ArgVtypeByRef)
++			arm_movx (code, ARMREG_R8, ARMREG_R0);
++	}
++
++	/* phase 2: each argument from the image or the x64 stack into its AAPCS64 home */
++	for (i = 0; i < nargs; ++i) {
++		ThunkArg *a = &args [i];
++		ArgInfo *ai = a->ainfo;
++		int xsrc = ARMREG_IP1, fsrc = ARMREG_D16;
++
++		if (a->cls == X64_INT || a->cls == X64_BYPTR) {
++			if (a->pos < 4)
++				arm_ldrx (code, ARMREG_IP1, ARMREG_SP, IMG_INT (img, a->pos));
++			else
++				arm_ldrx (code, ARMREG_IP1, ARMREG_IP0, 0x20 + 8 * (a->pos - 4));
++		} else {
++			if (a->pos < 4)
++				arm_ldrfpx (code, ARMREG_D16, ARMREG_SP, IMG_FP (img, a->pos));
++			else
++				arm_ldrfpx (code, ARMREG_D16, ARMREG_IP0, 0x20 + 8 * (a->pos - 4));
++		}
++
++		switch (ai->storage) {
++		case ArgInIReg:
++			arm_movx (code, ai->reg, xsrc);
++			break;
++		case ArgOnStack:
++			arm_strx (code, xsrc, ARMREG_SP, ai->offset);
++			break;
++		case ArgInFReg:
++			arm_fmovd (code, ai->reg, fsrc);
++			break;
++		case ArgInFRegR4:
++			arm_fmovs (code, ai->reg, fsrc);
++			break;
++		case ArgOnStackR8:
++			arm_strfpx (code, fsrc, ARMREG_SP, ai->offset);
++			break;
++		case ArgOnStackR4:
++			arm_strfpw (code, fsrc, ARMREG_SP, ai->offset);
++			break;
++		case ArgVtypeInIRegs:
++			if (a->cls == X64_INT) {
++				arm_movx (code, ai->reg, xsrc);
++			} else {
++				for (k = 0; k < ai->nregs; ++k)
++					arm_ldrx (code, ai->reg + k, xsrc, 8 * k);
++			}
++			break;
++		case ArgVtypeByRef:
++			arm_movx (code, ai->reg, xsrc);
++			break;
++		case ArgVtypeByRefOnStack:
++			arm_strx (code, xsrc, ARMREG_SP, ai->offset);
++			break;
++		case ArgVtypeOnStack:
++			if (a->cls == X64_INT) {
++				arm_strx (code, xsrc, ARMREG_SP, ai->offset);
++			} else {
++				for (k = 0; k < ai->size; k += 8) {
++					arm_ldrfpx (code, ARMREG_D16, xsrc, k);
++					arm_strfpx (code, ARMREG_D16, ARMREG_SP, ai->offset + k);
++				}
++			}
++			break;
++		case ArgHFA: {
++			int base, boff;
++
++			if (a->cls == X64_INT) {
++				arm_strx (code, xsrc, ARMREG_SP, a->slot);
++				base = ARMREG_SP;
++				boff = a->slot;
++			} else {
++				base = xsrc;
++				boff = 0;
++			}
++			for (k = 0; k < ai->nregs; ++k) {
++				if (ai->esize == 4)
++					arm_ldrfpw (code, ai->reg + k, base, boff + ai->foffsets [k]);
++				else
++					arm_ldrfpx (code, ai->reg + k, base, boff + ai->foffsets [k]);
++			}
++			break;
++		}
++		default:
++			g_assert_not_reached ();
++		}
++	}
++
++	arm_blrx (code, ARMREG_R9);
++
++	switch (cinfo->ret.storage) {
++	case ArgNone:
++	case ArgInFReg:
++	case ArgInFRegR4:
++		break;
++	case ArgInIReg:
++		arm_movx (code, ARMREG_R8, ARMREG_R0);
++		break;
++	case ArgVtypeByRef:
++		arm_ldrx (code, ARMREG_R8, ARMREG_SP, retsave);
++		break;
++	case ArgVtypeInIRegs:
++		if (retcls == X64_INT) {
++			arm_movx (code, ARMREG_R8, ARMREG_R0);
++		} else {
++			/* exactly size bytes: the x64 caller's buffer is no larger than the struct */
++			int left = retsize;
++
++			arm_ldrx (code, ARMREG_R9, ARMREG_SP, retsave);
++			for (k = 0; k < cinfo->ret.nregs && left > 0; ++k, left -= 8)
++				code = arm64ec_store_bytes (code, ARMREG_R0 + k, ARMREG_R9, 8 * k, MIN (left, 8), tmp);
++			arm_movx (code, ARMREG_R8, ARMREG_R9);
++		}
++		break;
++	case ArgHFA: {
++		int base, boff;
++
++		if (retcls == X64_INT) {
++			base = ARMREG_SP;
++			boff = retsave;
++		} else {
++			arm_ldrx (code, ARMREG_IP1, ARMREG_SP, retsave);
++			base = ARMREG_IP1;
++			boff = 0;
++		}
++		for (k = 0; k < cinfo->ret.nregs; ++k) {
++			if (cinfo->ret.esize == 4)
++				arm_strfpw (code, cinfo->ret.reg + k, base, boff + cinfo->ret.foffsets [k]);
++			else
++				arm_strfpx (code, cinfo->ret.reg + k, base, boff + cinfo->ret.foffsets [k]);
++		}
++		if (retcls == X64_INT)
++			arm_ldrx (code, ARMREG_R8, ARMREG_SP, retsave);
++		else
++			arm_movx (code, ARMREG_R8, ARMREG_IP1);
++		break;
++	}
++	default:
++		g_assert_not_reached ();
++	}
++
++	arm_addx_imm (code, ARMREG_SP, ARMREG_SP, frame);
++	code = emit_imm64 (code, ARMREG_IP0, (guint64)(gsize)&__os_arm64x_dispatch_ret);
++	arm_ldrx (code, ARMREG_IP0, ARMREG_IP0, 0);
++	arm_ldpx (code, ARMREG_FP, ARMREG_LR, ARMREG_SP, 160);
++	code = emit_qpair (code, TRUE, 14, 15, ARMREG_SP, 128, 2);
++	code = emit_qpair (code, TRUE, 12, 13, ARMREG_SP, 96, 2);
++	code = emit_qpair (code, TRUE, 10, 11, ARMREG_SP, 64, 2);
++	code = emit_qpair (code, TRUE, 8, 9, ARMREG_SP, 32, 2);
++	code = emit_qpair (code, TRUE, 6, 7, ARMREG_SP, 176, 1);
++	arm_brx (code, ARMREG_IP0);
++	return code;
++}
++
++/* Exit thunks are shared by argument/return SHAPE (the signature pointer itself may be recycled). */
++static GHashTable *arm64ec_exit_thunks;
++
++static char*
++arm64ec_shape_key (MonoMethodSignature *sig, CallInfo *cinfo)
++{
++	GString *s = g_string_new ("");
++	int i, k;
++	ArgInfo *ai;
++
++	g_string_append_printf (s, "cc%d|", sig->call_convention);
++	for (i = -1; i < cinfo->nargs; ++i) {
++		ai = i < 0 ? &cinfo->ret : &cinfo->args [i];
++		g_string_append_printf (s, "%d:%d:%d:%d:%d:%d:%d", ai->storage, ai->reg, ai->offset, ai->nregs, ai->size, ai->esize,
++			ai->storage == ArgNone ? 0 : (i < 0 ? arm64ec_type_size (sig->ret, sig->pinvoke) : arm64ec_arg_size (sig, i)));
++		for (k = 0; k < 4; ++k)
++			g_string_append_printf (s, ".%d", ai->foffsets [k]);
++		g_string_append_c (s, '|');
++	}
++	return g_string_free (s, FALSE);
++}
++
++gpointer
++mono_arm64ec_get_exit_thunk (MonoMethodSignature *sig)
++{
++	CallInfo *cinfo = get_call_info (NULL, sig);
++	char *key = arm64ec_shape_key (sig, cinfo);
++	gpointer res;
++
++	mono_os_mutex_lock (&arm64ec_thunk_mutex);
++	if (!arm64ec_exit_thunks)
++		arm64ec_exit_thunks = g_hash_table_new (g_str_hash, g_str_equal);
++	res = g_hash_table_lookup (arm64ec_exit_thunks, key);
++	if (!res) {
++		guint8 buf [4096], *end;
++		int size;
++
++		end = arm64ec_emit_exit_thunk (buf, sig, cinfo);
++		size = end - buf;
++		g_assert (size <= sizeof (buf));
++		res = mono_mem_manager_code_reserve (mono_domain_memory_manager (mono_get_root_domain ()), size);
++		memcpy (res, buf, size);
++		mono_arch_flush_icache ((guint8 *)res, size);
++		if (g_getenv ("MONO_ARM64EC_DEBUG")) {
++			char *name = mono_signature_get_desc (sig, TRUE);
++			g_print ("ARM64EC exit thunk %p-%p for %s [%s]\n", res, (guint8 *)res + size, name, key);
++			for (int w = 0; w < size / 4; ++w)
++				g_print ("%s%08x", w ? " " : "ARM64EC words: ", ((guint32 *)res) [w]);
++			g_print ("\n");
++			g_free (name);
++		}
++		g_hash_table_insert (arm64ec_exit_thunks, key, res);
++		key = NULL;
++	}
++	mono_os_mutex_unlock (&arm64ec_thunk_mutex);
++	g_free (key);
++	g_free (cinfo);
++	return res;
++}
++
++/*
++ * Is @addr EC code (the OS bitmap wine keeps per process)? A p/invoke whose target is known at JIT
++ * time to be EC code — every internal call into this DLL, any EC game DLL — gets a plain call: no
++ * checker, no thunk. Fast-forward stubs are x64 bytes and stay on the checked path.
++ */
++static gboolean
++arm64ec_is_ec_code (gconstpointer addr)
++{
++	static BOOLEAN (NTAPI *is_ec_code) (ULONG_PTR) = NULL;
++	static gboolean resolved = FALSE;
++
++	if (!resolved) {
++		HMODULE ntdll = GetModuleHandleW (L"ntdll.dll");
++		if (ntdll)
++			is_ec_code = (BOOLEAN (NTAPI *) (ULONG_PTR))GetProcAddress (ntdll, "RtlIsEcCode");
++		resolved = TRUE;
++	}
++	return is_ec_code && is_ec_code ((ULONG_PTR)addr);
++}
++
++/* x11 = target already loaded: the checked call sequence (see the header comment) */
++static guint8*
++emit_arm64ec_checked_call (MonoCompile *cfg, guint8 *code, MonoMethodSignature *sig)
++{
++	code = emit_imm64 (code, ARMREG_R10, (guint64)(gsize)mono_arm64ec_get_exit_thunk (sig));
++	code = emit_imm64 (code, ARMREG_IP0, (guint64)(gsize)&__os_arm64x_check_icall);
++	arm_ldrx (code, ARMREG_IP0, ARMREG_IP0, 0);
++	arm_blrx (code, ARMREG_IP0);
++	arm_blrx (code, ARMREG_R11);
++	return code;
++}
++
++/* The prefix mono_codegen reserves in front of a native-to-managed wrapper: the entry thunk + the offset word. */
++guint
++mono_arm64ec_entry_thunk_size (MonoCompile *cfg)
++{
++	guint8 buf [4096], *end;
++
++	if (cfg->method->wrapper_type != MONO_WRAPPER_NATIVE_TO_MANAGED)
++		return 0;
++	end = arm64ec_emit_entry_thunk (buf, mono_method_signature_internal (cfg->method), cfg->arch.cinfo);
++	return arm64ec_align16 (end - buf + 4);
++}
++
++void
++mono_arm64ec_emit_entry_thunk (MonoCompile *cfg, guint8 *prefix, guint len)
++{
++	guint8 *end = arm64ec_emit_entry_thunk (prefix, mono_method_signature_internal (cfg->method), cfg->arch.cinfo);
++
++	g_assert (end <= prefix + len - 4);
++	/* the offset from the function entry back to the thunk; bit 0 marks it valid */
++	*(gint32 *)(prefix + len - 4) = (gint32)(-(gint32)len) | 1;
++	mono_arch_flush_icache (prefix, len);
++	if (g_getenv ("MONO_ARM64EC_DEBUG")) {
++		char *name = mono_method_full_name (cfg->method, TRUE);
++		g_print ("ARM64EC entry thunk %p-%p for %s (entry %p)\n", prefix, end, name, prefix + len);
++		g_free (name);
++	}
++}
++#endif
++
+ /*
+  * emit_imm_template:
+  *
+@@ -1355,7 +2083,6 @@
+ 	cinfo->gr = 0;
+ 	cinfo->fr = 0;
+ 	cinfo->stack_usage = 0;
+-
+ 	/* Parameters */
+ 	if (sig->hasthis)
+ 		add_general (cinfo, cinfo->args + 0, 8, FALSE);
+@@ -2111,8 +2838,14 @@
+ 
+ 	/* r28 is reserved for cfg->arch.args_reg */
+ 	/* r27 is reserved for the imt argument */
+-	for (i = ARMREG_R19; i <= ARMREG_R26; ++i)
++	for (i = ARMREG_R19; i <= ARMREG_R26; ++i) {
++#ifdef __arm64ec__
++		/* x23/x24 belong to the x64 emulator (see the ARM64EC comment above mono_arm64ec_get_exit_thunk) */
++		if (i == ARMREG_R23 || i == ARMREG_R24)
++			continue;
++#endif
+ 		regs = g_list_prepend (regs, GUINT_TO_POINTER (i));
++	}
+ 
+ 	return regs;
+ }
+@@ -2212,9 +2945,9 @@
+ 	offset += 16;
+ 
+ 	if (cinfo->stack_usage) {
+-		g_assert (!(cfg->used_int_regs & (1 << ARMREG_R28)));
+-		cfg->arch.args_reg = ARMREG_R28;
+-		cfg->used_int_regs |= 1 << ARMREG_R28;
++		g_assert (!(cfg->used_int_regs & (1 << MONO_ARCH_ARGS_REG)));
++		cfg->arch.args_reg = MONO_ARCH_ARGS_REG;
++		cfg->used_int_regs |= 1 << MONO_ARCH_ARGS_REG;
+ 	}
+ 
+ 	if (cfg->method->save_lmf) {
+@@ -4262,6 +4995,16 @@
+ 
+ 			call = (MonoCallInst*)ins;
+ 			const MonoJumpInfoTarget patch = mono_call_to_patch (call);
++#ifdef __arm64ec__
++			if (call->signature->pinvoke && patch.type == MONO_PATCH_INFO_ABS && !arm64ec_is_ec_code (patch.target)) {
++				/* A native target that may be x64 (see emit_arm64ec_checked_call): x11 = target,
++				 * patched in later like any absolute address, then the checked call. EC targets
++				 * (internal calls, EC DLLs) take the plain emit_call below. */
++				mono_add_patch_info_rel (cfg, code - cfg->native_code, patch.type, patch.target, MONO_R_ARM64_IMM);
++				code = emit_imm64_template (code, ARMREG_R11);
++				code = emit_arm64ec_checked_call (cfg, code, call->signature);
++			} else
++#endif
+ 			code = emit_call (cfg, code, patch.type, patch.target);
+ 			code = emit_move_return_value (cfg, code, ins);
+ 			break;
+@@ -4272,6 +5015,13 @@
+ 		case OP_FCALL_REG:
+ 		case OP_RCALL_REG:
+ 		case OP_VCALL2_REG:
++#ifdef __arm64ec__
++			if (((MonoCallInst*)ins)->signature->pinvoke) {
++				/* calli through a native function pointer: the same checked call */
++				arm_movx (code, ARMREG_R11, sreg1);
++				code = emit_arm64ec_checked_call (cfg, code, ((MonoCallInst*)ins)->signature);
++			} else
++#endif
+ 			code = mono_arm_emit_blrx (code, sreg1);
+ 			code = emit_move_return_value (cfg, code, ins);
+ 			break;
+@@ -4320,7 +5070,7 @@
+ 				g_assert (sreg1 != ARMREG_IP1);
+ 				g_assert (sreg1 != ARMREG_LR);
+ 				g_assert (sreg1 != ARMREG_SP);
+-				g_assert (sreg1 != ARMREG_R28);
++				g_assert (sreg1 != MONO_ARCH_ARGS_REG);
+ 				if ((sreg1 << 1) & MONO_ARCH_CALLEE_SAVED_REGS) {
+ 					arm_movx (code, branch_reg, sreg1);
+ 				} else {
+@@ -4335,7 +5085,7 @@
+ 				g_assert (ins->inst_basereg != ARMREG_IP1);
+ 				g_assert (ins->inst_basereg != ARMREG_LR);
+ 				g_assert (ins->inst_basereg != ARMREG_SP);
+-				g_assert (ins->inst_basereg != ARMREG_R28);
++				g_assert (ins->inst_basereg != MONO_ARCH_ARGS_REG);
+ 				code = emit_ldrx (code, branch_reg, ins->inst_basereg, ins->inst_offset);
+ 				break;
+ 
+@@ -4348,7 +5098,7 @@
+ 			// at least for larger values of stack_usage.
+ 			for (int i = 0; i < call->stack_usage; i += sizeof (target_mgreg_t)) {
+ 				code = emit_ldrx (code, ARMREG_LR, ARMREG_SP, i);
+-				code = emit_strx (code, ARMREG_LR, ARMREG_R28, i);
++				code = emit_strx (code, ARMREG_LR, MONO_ARCH_ARGS_REG, i);
+ 			}
+ 
+ 			/* Restore registers */
+diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.h mono/mono/mini/mini-arm64.h
+--- a/mono/mini/mini-arm64.h
++++ b/mono/mini/mini-arm64.h
+@@ -45,6 +45,7 @@
+ #define UWOP_SAVE_FPLR 0x40
+ #define UWOP_SAVE_FPLR_X 0x80
+ #define UWOP_ALLOC_M 0xc000
++#define UWOP_ALLOC_L 0xe00000
+ #define UWOP_SAVE_REGP 0xc800
+ #define UWOP_SAVE_REG 0xd000
+ #define UWOP_SET_FP 0xe1
+@@ -104,6 +105,20 @@
+ #define MONO_ARCH_INIT_TOP_LMF_ENTRY(lmf)
+ 
+ /* Parameters used by the register allocator */
++#ifdef __arm64ec__
++/*
++ * ARM64EC: x13, x14, x23, x24, x28 and v16-v31 have no x64 counterpart — the emulator owns them, they
++ * are absent from every CONTEXT the OS captures (a GC suspend would miss a reference held there) and
++ * x64 code preserves none of them. Keep them out of the allocator; r27 takes over as args_reg.
++ */
++/* r0..r7, r9..r12, r15 */
++#define MONO_ARCH_CALLEE_REGS (0xfeff & ~((1 << 13) | (1 << 14)))
++/* r19..r22, r25..r27 */
++#define MONO_ARCH_CALLEE_SAVED_REGS ((0x3ff << 19) & ~((1 << 23) | (1 << 24) | (1 << 28)))
++/* v0..v7 (v16/v17 stay the scratch regs: never live across an instruction, let alone a call) */
++#define MONO_ARCH_CALLEE_FREGS 0xff
++#define MONO_ARCH_ARGS_REG ARMREG_R27
++#else
+ /* r0..r7, r9..r14 (r15 is the imt/rgctx reg) */
+ #define MONO_ARCH_CALLEE_REGS 0xfeff
+ /* r19..r28 */
+@@ -111,6 +126,8 @@
+ 
+ /* v16/v17 is reserved for a scratch reg */
+ #define MONO_ARCH_CALLEE_FREGS 0xfffc00ff
++#define MONO_ARCH_ARGS_REG ARMREG_R28
++#endif
+ /* v8..v15 */
+ #define MONO_ARCH_CALLEE_SAVED_FREGS 0xff00
+ 
+@@ -215,6 +232,10 @@
+ #define MONO_ARCH_HAVE_OP_TAILCALL_MEMBASE 1
+ #define MONO_ARCH_HAVE_OP_TAILCALL_REG 1
+ #define MONO_ARCH_RGCTX_REG ARMREG_R15
++#ifdef __arm64ec__
++/* The entry-thunk hooks mono_codegen calls are declared in mini.c (MonoCompile is not visible here). */
++gpointer mono_arm64ec_get_exit_thunk (MonoMethodSignature *sig);
++#endif
+ #define MONO_ARCH_IMT_REG MONO_ARCH_RGCTX_REG
+ #define MONO_ARCH_VTABLE_REG ARMREG_R0
+ #define MONO_ARCH_HAVE_GENERALIZED_IMT_TRAMPOLINE 1
+diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini.c mono/mono/mini/mini.c
+--- a/mono/mini/mini.c
++++ b/mono/mini/mini.c
+@@ -2136,6 +2136,12 @@
+ 	}
+ }
+ 
++#ifdef __arm64ec__
++/* mono_codegen reserves an ARM64EC entry thunk in front of native-to-managed wrappers (mini-arm64.c) */
++guint mono_arm64ec_entry_thunk_size (MonoCompile *cfg);
++void mono_arm64ec_emit_entry_thunk (MonoCompile *cfg, guint8 *prefix, guint len);
++#endif
++
+ void
+ mono_codegen (MonoCompile *cfg)
+ {
+@@ -2144,6 +2150,7 @@
+ 	guint8 *code;
+ 	MonoMemoryManager *code_mem_manager;
+ 	guint unwindlen = 0;
++	guint prefixlen = 0;
+ 
+ 	if (mono_using_xdebug)
+ 		/*
+@@ -2217,6 +2224,10 @@
+ 	if (!cfg->compile_aot)
+ 		unwindlen = mono_arch_unwindinfo_init_method_unwind_info (cfg);
+ #endif
++#ifdef __arm64ec__
++	/* an entry thunk in front of the method, for x64 callers (see mini-arm64.c) */
++	prefixlen = mono_arm64ec_entry_thunk_size (cfg);
++#endif
+ 
+ 	if (cfg->method->dynamic) {
+ 		/* Allocate the code into a separate memory pool so it can be freed */
+@@ -2228,15 +2239,18 @@
+ 
+ 		if (mono_using_xdebug)
+ 			/* See the comment for cfg->code_domain */
+-			code = (guint8 *)mono_mem_manager_code_reserve (code_mem_manager, cfg->code_size + cfg->thunk_area + unwindlen);
++			code = (guint8 *)mono_mem_manager_code_reserve (code_mem_manager, prefixlen + cfg->code_size + cfg->thunk_area + unwindlen);
+ 		else
+-			code = (guint8 *)mono_code_manager_reserve (cfg->dynamic_info->code_mp, cfg->code_size + cfg->thunk_area + unwindlen);
++			code = (guint8 *)mono_code_manager_reserve (cfg->dynamic_info->code_mp, prefixlen + cfg->code_size + cfg->thunk_area + unwindlen);
+ 	} else {
+-		code = (guint8 *)mono_mem_manager_code_reserve (code_mem_manager, cfg->code_size + cfg->thunk_area + unwindlen);
++		code = (guint8 *)mono_mem_manager_code_reserve (code_mem_manager, prefixlen + cfg->code_size + cfg->thunk_area + unwindlen);
+ 	}
+ 
+ 	mono_codeman_enable_write ();
+ 
++	g_assert (code);
++	code += prefixlen;
++
+ 	if (cfg->thunk_area) {
+ 		cfg->thunks_offset = cfg->code_size + unwindlen;
+ 		cfg->thunks = code + cfg->thunks_offset;
+@@ -2248,6 +2262,10 @@
+ 	g_free (cfg->native_code);
+ 	cfg->native_code = code;
+ 	code = cfg->native_code + cfg->code_len;
++#ifdef __arm64ec__
++	if (prefixlen)
++		mono_arm64ec_emit_entry_thunk (cfg, cfg->native_code - prefixlen, prefixlen);
++#endif
+   
+ 	/* g_assert (((int)cfg->native_code & (MONO_ARCH_CODE_ALIGNMENT - 1)) == 0); */
+ 	mono_postprocess_patches (cfg);
+diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-codegen.c mono/mono/mini/mini-codegen.c
+--- a/mono/mini/mini-codegen.c
++++ b/mono/mini/mini-codegen.c
+@@ -176,7 +176,7 @@
+ {
+ 	regmask_t mask = allow & rs->ifree_mask;
+ 
+-#if defined(__x86_64__) && defined(__GNUC__)
++#if defined(__x86_64__) && !defined(__arm64ec__) && defined(__GNUC__)
+  {
+ 	guint64 i;
+ 
+diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-windows.c mono/mono/mini/mini-windows.c
+--- a/mono/mini/mini-windows.c
++++ b/mono/mini/mini-windows.c
+@@ -301,8 +301,8 @@
+ 	if (GetThreadContext (thread, &context)) {
+ 		guchar *ip;
+ 
+-#ifdef _M_ARM64
+-		ip = (guchar *) context.Pc;
++#if defined(_M_ARM64) || defined(_M_ARM64EC)
++		ip = (guchar *) MONO_WIN32_CONTEXT_PC (&context);
+ #elif defined(_WIN64)
+ 		ip = (guchar *) context.Rip;
+ #else
+diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/monobitset.c mono/mono/utils/monobitset.c
+--- a/mono/utils/monobitset.c
++++ b/mono/utils/monobitset.c
+@@ -286,7 +286,7 @@
+ 			 : "=r" (r) : "g" (mask)); 
+ 	 return nth_bit + r;
+  }
+-#elif defined(__x86_64) && defined(__GNUC__)
++#elif defined(__x86_64) && !defined(__arm64ec__) && defined(__GNUC__)
+  {
+ 	guint64 r;
+ 
+@@ -314,7 +314,7 @@
+ 	__asm__("bsfl %1,%0\n\t"
+ 			: "=r" (r) : "rm" (mask));
+ 	return r;
+-#elif defined(__x86_64) && defined(__GNUC__)
++#elif defined(__x86_64) && !defined(__arm64ec__) && defined(__GNUC__)
+ 	guint64 r;
+ 
+ 	__asm__("bsfq %1,%0\n\t"
+diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-codeman.c mono/mono/utils/mono-codeman.c
+--- a/mono/utils/mono-codeman.c
++++ b/mono/utils/mono-codeman.c
+@@ -68,7 +68,7 @@
+ #define MAX_WASTAGE 32
+ #define MIN_BSIZE 32
+ 
+-#ifdef __x86_64__
++#if defined(__x86_64__) && !defined(__arm64ec__)
+ #define ARCH_MAP_FLAGS MONO_MMAP_32BIT
+ #else
+ #define ARCH_MAP_FLAGS 0
+@@ -206,6 +206,10 @@
+ {
+ #ifdef FORCE_MALLOC
+ 	return CODE_FLAG_MALLOC;
++#elif defined(__arm64ec__)
++	/* The Windows executable heap cannot be registered as ARM64EC code; every chunk, the dynamic
++	 * managers' included, comes from mono_valloc, which registers it (mono-mmap-windows.c). */
++	return CODE_FLAG_MMAP;
+ #else
+ 	return cman->dynamic ? CODE_FLAG_MALLOC : CODE_FLAG_MMAP;
+ #endif
+@@ -367,7 +371,7 @@
+ {
+ 	CodeChunk *chunk;
+ 
+-#if defined(__i386__) || defined(__x86_64__)
++#if defined(__i386__) || (defined(__x86_64__) && !defined(__arm64ec__))
+ 	int fill_value = 0xcc; /* x86 break */
+ #else
+ 	int fill_value = 0x2a;
+diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-context.c mono/mono/utils/mono-context.c
+--- a/mono/utils/mono-context.c
++++ b/mono/utils/mono-context.c
+@@ -158,7 +158,7 @@
+ #endif
+ }
+ 
+-#elif (defined(__x86_64__) && !defined(MONO_CROSS_COMPILE)) || (defined(TARGET_AMD64)) /* defined(__i386__) */
++#elif (defined(__x86_64__) && !defined(__arm64ec__) && !defined(MONO_CROSS_COMPILE)) || (defined(TARGET_AMD64)) /* defined(__i386__) */
+ 
+ #include <mono/utils/mono-context.h>
+ 
+@@ -521,11 +521,59 @@
+ #include <windows.h>
+ #endif
+ 
++#if defined(HOST_WIN32) && defined(__arm64ec__)
++/*
++ * ARM64EC: the OS hands EC code the x64-layout CONTEXT with ARM64 registers mapped onto its slots
++ * (ARM64EC_NT_CONTEXT). There is no slot for x13, x14, x18, x23, x24, x28 or v16-v31 — EC code never
++ * holds live state in them across a point where a context can be captured — and x16/x17 are split into
++ * four 16-bit pieces across the x87 register padding.
++ */
++#define ARM64EC_X16_17(c, n) \
++	((guint64)(c)->X##n##_0 | ((guint64)(c)->X##n##_1 << 16) | ((guint64)(c)->X##n##_2 << 32) | ((guint64)(c)->X##n##_3 << 48))
++#define ARM64EC_SET_X16_17(c, n, v) do { \
++	(c)->X##n##_0 = (WORD)(v); (c)->X##n##_1 = (WORD)((v) >> 16); \
++	(c)->X##n##_2 = (WORD)((v) >> 32); (c)->X##n##_3 = (WORD)((v) >> 48); } while (0)
++
++void
++mono_arm64ec_context_to_monoctx (const ARM64EC_NT_CONTEXT *c, MonoContext *mctx)
++{
++	host_mgreg_t *r = mctx->regs;
++	memset (r, 0, sizeof (mctx->regs));
++	r [0] = c->X0; r [1] = c->X1; r [2] = c->X2; r [3] = c->X3; r [4] = c->X4; r [5] = c->X5;
++	r [6] = c->X6; r [7] = c->X7; r [8] = c->X8; r [9] = c->X9; r [10] = c->X10; r [11] = c->X11;
++	r [12] = c->X12; r [15] = c->X15; r [16] = ARM64EC_X16_17 (c, 16); r [17] = ARM64EC_X16_17 (c, 17);
++	r [19] = c->X19; r [20] = c->X20; r [21] = c->X21; r [22] = c->X22;
++	r [25] = c->X25; r [26] = c->X26; r [27] = c->X27;
++	r [ARMREG_FP] = c->Fp; r [ARMREG_LR] = c->Lr; r [ARMREG_SP] = c->Sp;
++	mctx->pc = c->Pc;
++	memset (&mctx->fregs, 0, sizeof (mctx->fregs));
++	memcpy (&mctx->fregs, &c->V, sizeof (c->V));
++	mctx->has_fregs = 1;
++}
++
++void
++mono_monoctx_to_arm64ec_context (MonoContext *mctx, ARM64EC_NT_CONTEXT *c)
++{
++	const host_mgreg_t *r = mctx->regs;
++	c->X0 = r [0]; c->X1 = r [1]; c->X2 = r [2]; c->X3 = r [3]; c->X4 = r [4]; c->X5 = r [5];
++	c->X6 = r [6]; c->X7 = r [7]; c->X8 = r [8]; c->X9 = r [9]; c->X10 = r [10]; c->X11 = r [11];
++	c->X12 = r [12]; c->X15 = r [15]; ARM64EC_SET_X16_17 (c, 16, r [16]); ARM64EC_SET_X16_17 (c, 17, r [17]);
++	c->X19 = r [19]; c->X20 = r [20]; c->X21 = r [21]; c->X22 = r [22];
++	c->X25 = r [25]; c->X26 = r [26]; c->X27 = r [27];
++	c->Fp = r [ARMREG_FP]; c->Lr = r [ARMREG_LR]; c->Sp = r [ARMREG_SP];
++	c->Pc = mctx->pc;
++	if (mctx->has_fregs)
++		memcpy (&c->V, &mctx->fregs, sizeof (c->V));
++}
++#endif
++
+ void
+ mono_sigctx_to_monoctx (void *sigctx, MonoContext *mctx)
+ {
+ #ifdef MONO_CROSS_COMPILE
+ 	g_assert_not_reached ();
++#elif defined(HOST_WIN32) && defined(__arm64ec__)
++	mono_arm64ec_context_to_monoctx ((const ARM64EC_NT_CONTEXT*)sigctx, mctx);
+ #elif defined(HOST_WIN32)
+ 	CONTEXT *context = (CONTEXT*)sigctx;
+ 
+@@ -564,6 +612,8 @@
+ 	memcpy (UCONTEXT_GREGS (sigctx), mctx->regs, sizeof (host_mgreg_t) * 31);
+ 	UCONTEXT_REG_SET_PC (sigctx, (gpointer)mctx->pc);
+ 	UCONTEXT_REG_SET_SP (sigctx, mctx->regs [ARMREG_SP]);
++#elif defined(HOST_WIN32) && defined(__arm64ec__)
++	mono_monoctx_to_arm64ec_context (mctx, (ARM64EC_NT_CONTEXT*)sigctx);
+ #elif defined(HOST_WIN32)
+ 	CONTEXT *context = (CONTEXT*)sigctx;
+ 
+diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-context.h mono/mono/utils/mono-context.h
+--- a/mono/utils/mono-context.h
++++ b/mono/utils/mono-context.h
+@@ -246,7 +246,7 @@
+ 
+ #define MONO_ARCH_HAS_MONO_CONTEXT 1
+ 
+-#elif (defined(__x86_64__) && !defined(MONO_CROSS_COMPILE)) || (defined(TARGET_AMD64)) /* defined(__i386__) */
++#elif (defined(__x86_64__) && !defined(__arm64ec__) && !defined(MONO_CROSS_COMPILE)) || (defined(TARGET_AMD64)) /* defined(__i386__) */
+ 
+ #include <mono/arch/amd64/amd64-codegen.h>
+ 
+@@ -495,6 +495,20 @@
+ #define MONO_CONTEXT_GET_BP(ctx) (gpointer)(gsize)((ctx)->regs [ARMREG_FP])
+ #define MONO_CONTEXT_GET_SP(ctx) (gpointer)(gsize)((ctx)->regs [ARMREG_SP])
+ 
++/*
++ * The OS CONTEXT's program counter on Windows: the ARM64 CONTEXT's Pc, or — under ARM64EC, where the
++ * OS presents the x64-layout CONTEXT with ARM64 registers mapped onto it — ARM64EC_NT_CONTEXT's.
++ * mono-context.c has the full conversions (mono_arm64ec_context_to_monoctx and back).
++ */
++#if defined(HOST_WIN32) && defined(__arm64ec__)
++#define MONO_WIN32_CONTEXT_PC(c) (((ARM64EC_NT_CONTEXT*)(c))->Pc)
++struct _ARM64EC_NT_CONTEXT;
++void mono_arm64ec_context_to_monoctx (const struct _ARM64EC_NT_CONTEXT *c, MonoContext *mctx);
++void mono_monoctx_to_arm64ec_context (MonoContext *mctx, struct _ARM64EC_NT_CONTEXT *c);
++#elif defined(HOST_WIN32)
++#define MONO_WIN32_CONTEXT_PC(c) ((c)->Pc)
++#endif
++
+ #if defined (HOST_TVOS)
+ 
+ #define MONO_CONTEXT_GET_CURRENT(ctx) do { \
+diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-memory-model.h mono/mono/utils/mono-memory-model.h
+--- a/mono/utils/mono-memory-model.h
++++ b/mono/utils/mono-memory-model.h
+@@ -49,7 +49,7 @@
+ #define LOAD_BARRIER mono_memory_read_barrier ()
+ #define STORE_BARRIER mono_memory_write_barrier ()
+ 
+-#if defined(__i386__) || defined(__x86_64__)
++#if defined(__i386__) || (defined(__x86_64__) && !defined(__arm64ec__))
+ /*
+ Both x86 and amd64 follow the SPO memory model:
+ -Loads are not reordered with other loads
+diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-mmap-windows.c mono/mono/utils/mono-mmap-windows.c
+--- a/mono/utils/mono-mmap-windows.c
++++ b/mono/utils/mono-mmap-windows.c
+@@ -79,6 +79,37 @@
+ 	/* Ignored on HOST_WIN32 */
+ }
+ 
++#if defined(__arm64ec__)
++#include <winternl.h>
++/*
++ * ARM64EC: memory that will hold JIT output must be registered as EC code in the process's EC bitmap
++ * (peb->EcCodeBitMap), or the x64 emulator decodes the ARM64 instructions in it as x64 — observed as an
++ * ACCESS_VIOLATION then an ILLEGAL_INSTRUCTION at the first JIT'd method. NtAllocateVirtualMemoryEx
++ * with the EC_CODE attribute is the registration (VirtualAlloc2 is the same call behind an api-set;
++ * ntdll is linked already, and wine implements the attribute there). Every executable allocation goes
++ * through it; the bitmap is cleared when the range is freed.
++ */
++NTSYSAPI NTSTATUS NTAPI NtAllocateVirtualMemoryEx (HANDLE process, PVOID *base, SIZE_T *size, ULONG type, ULONG protect, MEM_EXTENDED_PARAMETER *params, ULONG count);
++
++static void*
++arm64ec_valloc (void *addr, size_t length, int mflags, int prot)
++{
++	MEM_EXTENDED_PARAMETER param;
++	PVOID base = addr;
++	SIZE_T size = length;
++	memset (&param, 0, sizeof (param));
++	param.Type = MemExtendedParameterAttributeFlags;
++	param.ULong64 = MEM_EXTENDED_PARAMETER_EC_CODE;
++	if ((LONG)NtAllocateVirtualMemoryEx (GetCurrentProcess (), &base, &size, mflags, prot, &param, 1) < 0)
++		return NULL;
++	return base;
++}
++#define MONO_WIN32_VALLOC(addr, length, mflags, prot, flags) \
++	(((flags) & MONO_MMAP_EXEC) ? arm64ec_valloc ((addr), (length), (mflags), (prot)) : VirtualAlloc ((addr), (length), (mflags), (prot)))
++#else
++#define MONO_WIN32_VALLOC(addr, length, mflags, prot, flags) VirtualAlloc ((addr), (length), (mflags), (prot))
++#endif
++
+ void*
+ mono_valloc (void *addr, size_t length, int flags, MonoMemAccountType type)
+ {
+@@ -90,7 +121,7 @@
+ 	int prot = mono_mmap_win_prot_from_flags (flags);
+ 	/* translate the flags */
+ 
+-	ptr = VirtualAlloc (addr, length, mflags, prot);
++	ptr = MONO_WIN32_VALLOC (addr, length, mflags, prot, flags);
+ 
+ 	mono_account_mem (type, (ssize_t)length);
+ 
+@@ -101,7 +132,7 @@
+ mono_valloc_aligned (size_t length, size_t alignment, int flags, MonoMemAccountType type)
+ {
+ 	int prot = mono_mmap_win_prot_from_flags (flags);
+-	char *mem = (char*)VirtualAlloc (NULL, length + alignment, MEM_RESERVE, prot);
++	char *mem = (char*)MONO_WIN32_VALLOC (NULL, length + alignment, MEM_RESERVE, prot, flags);
+ 	char *aligned;
+ 
+ 	if (!mem)
+@@ -112,7 +143,7 @@
+ 
+ 	aligned = mono_aligned_address (mem, length, alignment);
+ 
+-	aligned = (char*)VirtualAlloc (aligned, length, MEM_COMMIT, prot);
++	aligned = (char*)MONO_WIN32_VALLOC (aligned, length, MEM_COMMIT, prot, flags);
+ 	g_assert (aligned);
+ 
+ 	mono_account_mem (type, (ssize_t)length);
+diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/valgrind.h mono/mono/utils/valgrind.h
+--- a/mono/utils/valgrind.h
++++ b/mono/utils/valgrind.h
+@@ -130,7 +130,7 @@
+ #  define PLAT_amd64_darwin 1
+ #elif defined(_WIN32) && defined(__i386__)
+ #  define PLAT_x86_win32 1
+-#elif defined(_WIN32) && defined(__x86_64__)
++#elif defined(_WIN32) && defined(__x86_64__) && !defined(__arm64ec__)
+ #  define PLAT_amd64_win64 1
+ #elif defined(__linux__) && defined(__i386__)
+ #  define PLAT_x86_linux 1

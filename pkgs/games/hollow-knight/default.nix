@@ -79,6 +79,12 @@ mkApp (
       "hollow_knight_Data/Plugins/x86_64/steam_api64.dll"
     ];
 
+    # Unity 6 (the player's version string: 6000.0.61f1), Mono scripting backend. On aarch64 the Windows
+    # combos run the stream's ARM64EC Mono runtime (emulators/unity-mono) in place of the shipped x64 one,
+    # so the game's C# is JIT-compiled to native ARM64 rather than emulated; the Linux combo under box64 is
+    # unaffected (lib/modules/unity-mono.nix).
+    unity.mono.stream = "6000.0";
+
     # Save: HK's Unity persistentDataPath, bound out to the persistent propnix save dir. dst is
     # HOME-relative on both backends — the Windows and Linux builds just keep it under different
     # OS-native homes (AppData vs .config).

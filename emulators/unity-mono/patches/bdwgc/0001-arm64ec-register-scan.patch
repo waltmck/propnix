@@ -1,0 +1,50 @@
+Subject: [PATCH] win32_threads: scan the ARM64EC register set of a suspended thread
+
+Under ARM64EC the CONTEXT that GetThreadContext returns is the x64 layout with the ARM64 registers aliased
+into it (ARM64EC_NT_CONTEXT). The X86_64 branch of copy_ptr_regs pushes the x64 names, which reach only
+x0-x5, x8, x19-x22, x25-x27 and fp; native EC code and the EC JIT also keep live values in x6, x7,
+x9-x12, x15-x17 and lr, which that layout stores in the floating-point save area. Push the ARM64 set
+from the aliased layout instead (x16 and x17 reassembled from the four WORDs each is stored as), so a
+pointer held only in one of those registers at the moment of suspension is seen by the collector.
+The same change applies to both bdwgc revisions the streams pin.
+
+diff --git a/win32_threads.c b/win32_threads.c
+index 0e0c97a..9e20ddf 100644
+--- a/win32_threads.c
++++ b/win32_threads.c
+@@ -82,6 +82,9 @@ static ptr_t copy_ptr_regs(word *regs, const CONTEXT *pcontext);
+ # else
+ #   define PUSHED_REGS_COUNT 7
+ # endif
++#elif defined(X86_64) && defined(__arm64ec__)
++  /* ARM64EC: the x64-mapped registers plus the ARM64-only ones (see copy_ptr_regs). */
++# define PUSHED_REGS_COUNT 25
+ #elif defined(X86_64) || defined(SHx)
+ # define PUSHED_REGS_COUNT 15
+ #elif defined(ARM32)
+@@ -1458,6 +1461,25 @@ static ptr_t copy_ptr_regs(word *regs, const CONTEXT *pcontext) {
+ #     endif
+       PUSH4(Edi,Esi,Ebx,Edx), PUSH2(Ecx,Eax), PUSH1(Ebp);
+       sp = (ptr_t)context.Esp;
++#   elif defined(X86_64) && defined(__arm64ec__)
++      {
++        /* An ARM64EC thread's CONTEXT is the x64 layout with the ARM64 registers aliased into it.
++         * Rax..R15 cover only x0-x5, x8, x19-x22, x25-x27 and fp; native EC code (and the EC JIT) also
++         * keeps live values in x6, x7, x9-x12, x15-x17 and lr, which the x64 view stores in the
++         * floating-point save area. Copy every one of them: a pointer held only in a scratch register at
++         * the moment of suspension must be seen. (x13, x14, x23, x24, x28 are reserved for the
++         * emulator and never hold native values.) */
++        const ARM64EC_NT_CONTEXT *ec = (const ARM64EC_NT_CONTEXT *)pcontext;
++#       define PUSHEC(r) (regs[cnt++] = (word)ec->r)
++        PUSHEC(X0); PUSHEC(X1); PUSHEC(X2); PUSHEC(X3); PUSHEC(X4); PUSHEC(X5); PUSHEC(X6); PUSHEC(X7);
++        PUSHEC(X8); PUSHEC(X9); PUSHEC(X10); PUSHEC(X11); PUSHEC(X12); PUSHEC(X15);
++        PUSHEC(X19); PUSHEC(X20); PUSHEC(X21); PUSHEC(X22); PUSHEC(X25); PUSHEC(X26); PUSHEC(X27);
++        PUSHEC(Fp); PUSHEC(Lr);
++        regs[cnt++] = (word)ec->X16_0 | ((word)ec->X16_1 << 16) | ((word)ec->X16_2 << 32) | ((word)ec->X16_3 << 48);
++        regs[cnt++] = (word)ec->X17_0 | ((word)ec->X17_1 << 16) | ((word)ec->X17_2 << 32) | ((word)ec->X17_3 << 48);
++#       undef PUSHEC
++        sp = (ptr_t)ec->Sp;
++      }
+ #   elif defined(X86_64)
+       PUSH4(Rax,Rcx,Rdx,Rbx); PUSH2(Rbp, Rsi); PUSH1(Rdi);
+       PUSH4(R8, R9, R10, R11); PUSH4(R12, R13, R14, R15);

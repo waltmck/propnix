@@ -1,0 +1,278 @@
+Subject: [PATCH] Build the 6000.0 runtime as ARM64EC with llvm-mingw
+
+configure.ac: `aarch64-*-*` and `arm64ec-*-*` hosts (RID win-arm64, COREARCH arm64: Unity's Windows-ARM64
+port sources, -lntdll -luuid; Boehm stays on for arm64ec, the Unity runtime being the Boehm build) and
+the `aarch64-*mingw*|arm64ec-*mingw*` target (TARGET=ARM64, with the armv7 mingw case beside it) at the
+Windows 10 API level the port's growable function tables and ARM64EC code allocation are declared at;
+the collector on the compiler's atomics (--with-libatomic-ops=none for its sub-configure,
+GC_BUILTIN_ATOMIC for the runtime's own compile of its private headers — the bundled libatomic_ops has
+no ARM64EC backend); DebugBreak as the Windows BREAKPOINT; the configure-time
+scripts/update_submodules.sh call dropped (the tree is assembled from pinned sources).
+
+etw-profiler.c, mono-log-common.c: the Windows SDK header spellings as the SDK ships them, and the
+MSVC-only inline forms the message-compiler output assumes, for clang. boehm-gc.c: the pointer types
+the collector's current headers declare. mixed_callstack_plugin.c: a forward declaration with the
+definition's linkage. oop.c: part of the Windows build (Makefile.am win32_sources), its x64
+dynamic-function-table access compiled only for x64 (the ARM64 port registers its own tables).
+
+diff --git a/configure.ac b/configure.ac
+index 196e0df1..24a5e0bd 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -178,12 +178,34 @@ case "$host" in
+ 			RID="win-x64"
+ 			COREARCH="x64"
+ 			;;
++		aarch64-*-*)
++			support_boehm=no
++			with_gc=sgen
++			RID="win-arm64"
++			COREARCH="arm64"
++			;;
++		arm64ec-*-*)
++			# ARM64EC: the x64-facing build of the Windows-ARM64 port; Boehm stays on (it is the Unity runtime).
++			RID="win-arm64"
++			COREARCH="arm64"
++			;;
+ 		esac
+ 
+ 		# Windows 7 or later is required
+ 		WIN32_CPPFLAGS="-DWINVER=0x0601 -D_WIN32_WINNT=0x0601 -D_WIN32_IE=0x0501 -D_UNICODE -DUNICODE -DWIN32_THREADS -DFD_SETSIZE=1024"
++		case "$host" in
++			aarch64-*mingw*|arm64ec-*mingw*)
++				# Windows on ARM64 is Windows 10 or later; the ARM64 port's growable function tables
++				# (RtlAddGrowableFunctionTable, Windows 8) and ARM64EC code allocation (VirtualAlloc2,
++				# Windows 10 RS4) are declared only at that API level.
++				WIN32_CPPFLAGS="-DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000005 -D_WIN32_IE=0x0501 -D_UNICODE -DUNICODE -DWIN32_THREADS -DFD_SETSIZE=1024"
++				;;
++		esac
+ 		CPPFLAGS="$CPPFLAGS $WIN32_CPPFLAGS"
+ 		WIN32_LDFLAGS="-lbcrypt -lmswsock -lws2_32 -lole32 -loleaut32 -lpsapi -lversion -ladvapi32 -lwinmm -lkernel32 -liphlpapi -static-libgcc"
++		if test x"$COREARCH" = xarm64; then
++			WIN32_LDFLAGS="$WIN32_LDFLAGS -lntdll -luuid"
++		fi;
+ 		LDFLAGS="$LDFLAGS $WIN32_LDFLAGS"
+ 		libmono_cflags="-mms-bitfields -mwindows"
+ 		libmono_ldflags="-mms-bitfields -mwindows"
+@@ -2137,7 +2159,16 @@ if test "x$support_boehm" = "xyes"; then
+ 	# TODO: How much of this do we want?
+ 	#		ac_configure_args="$ac_configure_args --enable-thread-local-alloc=no --enable-parallel-mark=no --enable-verify-defines=yes --enable-gc-threads=yes --with-libatomic-ops=no --enable-no-threads-discovery=yes --enable-single-obj-compilation=yes --enable-gcj-support=yes --enable-threads=$libgc_threads --enable-munmap=yes --enable-mmap=yes --enable-ignore-dynamic-loading=yes --enable-dont-register-main-static-data=yes"
+ 
+-	ac_configure_args="$ac_configure_args --with-libatomic-ops=no"
++	case "$host" in
++		arm64ec-*mingw*)
++			# The bundled libatomic_ops has no ARM64EC backend (it picks its x86 inline-assembly
++			# sysdeps from __x86_64__); bdwgc's compiler intrinsics path needs nothing from it.
++			ac_configure_args="$ac_configure_args --with-libatomic-ops=none"
++			;;
++		*)
++			ac_configure_args="$ac_configure_args --with-libatomic-ops=no"
++			;;
++	esac
+ 
+ 	gc_msg=""
+ 	LIBGC_CPPFLAGS=
+@@ -2146,6 +2177,14 @@ if test "x$support_boehm" = "xyes"; then
+ 	case "x$libgc" in
+ 		xincluded)
+ 			LIBGC_CPPFLAGS='-I$(top_srcdir)/external/bdwgc/include -I$(top_srcdir)/external/bdwgc/libatomic_ops/src'
++			case "$host" in
++				arm64ec-*mingw*)
++					# boehm-gc.c includes bdwgc's private headers; with the sub-configure on compiler
++					# intrinsics (--with-libatomic-ops=none above) the runtime's compile must say so too,
++					# or gc_atomic_ops.h pulls libatomic_ops' x86 sysdeps.
++					LIBGC_CPPFLAGS="$LIBGC_CPPFLAGS -DGC_BUILTIN_ATOMIC"
++					;;
++			esac
+ 			LIBGC_LIBS='$(top_builddir)/external/bdwgc/libgc.la'
+ 			LIBGC_STATIC_LIBS='$(top_builddir)/external/bdwgc/libgc-static.la'
+ 
+@@ -4616,6 +4655,19 @@ case "$host" in
+ 			AC_MSG_ERROR([The required utility 'ar' is not found in your PATH. Usually it can be found in /usr/ccs/bin.])
+ 		fi
+ 		;;
++	armv7-*mingw*)
++		TARGET=ARM;
++		arch_target=arm;
++		ACCESS_UNALIGNED="no"
++		BTLS_SUPPORTED=no
++		BTLS_PLATFORM=arm
++		;;
++	aarch64-*mingw*|arm64ec-*mingw*)
++		TARGET=ARM64;
++		arch_target=arm64;
++		BTLS_SUPPORTED=no
++		BTLS_PLATFORM=aarch64
++		;;
+ 	*-mingw*|*-*-cygwin*)
+ 		# When this is enabled, it leads to very strange crashes at runtime (gcc-3.4.4)
+ 		have_visibility_hidden=no
+@@ -5246,6 +5298,9 @@ AC_SUBST(libsuffix)
+ GNUC_PRETTY=
+ GNUC_UNUSED=
+ BREAKPOINT="G_STMT_START { raise (SIGTRAP); } G_STMT_END"
++if test x$target_win32 = xyes; then
++   BREAKPOINT="G_STMT_START { DebugBreak(); } G_STMT_END"
++fi
+ if test x$GCC = xyes; then
+    GNUC_UNUSED='__attribute__((__unused__))'
+    GNUC_NORETURN='__attribute__((__noreturn__))'
+@@ -6987,11 +7042,6 @@ AC_SUBST(LDFLAGS)
+ AC_SUBST(CCLDFLAGS)
+ AC_SUBST(ZLIB_CFLAGS)
+ 
+-# Update all submodules recursively to ensure everything is checked out
+-if test "x$with_core" != "xonly"; then
+-	(cd $srcdir && scripts/update_submodules.sh)
+-fi
+-
+ AC_MONO_OUTPUT()
+ 
+ if test x$host_win32 = xyes; then
+diff --git a/mono/metadata/Makefile.am b/mono/metadata/Makefile.am
+index 28f26b28..a532d49d 100644
+--- a/mono/metadata/Makefile.am
++++ b/mono/metadata/Makefile.am
+@@ -13,6 +13,7 @@ win32_sources = \
+ 	w32semaphore-win32.c \
+ 	w32event-win32.c \
+ 	w32process-win32.c \
++	oop.c \
+ 	w32socket-win32.c \
+ 	w32error-win32.c
+ 
+diff --git a/mono/metadata/boehm-gc.c b/mono/metadata/boehm-gc.c
+index 4a012db8..3f65df05 100644
+--- a/mono/metadata/boehm-gc.c
++++ b/mono/metadata/boehm-gc.c
+@@ -1175,7 +1175,7 @@ mono_gc_wbarrier_object_copy_internal (MonoObject* obj, MonoObject *src)
+ void
+ mono_gc_clear_domain (MonoDomain *domain)
+ {
+-	GC_call_with_alloc_lock (null_ephemerons_for_domain, domain);
++	GC_call_with_alloc_lock ((GC_fn_type)null_ephemerons_for_domain, domain);
+ }
+ 
+ void
+@@ -2202,7 +2202,7 @@ mono_push_ephemerons (struct GC_ms_entry* mark_stack_ptr, struct GC_ms_entry* ma
+ 				continue;
+ 
+ 			if (current_ephemeron->value) {
+-				mark_stack_ptr = GC_mark_and_push(current_ephemeron->value, mark_stack_ptr, mark_stack_limit, &current_ephemeron->value);
++				mark_stack_ptr = GC_mark_and_push(current_ephemeron->value, mark_stack_ptr, mark_stack_limit, (void **)&current_ephemeron->value);
+ 			}
+ 		}
+ 	}
+diff --git a/mono/metadata/etw-profiler.c b/mono/metadata/etw-profiler.c
+index 80d969ba..cde626dc 100644
+--- a/mono/metadata/etw-profiler.c
++++ b/mono/metadata/etw-profiler.c
+@@ -37,12 +37,23 @@
+ #include <string.h>
+ 
+ #define WIN32_LEAN_AND_MEAN
+-#include "Evntcons.h"
++#include <evntcons.h>
+ #include "evntprov.h"
+ #include "evntrace.h"
+ #include "cguid.h"
+ #include "windows.h"
+ 
++/* The message-compiler output and this file define their helpers as plain `__inline`: C99 inline definitions
++ * emit no symbol under clang/gcc (MSVC treats them as static), so make every such helper static, before the
++ * first declaration. */
++#define ETW_INLINE static __inline
++#undef DECLSPEC_NOINLINE
++#define DECLSPEC_NOINLINE static __attribute__ ((noinline))
++
++/* Calls the external-only API from inside the runtime; MSVC has no deprecation attribute for that, clang and gcc
++ * do, and mono-publib.h arms it after its own include, so the suppression must follow the includes. */
++#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
++
+ DECLSPEC_NOINLINE __inline VOID __stdcall Private_EventControlCallback (_In_ LPCGUID SourceId, _In_ ULONG ControlCode, _In_ UCHAR Level, _In_ ULONGLONG MatchAnyKeyword, _In_ ULONGLONG MatchAllKeyword, _In_opt_ PEVENT_FILTER_DESCRIPTOR FilterData, _Inout_opt_ PVOID CallbackContext);
+ #define MCGEN_PRIVATE_ENABLE_CALLBACK_V2 Private_EventControlCallback
+ #include "CLR-ETW-Generated.h"
+diff --git a/mono/metadata/oop.c b/mono/metadata/oop.c
+index 92036b11..b4650e24 100644
+--- a/mono/metadata/oop.c
++++ b/mono/metadata/oop.c
+@@ -36,7 +36,7 @@
+ #include <mono/metadata/coree.h>
+ 
+ 
+-#ifdef _WIN64
++#if defined(_WIN64) && !defined(__arm64ec__) /* the x64 dynamic function tables; the ARM64 port keeps its own */
+ #include <mono/mini/mini.h>
+ extern GList* g_dynamic_function_table_begin;
+ extern SRWLOCK g_dynamic_function_table_lock;
+@@ -154,7 +154,7 @@ mono_unity_oop_shutdown(void)
+     memset(&g_oop, 0, sizeof(g_oop));
+ }
+ 
+-#ifdef _WIN64
++#if defined(_WIN64) && !defined(__arm64ec__) /* the x64 dynamic function tables; the ARM64 port keeps its own */
+ gboolean TryAcquireSpinWait(PSRWLOCK lock, unsigned int spinWait)
+ {
+     do
+@@ -170,7 +170,7 @@ gboolean TryAcquireSpinWait(PSRWLOCK lock, unsigned int spinWait)
+ MONO_API GList*
+ mono_unity_lock_dynamic_function_access_tables64(unsigned int spinWait) 
+ {
+-#ifdef _WIN64
++#if defined(_WIN64) && !defined(__arm64ec__) /* the x64 dynamic function tables; the ARM64 port keeps its own */
+     if (spinWait >= 0x7fffffff) {
+         AcquireSRWLockExclusive(&g_dynamic_function_table_lock);
+     }
+@@ -186,7 +186,7 @@ mono_unity_lock_dynamic_function_access_tables64(unsigned int spinWait)
+ MONO_API void
+ mono_unity_unlock_dynamic_function_access_tables64(void) 
+ {
+-#ifdef _WIN64
++#if defined(_WIN64) && !defined(__arm64ec__) /* the x64 dynamic function tables; the ARM64 port keeps its own */
+     ReleaseSRWLockExclusive(&g_dynamic_function_table_lock);
+ #else
+     return;
+@@ -197,7 +197,7 @@ MONO_API GList*
+ mono_unity_oop_iterate_dynamic_function_access_tables64(
+     GList* current) 
+ {
+-#ifdef _WIN64
++#if defined(_WIN64) && !defined(__arm64ec__) /* the x64 dynamic function tables; the ARM64 port keeps its own */
+     if (current != NULL)
+         return read_glist_next(current);
+     else
+@@ -215,7 +215,7 @@ mono_unity_oop_get_dynamic_function_access_table64(
+     void** functionTable,
+     gsize* functionTableSize)
+ {
+-#ifdef _WIN64
++#if defined(_WIN64) && !defined(__arm64ec__) /* the x64 dynamic function tables; the ARM64 port keeps its own */
+     if (!tableEntry || !moduleStart || !moduleEnd || !functionTable || !functionTableSize)
+         return FALSE;
+ 
+diff --git a/mono/mini/mixed_callstack_plugin.c b/mono/mini/mixed_callstack_plugin.c
+index 67f10f86..43c38da7 100644
+--- a/mono/mini/mixed_callstack_plugin.c
++++ b/mono/mini/mixed_callstack_plugin.c
+@@ -13,7 +13,7 @@ static gboolean legacyMode;
+ #define mixed_callstack_plugin_lock() mono_os_mutex_lock (&mutex)
+ #define mixed_callstack_plugin_unlock() mono_os_mutex_unlock (&mutex)
+ 
+-static void mixed_callstack_plugin_on_domain_unload_end (MonoProfiler *prof, MonoDomain *domain);
++void mixed_callstack_plugin_on_domain_unload_end (MonoProfiler *prof, MonoDomain *domain);
+ 
+ typedef struct {
+ 	HANDLE fileHandle;
+diff --git a/mono/utils/mono-log-common.c b/mono/utils/mono-log-common.c
+index 155e832d..f0140033 100644
+--- a/mono/utils/mono-log-common.c
++++ b/mono/utils/mono-log-common.c
+@@ -25,7 +25,7 @@
+ #include <sys/time.h>
+ #else
+ #include <process.h>
+-#include <Windows.h>
++#include <windows.h>
+ #endif
+ #include "mono-logger-internals.h"
+ #include "mono-proclib.h"

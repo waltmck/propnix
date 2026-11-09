@@ -1,0 +1,44 @@
+Subject: [PATCH] arm64: Call __chkstk for large allocations on Windows.
+
+wine-mono's mono fork, merge request !237 (Esme Povirk, merged 2026-06-30):
+https://gitlab.winehq.org/mono/mono/-/merge_requests/237
+
+Applied verbatim. Unity's 2022.3 branch has no Windows-ARM64 port of its own; wine-mono's arm64 Windows
+port (merge requests 176, 195, 215, 218, 229, 236 and 237, in that order) is the base the ARM64EC layer
+(0009) builds on.
+
+diff --git a/mono/mini/mini-arm64.c b/mono/mini/mini-arm64.c
+index a5bc75fdcc568d4ccfe8d0e866cf8d91392f485d..dc809bc433335f104aeb235a68341c3d531ed58a 100644
+--- a/mono/mini/mini-arm64.c
++++ b/mono/mini/mini-arm64.c
+@@ -4993,6 +4993,30 @@ mono_arch_emit_prolog (MonoCompile *cfg)
+ 	if (arm_is_ldpx_imm (-cfg->stack_offset)) {
+ 		arm_stpx_pre (code, ARMREG_FP, ARMREG_LR, ARMREG_SP, -cfg->stack_offset);
+ 		mono_emit_unwind_op_def_cfa_offset (cfg, code, cfa_offset);
++#ifdef TARGET_WIN32
++	} else if (cfg->stack_offset > 0x1000) {
++		static void *pChkstk;
++		const int prealloc = 0x40;
++
++		if (!pChkstk) {
++			HMODULE hntdll = GetModuleHandleW (L"ntdll");
++			pChkstk = GetProcAddress (hntdll, "__chkstk");
++		}
++
++		arm_stpx_pre (code, ARMREG_FP, ARMREG_LR, ARMREG_SP, -prealloc);
++		mono_emit_unwind_op_def_cfa_offset (cfg, code, prealloc);
++		mono_emit_unwind_op_offset (cfg, code, ARMREG_FP, (- prealloc) + 0);
++		mono_emit_unwind_op_offset (cfg, code, ARMREG_LR, (- prealloc) + 8);
++
++		code = emit_imm (code, ARMREG_R15, (cfg->stack_offset - prealloc) / 16);
++		code = emit_imm64 (code, ARMREG_IP0, (guint64)pChkstk);
++		code = emit_blrx (code, ARMREG_IP0);
++		arm_ldpx (code, ARMREG_FP, ARMREG_LR, ARMREG_SP, 0);
++
++		code = emit_subx_sp_imm (code, cfg->stack_offset - prealloc);
++		mono_emit_unwind_op_def_cfa_offset (cfg, code, cfa_offset);
++		arm_stpx (code, ARMREG_FP, ARMREG_LR, ARMREG_SP, 0);
++#endif
+ 	} else {
+ 		/* sp -= cfg->stack_offset */
+ 		/* This clobbers ip0/ip1 */

@@ -54,6 +54,11 @@ mkApp {
 
   exe = "REPO.exe";
 
+  # Unity 2022.3 (the player's version string, above), Mono scripting backend: on aarch64 the stream's
+  # ARM64EC Mono runtime (emulators/unity-mono) replaces the shipped x64 one in the game dir, so the
+  # game's C# is JIT-compiled to native ARM64 rather than emulated (lib/modules/unity-mono.nix).
+  unity.mono.stream = "2022.3";
+
   # Full-colour icon from REPO.exe's own PE resources — VERIFIED extractable: `wrestool -l` lists a
   # group-icon with 256/192/128/96/64/48/32/24/16 px members at 32-bit depth, so the hicolor theme gets
   # every size and the splash gets a true 256px source. This is the default; stated because it is a fact

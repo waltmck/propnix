@@ -1,0 +1,21 @@
+Subject: [PATCH] arm64: Set link register when forcing a call through a signal handler.
+
+wine-mono's mono fork, merge request !218 (Esme Povirk, merged 2026-06-01):
+https://gitlab.winehq.org/mono/mono/-/merge_requests/218
+
+Applied verbatim. Unity's 2022.3 branch has no Windows-ARM64 port of its own; wine-mono's arm64 Windows
+port (merge requests 176, 195, 215, 218, 229, 236 and 237, in that order) is the base the ARM64EC layer
+(0009) builds on.
+
+diff --git a/mono/mini/exceptions-arm64.c b/mono/mini/exceptions-arm64.c
+index 68db1b0c5ea7d92a96b27aff60bf02ab019ab16a..ac70d7e8ce18a5390ba5c8a064661ef1c21c0bdb 100644
+--- a/mono/mini/exceptions-arm64.c
++++ b/mono/mini/exceptions-arm64.c
+@@ -795,6 +795,7 @@ mono_arch_setup_async_callback (MonoContext *ctx, void (*async_cb)(void *fun), g
+ void
+ mono_arch_setup_resume_sighandler_ctx (MonoContext *ctx, gpointer func)
+ {
++	ctx->regs [ARMREG_LR] = (host_mgreg_t)(MONO_CONTEXT_GET_IP (ctx));
+ 	MONO_CONTEXT_SET_IP (ctx,func);
+ }
+ 

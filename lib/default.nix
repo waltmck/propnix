@@ -94,6 +94,11 @@ pkgs.lib.makeScope pkgs.newScope (
       llvmMingw = if isAarch64 then llvmMingw else null; # aarch64: the x64 runtime slot gets an ARM64EC build
     };
     prefixLower = callPackage ../emulators/wine-prefix-lower.nix { }; # RO system tree; FEX DLLs only on aarch64 (fexdlls ? null); CLR from wineMono
+    # Unity's Mono runtime (`mono-2.0-bdwgc.dll`) as ARM64EC PEs, one per Unity stream, for Windows Unity
+    # titles under wine+FEX: a game declares its stream (`unity.mono.stream`, lib/modules/unity-mono.nix)
+    # and the stream's build is unioned over the payload. aarch64 only; null on x86_64, where the shipped
+    # x64 runtime runs natively.
+    unityMono = if isAarch64 then callPackage ../emulators/unity-mono { inherit llvmMingw; } else null;
     dxvk =
       if isAarch64 then
         callPackage ../emulators/dxvk-arm64ec.nix { } # native ARM64EC PE
@@ -200,6 +205,9 @@ pkgs.lib.makeScope pkgs.newScope (
     # owner's already-decrypted DLC is owned: the payload-ABI gbe_fork shim (a COPY, so its
     # beside-the-library settings probe resolves here) + the generated settings tree it reads.
     mkSteamOfflineEntitlement = callPackage ./builders/steam-offline-entitlement.nix { };
+    # The game-dir tree carrying a stream's ARM64EC Unity runtime over the payload (unityMono above),
+    # checked against the payload's own player at build time; lib/modules/unity-mono.nix's output.
+    mkUnityMonoTree = callPackage ./builders/unity-mono-tree.nix { };
     # The baked GL/Vulkan fallback stack (mesa + discovery paths) both backends hand the launcher; takes
     # the app's `mesa` knob (null → nixpkgs mesa as a fallback; a derivation → forced). See its header.
     mkFallbackGl = callPackage ./builders/gl-fallback.nix { };

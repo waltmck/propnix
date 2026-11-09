@@ -22,6 +22,7 @@
   backends,
   mkSteamOfflineEntitlement,
   gbeFork,
+  mkUnityMonoTree,
   propnixConfig, # the validated instantiation config (lib/default.nix): { preferredFetchers = [ … ]; }
 }:
 spec:
@@ -47,12 +48,23 @@ let
       ;
   };
 
+  # The `unity.mono.*` namespace: a declared Unity stream puts emulators/unity-mono's ARM64EC runtime over
+  # the payload on aarch64 wine hosts (modules/unity-mono.nix).
+  unityMono = import ./modules/unity-mono.nix {
+    inherit
+      lib
+      stdenv
+      mkUnityMonoTree
+      ;
+  };
+
   eval =
     applied:
     lib.evalModules {
       modules = [
         appOptions
         steamEmu
+        unityMono
       ]
       ++ lib.concatMap (b: b.modules) (lib.attrValues backends)
       ++ [ spec ]

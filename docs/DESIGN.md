@@ -113,6 +113,7 @@ propnix/
 │   ├── galaxy-stub/               # graceful no-op GOG Galaxy SDK DLLs (bound over bundled copies)
 │   ├── gbe-fork/                  # offline Steam-entitlement shim, one build per ABI (modules/steam-emu.nix)
 │   ├── wine-mono/                 # the .NET CLR every MANAGED title needs, pinned to wine's own version; on aarch64 its runtime is an ARM64EC build (JIT emits native ARM64; patches/0002)
+│   ├── unity-mono/                # Unity's Mono runtime (mono-2.0-bdwgc.dll) as ARM64EC PEs, one per Unity stream (2022.3, 6000.0); a game declares `unity.mono.stream` (modules/unity-mono.nix)
 │   ├── llvm-mingw/  wine-prefix-lower.nix
 ├── pkgs/
 │   ├── propnix-launcher/          # Rust — PREFIX + THIN modes; links propnix-mount/-prefetch as crates;

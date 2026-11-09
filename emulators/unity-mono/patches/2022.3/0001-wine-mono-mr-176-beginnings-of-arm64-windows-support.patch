@@ -1,0 +1,485 @@
+Subject: [PATCH] Beginnings of ARM64 Windows support.
+
+wine-mono's mono fork, merge request !176 (Esme Povirk, merged 2026-01-13):
+https://gitlab.winehq.org/mono/mono/-/merge_requests/176
+
+Applied verbatim. Unity's 2022.3 branch has no Windows-ARM64 port of its own; wine-mono's arm64 Windows
+port (merge requests 176, 195, 215, 218, 229, 236 and 237, in that order) is the base the ARM64EC layer
+(0009) builds on.
+
+diff --git a/configure.ac b/configure.ac
+index 8bb79bd0415d12cbc82453e92dd626b0fabb5586..76165761e33f1212ec914d906b087ff497d91919 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -4511,6 +4511,19 @@ case "$host" in
+ 			AC_MSG_ERROR([The required utility 'ar' is not found in your PATH. Usually it can be found in /usr/ccs/bin.])
+ 		fi
+ 		;;
++	armv7-*mingw*)
++		TARGET=ARM;
++		arch_target=arm;
++		ACCESS_UNALIGNED="no"
++		BTLS_SUPPORTED=no
++		BTLS_PLATFORM=arm
++		;;
++	aarch64-*mingw*)
++		TARGET=ARM64;
++		arch_target=arm64;
++		BTLS_SUPPORTED=no
++		BTLS_PLATFORM=aarch64
++		;;
+ 	*-mingw*|*-*-cygwin*)
+ 		# When this is enabled, it leads to very strange crashes at runtime (gcc-3.4.4)
+ 		have_visibility_hidden=no
+@@ -5151,6 +5164,9 @@ AC_SUBST(libsuffix)
+ GNUC_PRETTY=
+ GNUC_UNUSED=
+ BREAKPOINT="G_STMT_START { raise (SIGTRAP); } G_STMT_END"
++if test x$target_win32 = xyes; then
++   BREAKPOINT="G_STMT_START { DebugBreak(); } G_STMT_END"
++fi
+ if test x$GCC = xyes; then
+    GNUC_UNUSED='__attribute__((__unused__))'
+    GNUC_NORETURN='__attribute__((__noreturn__))'
+diff --git a/mono/metadata/coree.c b/mono/metadata/coree.c
+index c1a662be0bf2fb7c38335b3d5b1a5bfe859d7d9d..c5a48884e9a734893d102ae3f7820ab4bc578915 100644
+--- a/mono/metadata/coree.c
++++ b/mono/metadata/coree.c
+@@ -68,7 +68,7 @@ mono_get_module_file_name (HMODULE module_handle)
+ HMODULE coree_module_handle = NULL;
+ static gboolean init_from_coree = FALSE;
+ 
+-#if HAVE_API_SUPPORT_WIN32_COREE
++#if defined(HAVE_API_SUPPORT_WIN32_COREE) && (!defined(_WIN64) || defined(_M_IA64) || defined(_M_AMD64))
+ #include <shellapi.h>
+ 
+ /* Entry point called by LdrLoadDll of ntdll.dll after _CorValidateImage. */
+diff --git a/mono/mini/exceptions-arm64.c b/mono/mini/exceptions-arm64.c
+index 0e786809d0d33623791337df3d28f4ac264d81cc..5944aaf3e2f4effe825fa523e0da64a1d41fb34f 100644
+--- a/mono/mini/exceptions-arm64.c
++++ b/mono/mini/exceptions-arm64.c
+@@ -20,8 +20,196 @@
+ 
+ #include <mono/arch/arm64/arm64-codegen.h>
+ #include <mono/metadata/abi-details.h>
++#include <mono/utils/mono-state.h>
+ #include "mono/utils/mono-tls-inline.h"
+ 
++#ifdef TARGET_WIN32
++static void (*restore_stack) (void);
++static MonoW32ExceptionHandler fpe_handler;
++static MonoW32ExceptionHandler ill_handler;
++static MonoW32ExceptionHandler segv_handler;
++
++LPTOP_LEVEL_EXCEPTION_FILTER mono_old_win_toplevel_exception_filter;
++void *mono_win_vectored_exception_handle;
++
++#define W32_SEH_HANDLE_EX(_ex) \
++	if (_ex##_handler) _ex##_handler(er->ExceptionCode, &info, ctx)
++
++static LONG CALLBACK seh_unhandled_exception_filter(EXCEPTION_POINTERS* ep)
++{
++#ifndef MONO_CROSS_COMPILE
++	if (mono_old_win_toplevel_exception_filter) {
++		return (*mono_old_win_toplevel_exception_filter)(ep);
++	}
++#endif
++
++	if (mono_dump_start ())
++		mono_handle_native_crash (mono_get_signame (SIGSEGV), NULL, NULL);
++
++	return EXCEPTION_CONTINUE_SEARCH;
++}
++
++#if 0 //HAVE_API_SUPPORT_WIN32_RESET_STKOFLW TODO
++static gpointer
++get_win32_restore_stack (void)
++{
++	static guint8 *start = NULL;
++	guint8 *code;
++
++	if (start)
++		return start;
++
++	const int size = 128;
++
++	/* restore_stack (void) */
++	start = code = mono_global_codeman_reserve (size);
++
++	amd64_push_reg (code, AMD64_RBP);
++	amd64_mov_reg_reg (code, AMD64_RBP, AMD64_RSP, 8);
++
++	/* push 32 bytes of stack space for Win64 calling convention */
++	amd64_alu_reg_imm (code, X86_SUB, AMD64_RSP, 32);
++
++	/* restore guard page */
++	amd64_mov_reg_imm (code, AMD64_R11, _resetstkoflw);
++	amd64_call_reg (code, AMD64_R11);
++
++	/* get jit_tls with context to restore */
++	amd64_mov_reg_imm (code, AMD64_R11, mono_tls_get_jit_tls_extern);
++	amd64_call_reg (code, AMD64_R11);
++
++	/* move jit_tls from return reg to arg reg */
++	amd64_mov_reg_reg (code, AMD64_ARG_REG1, AMD64_RAX, 8);
++
++	/* retrieve pointer to saved context */
++	amd64_alu_reg_imm (code, X86_ADD, AMD64_ARG_REG1, MONO_STRUCT_OFFSET (MonoJitTlsData, stack_restore_ctx));
++
++	/* this call does not return */
++	amd64_mov_reg_imm (code, AMD64_R11, mono_restore_context);
++	amd64_call_reg (code, AMD64_R11);
++
++	g_assertf ((code - start) <= size, "%d %d", (int)(code - start), size);
++
++	mono_arch_flush_icache (start, code - start);
++	MONO_PROFILER_RAISE (jit_code_buffer, (start, code - start, MONO_PROFILER_CODE_BUFFER_EXCEPTION_HANDLING, NULL));
++
++	return start;
++}
++#else
++static gpointer
++get_win32_restore_stack (void)
++{
++	// _resetstkoflw unsupported on none desktop Windows platforms.
++	return NULL;
++}
++#endif /* HAVE_API_SUPPORT_WIN32_RESET_STKOFLW */
++
++/*
++ * Unhandled Exception Filter
++ * Top-level per-process exception handler.
++ */
++static LONG CALLBACK seh_vectored_exception_handler(EXCEPTION_POINTERS* ep)
++{
++	EXCEPTION_RECORD* er;
++	CONTEXT* ctx;
++	LONG res;
++	MonoJitTlsData *jit_tls = mono_tls_get_jit_tls ();
++	MonoDomain* domain = mono_domain_get ();
++	MonoWindowsSigHandlerInfo info = { TRUE, ep };
++
++	/* If the thread is not managed by the runtime return early */
++	if (!jit_tls)
++		return EXCEPTION_CONTINUE_SEARCH;
++
++	res = EXCEPTION_CONTINUE_EXECUTION;
++
++	er = ep->ExceptionRecord;
++	ctx = ep->ContextRecord;
++
++	switch (er->ExceptionCode) {
++	case EXCEPTION_STACK_OVERFLOW:
++		if (!mono_aot_only && restore_stack) {
++			if (mono_arch_handle_exception (ctx, domain->stack_overflow_ex)) {
++				/* need to restore stack protection once stack is unwound
++				 * restore_stack will restore stack protection and then
++				 * resume control to the saved stack_restore_ctx */
++				mono_sigctx_to_monoctx (ctx, &jit_tls->stack_restore_ctx);
++				ctx->Pc = (guint64)restore_stack;
++			}
++		} else {
++			info.handled = FALSE;
++		}
++		break;
++	case EXCEPTION_ACCESS_VIOLATION:
++		W32_SEH_HANDLE_EX(segv);
++		break;
++	case EXCEPTION_ILLEGAL_INSTRUCTION:
++		W32_SEH_HANDLE_EX(ill);
++		break;
++	case EXCEPTION_INT_DIVIDE_BY_ZERO:
++	case EXCEPTION_INT_OVERFLOW:
++	case EXCEPTION_FLT_DIVIDE_BY_ZERO:
++	case EXCEPTION_FLT_OVERFLOW:
++	case EXCEPTION_FLT_UNDERFLOW:
++	case EXCEPTION_FLT_INEXACT_RESULT:
++		W32_SEH_HANDLE_EX(fpe);
++		break;
++	default:
++		info.handled = FALSE;
++		break;
++	}
++
++	if (!info.handled) {
++		/* Don't copy context back if we chained exception
++		* as the handler may have modfied the EXCEPTION_POINTERS
++		* directly. We don't pass sigcontext to chained handlers.
++		* Return continue search so the UnhandledExceptionFilter
++		* can correctly chain the exception.
++		*/
++		res = EXCEPTION_CONTINUE_SEARCH;
++	}
++
++	return res;
++}
++
++void win32_seh_init()
++{
++	if (!mono_aot_only)
++		restore_stack = (void (*) (void))get_win32_restore_stack ();
++
++	mono_old_win_toplevel_exception_filter = SetUnhandledExceptionFilter(seh_unhandled_exception_filter);
++	mono_win_vectored_exception_handle = AddVectoredExceptionHandler (1, seh_vectored_exception_handler);
++}
++
++void win32_seh_cleanup()
++{
++	guint32 ret = 0;
++
++	if (mono_old_win_toplevel_exception_filter) SetUnhandledExceptionFilter(mono_old_win_toplevel_exception_filter);
++
++	ret = RemoveVectoredExceptionHandler (mono_win_vectored_exception_handle);
++	g_assert (ret);
++}
++
++void win32_seh_set_handler(int type, MonoW32ExceptionHandler handler)
++{
++	switch (type) {
++	case SIGFPE:
++		fpe_handler = handler;
++		break;
++	case SIGILL:
++		ill_handler = handler;
++		break;
++	case SIGSEGV:
++		segv_handler = handler;
++		break;
++	default:
++		break;
++	}
++}
++
++#endif /* TARGET_WIN32 */
++
+ #ifndef DISABLE_JIT
+ 
+ gpointer
+@@ -535,6 +723,7 @@ mono_arch_handle_exception (void *ctx, gpointer obj)
+ #if defined(MONO_CROSS_COMPILE)
+ 	g_assert_not_reached ();
+ #else
++	MonoContext mctx;
+ 	MonoJitTlsData *jit_tls;
+ 	void *sigctx = ctx;
+ 
+@@ -545,13 +734,18 @@ mono_arch_handle_exception (void *ctx, gpointer obj)
+ 
+ 	/* Pass the ctx parameter in TLS */
+ 	mono_sigctx_to_monoctx (sigctx, &jit_tls->ex_ctx);
++
+ 	/* The others in registers */
+-	UCONTEXT_REG_R0 (sigctx) = (gsize)obj;
++	mctx = jit_tls->ex_ctx;
++	mctx.regs [0] = (host_mgreg_t) obj;
+ 
+ 	gpointer addr = (gpointer)handle_signal_exception;
+-	UCONTEXT_REG_SET_PC (sigctx, addr);
+-	host_mgreg_t sp = UCONTEXT_REG_SP (sigctx) - MONO_ARCH_REDZONE_SIZE;
+-	UCONTEXT_REG_SET_SP (sigctx, sp);
++	mctx.pc = (host_mgreg_t) addr;
++
++	host_mgreg_t sp = mctx.regs [ARMREG_SP] - MONO_ARCH_REDZONE_SIZE;
++	mctx.regs [ARMREG_SP] = sp;
++
++	mono_monoctx_to_sigctx (&mctx, sigctx);
+ #endif
+ 
+ 	return TRUE;
+@@ -563,6 +757,8 @@ mono_arch_ip_from_context (void *sigctx)
+ #ifdef MONO_CROSS_COMPILE
+ 	g_assert_not_reached ();
+ 	return NULL;
++#elif defined(HOST_WIN32)
++	return (gpointer)((CONTEXT*)sigctx)->Pc;
+ #else
+ 	return (gpointer)UCONTEXT_REG_PC (sigctx);
+ #endif
+diff --git a/mono/mini/mini-arm.h b/mono/mini/mini-arm.h
+index ea81bc996327b621626a16b42c0942a86bf04599..c33c49212c3df7fe5b5fcdd1054e9d5211d74900 100644
+--- a/mono/mini/mini-arm.h
++++ b/mono/mini/mini-arm.h
+@@ -330,6 +330,10 @@ typedef struct MonoCompileArch {
+ #undef MONO_ARCH_USE_SIGACTION
+ #endif
+ 
++#if defined(HOST_WIN32)
++#undef MONO_ARCH_USE_SIGACTION
++#endif
++
+ #define MONO_ARCH_NEED_DIV_CHECK 1
+ 
+ #define MONO_ARCH_HAVE_GENERALIZED_IMT_TRAMPOLINE 1
+diff --git a/mono/mini/mini-arm64.c b/mono/mini/mini-arm64.c
+index aba6ca3a41eea3851f6cf771756d9c1550610707..b4c6dea8e53413629bbdde69e11cdd7dce43d4d1 100644
+--- a/mono/mini/mini-arm64.c
++++ b/mono/mini/mini-arm64.c
+@@ -2032,6 +2032,8 @@ mono_arch_flush_icache (guint8 *code, gint size)
+ #ifndef MONO_CROSS_COMPILE
+ #if __APPLE__
+ 	sys_icache_invalidate (code, size);
++#elif defined(TARGET_WIN32)
++	__clear_cache (code, code + size);	
+ #else
+ 	/* Don't rely on GCC's __clear_cache implementation, as it caches
+ 	 * icache/dcache cache line sizes, that can vary between cores on
+diff --git a/mono/mini/mini-arm64.h b/mono/mini/mini-arm64.h
+index 69a67986337260628cc99a638d1f4355c65ad44c..537e0c74e3ed07ffd525fdce08db2aefe6c400fa 100644
+--- a/mono/mini/mini-arm64.h
++++ b/mono/mini/mini-arm64.h
+@@ -15,6 +15,72 @@
+ #include <mono/arch/arm64/arm64-codegen.h>
+ #include <mono/mini/mini-arm64-gsharedvt.h>
+ 
++#ifdef HOST_WIN32
++#include <windows.h>
++#include <signal.h>
++
++typedef void MONO_SIG_HANDLER_SIGNATURE ((*MonoW32ExceptionHandler));
++void win32_seh_init(void);
++void win32_seh_cleanup(void);
++void win32_seh_set_handler(int type, MonoW32ExceptionHandler handler);
++
++#ifndef SIGFPE
++#define SIGFPE 4
++#endif
++
++#ifndef SIGILL
++#define SIGILL 8
++#endif
++
++#ifndef	SIGSEGV
++#define	SIGSEGV 11
++#endif
++
++LONG CALLBACK seh_handler(EXCEPTION_POINTERS* ep);
++
++typedef struct {
++	SRWLOCK lock;
++	PVOID handle;
++	gsize begin_range;
++	gsize end_range;
++	PRUNTIME_FUNCTION rt_funcs;
++	DWORD rt_funcs_current_count;
++	DWORD rt_funcs_max_count;
++} DynamicFunctionTableEntry;
++
++#define MONO_UNWIND_INFO_RT_FUNC_SIZE 128
++
++typedef BOOLEAN (WINAPI* RtlInstallFunctionTableCallbackPtr)(
++	DWORD64 TableIdentifier,
++	DWORD64 BaseAddress,
++	DWORD Length,
++	PGET_RUNTIME_FUNCTION_CALLBACK Callback,
++	PVOID Context,
++	PCWSTR OutOfProcessCallbackDll);
++
++typedef BOOLEAN (WINAPI* RtlDeleteFunctionTablePtr)(
++	PRUNTIME_FUNCTION FunctionTable);
++
++// On Win8/Win2012Server and later we can use dynamic growable function tables
++// instead of RtlInstallFunctionTableCallback. This gives us the benefit to
++// include all needed unwind upon registration.
++typedef DWORD (NTAPI* RtlAddGrowableFunctionTablePtr)(
++    PVOID * DynamicTable,
++    PRUNTIME_FUNCTION FunctionTable,
++    DWORD EntryCount,
++    DWORD MaximumEntryCount,
++    ULONG_PTR RangeBase,
++    ULONG_PTR RangeEnd);
++
++typedef VOID (NTAPI* RtlGrowFunctionTablePtr)(
++    PVOID DynamicTable,
++    DWORD NewEntryCount);
++
++typedef VOID (NTAPI* RtlDeleteGrowableFunctionTablePtr)(
++    PVOID DynamicTable);
++
++#endif /* HOST_WIN32 */
++
+ #define MONO_ARCH_CPU_SPEC mono_arm64_cpu_desc
+ 
+ #define MONO_MAX_IREGS 32
+@@ -145,6 +211,9 @@ typedef struct {
+ #define MONO_ARCH_VTABLE_REG ARMREG_R0
+ #define MONO_ARCH_HAVE_GENERALIZED_IMT_TRAMPOLINE 1
+ #define MONO_ARCH_USE_SIGACTION 1
++#if defined(HOST_WIN32)
++#undef MONO_ARCH_USE_SIGACTION
++#endif
+ #ifdef HOST_TVOS
+ #define MONO_ARCH_HAS_NO_PROPER_MONOCTX 1
+ #endif
+diff --git a/mono/mini/mini-windows.c b/mono/mini/mini-windows.c
+index a250c9615760480a152793e03308c5e2cda3a16c..d8a1564d3558feeb20f31c50f4f401e9c6426a86 100644
+--- a/mono/mini/mini-windows.c
++++ b/mono/mini/mini-windows.c
+@@ -300,7 +300,9 @@ thread_timer_expired (HANDLE thread)
+ 	if (GetThreadContext (thread, &context)) {
+ 		guchar *ip;
+ 
+-#ifdef _WIN64
++#ifdef _M_ARM64
++		ip = (guchar *) context.Pc;
++#elif defined(_WIN64)
+ 		ip = (guchar *) context.Rip;
+ #else
+ 		ip = (guchar *) context.Eip;
+diff --git a/mono/utils/mono-context.c b/mono/utils/mono-context.c
+index 90dd9279f2625f23d73737438971c32f4170d464..47b2deadcd4b9987edcc224f0fd28857e46984c6 100644
+--- a/mono/utils/mono-context.c
++++ b/mono/utils/mono-context.c
+@@ -517,11 +517,21 @@ mono_monoctx_to_sigctx (MonoContext *mctx, void *ctx)
+ #include <mono/utils/mono-context.h>
+ #include <mono/utils/ftnptr.h>
+ 
++#ifdef HOST_WIN32
++#include <windows.h>
++#endif
++
+ void
+ mono_sigctx_to_monoctx (void *sigctx, MonoContext *mctx)
+ {
+ #ifdef MONO_CROSS_COMPILE
+ 	g_assert_not_reached ();
++#elif defined(HOST_WIN32)
++	CONTEXT *context = (CONTEXT*)sigctx;
++
++	memcpy (&mctx->regs, &context->X, sizeof (DWORD64) * 31);
++	mctx->pc = context->Pc;
++	mctx->regs [ARMREG_SP] = context->Sp;
+ #else
+ 	memcpy (mctx->regs, UCONTEXT_GREGS (sigctx), sizeof (host_mgreg_t) * 31);
+ 	mctx->pc = UCONTEXT_REG_PC (sigctx);
+@@ -554,6 +564,12 @@ mono_monoctx_to_sigctx (MonoContext *mctx, void *sigctx)
+ 	memcpy (UCONTEXT_GREGS (sigctx), mctx->regs, sizeof (host_mgreg_t) * 31);
+ 	UCONTEXT_REG_SET_PC (sigctx, (gpointer)mctx->pc);
+ 	UCONTEXT_REG_SET_SP (sigctx, mctx->regs [ARMREG_SP]);
++#elif defined(HOST_WIN32)
++	CONTEXT *context = (CONTEXT*)sigctx;
++
++	memcpy (&context->X, &mctx->regs, sizeof (DWORD64) * 31);
++	context->Pc = mctx->pc;
++	context->Sp = mctx->regs [ARMREG_SP];
+ #else
+ 	memcpy (UCONTEXT_GREGS (sigctx), mctx->regs, sizeof (host_mgreg_t) * 31);
+ 	UCONTEXT_REG_SET_PC (sigctx, mctx->pc);
+diff --git a/mono/utils/valgrind.h b/mono/utils/valgrind.h
+index 1b13c213c5b6bc811712792c226dbe3db2db8bd0..e5c3e246dc3ab9da3ee88eda8754b365356262ca 100644
+--- a/mono/utils/valgrind.h
++++ b/mono/utils/valgrind.h
+@@ -128,12 +128,9 @@
+ #  define PLAT_x86_darwin 1
+ #elif defined(__APPLE__) && defined(__x86_64__)
+ #  define PLAT_amd64_darwin 1
+-#elif (defined(__MINGW32__) && !defined(__MINGW64__)) \
+-      || defined(__CYGWIN32__) \
+-      || (defined(_WIN32) && defined(_M_IX86))
++#elif defined(_WIN32) && defined(__i386__)
+ #  define PLAT_x86_win32 1
+-#elif defined(__MINGW64__) \
+-      || (defined(_WIN64) && defined(_M_X64))
++#elif defined(_WIN32) && defined(__x86_64__)
+ #  define PLAT_amd64_win64 1
+ #elif defined(__linux__) && defined(__i386__)
+ #  define PLAT_x86_linux 1

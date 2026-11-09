@@ -25,7 +25,10 @@ the emulator treats it as x64 bytes: allocate through NtAllocateVirtualMemoryEx 
 MEM_EXTENDED_PARAMETER_EC_CODE and never from an executable heap.
 
 mini-arm64.h: ARM64EC reserves x13, x14, x23, x24, x28 and v16-v31 for the emulator (absent from every
-captured CONTEXT, not preserved across x64 code); keep them out of the allocator, x27 is args_reg.
+captured CONTEXT, not preserved across x64 code); keep them out of the allocator, x27 is args_reg. The
+dynamic function tables are built from ARM64_RUNTIME_FUNCTION entries: the unwinder reads an EC
+process's growable tables as 8-byte ARM64 entries, and mingw's RUNTIME_FUNCTION for the arm64ec target
+is the 12-byte AMD64 layout.
 
 mini-arm64.c, mini.c, cpu-arm64.md: the EC boundary.
   * OUT: a p/invoke whose target is not EC code at JIT time loads x11 = target, x10 = an exit thunk for
@@ -43,8 +46,9 @@ mini-arm64.c, mini.c, cpu-arm64.md: the EC boundary.
     occupies s0 AND s1, so no register-to-register order is safe.
   * Thunks live in EC-marked code manager memory and are cached per shape.
 
-exceptions-arm64.c: UWOP_ALLOC_L for prologs allocating more than 512 KiB (a gap in the Windows-ARM64
-port, not EC-specific).
+exceptions-arm64.c: UWOP_ALLOC_L for prologs allocating more than 512 KiB (the 4-byte alloc_l unwind
+code; the same change as the mono fork's MR 236, which wine-mono 11.2.0 predates — drop this hunk on the
+next wine-mono bump).
 
 Not handled: varargs p/invoke signatures (a trap with a warning at thunk creation).
 
@@ -153,19 +157,29 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/exceptions-arm64.c mono/mono
  			}
  		} else {
  			info.handled = FALSE;
-@@ -765,6 +765,19 @@
+@@ -716,7 +716,7 @@
+ 				// Allocate new growable handle table for entry.
+ 				g_assert_checked (new_entry->handle == NULL);
+ 				DWORD result = RtlAddGrowableFunctionTable (&new_entry->handle,
+-									new_entry->rt_funcs, new_entry->rt_funcs_current_count,
++									(void *)new_entry->rt_funcs, new_entry->rt_funcs_current_count,
+ 									new_entry->rt_funcs_max_count, new_entry->begin_range, new_entry->end_range);
+ 				g_assert (!result);
+ 
+@@ -765,6 +765,20 @@
  	DEBUG_UWOP ("UNWIND OP: %x\n", op);
  }
  
 +/* alloc_l: 11100000'xxxxxxxx'xxxxxxxx'xxxxxxxx — allocate x*16 bytes, x < 2^24 (frames above 512 KiB) */
 +static void
-+push_unwind_op3 (PUNWIND_INFO unwindinfo, guint32 op)
++push_unwind_op4 (PUNWIND_INFO unwindinfo, guint32 op)
 +{
-+	unwindinfo->code_count+=3;
++	unwindinfo->code_count+=4;
 +	g_assert (unwindinfo->code_count <= MONO_MAX_UNWIND_CODES);
-+	unwindinfo->unwind_codes[MONO_MAX_UNWIND_CODES - unwindinfo->code_count] = op >> 16;
-+	unwindinfo->unwind_codes[MONO_MAX_UNWIND_CODES - unwindinfo->code_count + 1] = op >> 8;
-+	unwindinfo->unwind_codes[MONO_MAX_UNWIND_CODES - unwindinfo->code_count + 2] = op;
++	unwindinfo->unwind_codes[MONO_MAX_UNWIND_CODES - unwindinfo->code_count] = op >> 24;
++	unwindinfo->unwind_codes[MONO_MAX_UNWIND_CODES - unwindinfo->code_count + 1] = op >> 16;
++	unwindinfo->unwind_codes[MONO_MAX_UNWIND_CODES - unwindinfo->code_count + 2] = op >> 8;
++	unwindinfo->unwind_codes[MONO_MAX_UNWIND_CODES - unwindinfo->code_count + 3] = op;
 +	unwindinfo->xdata.CodeWords = (unwindinfo->code_count + 3) >> 2;
 +	DEBUG_UWOP ("UNWIND OP: %x\n", op);
 +}
@@ -173,19 +187,28 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/exceptions-arm64.c mono/mono
  static void
  initialize_unwind_info_internal_ex (GSList *unwind_ops, PUNWIND_INFO unwindinfo)
  {
-@@ -843,8 +856,10 @@
+@@ -843,8 +857,10 @@
  						push_unwind_op1 (unwindinfo, UWOP_ALLOC_S | (alloc_amount >> 4));
  					else if ((alloc_amount & 0xffff800f) == 0)
  						push_unwind_op2 (unwindinfo, UWOP_ALLOC_M | (alloc_amount >> 4));
 +					else if ((alloc_amount & 0xf000000f) == 0)
-+						push_unwind_op3 (unwindinfo, UWOP_ALLOC_L | (alloc_amount >> 4));
++						push_unwind_op4 (unwindinfo, UWOP_ALLOC_L | (alloc_amount >> 4));
  					else
 -						g_assert_not_reached (); // TODO: UWOP_ALLOC_L
 +						g_assert_not_reached ();
  					prev_when = unwind_op_data->when;
  					prev_cfa_ofs = unwind_op_data->val;
  					break;
-@@ -1453,7 +1468,7 @@
+@@ -1117,7 +1133,7 @@
+ 			g_free (found_entry->rt_funcs);
+ 			found_entry->rt_funcs = new_rt_funcs;
+ 			DWORD result = RtlAddGrowableFunctionTable (&found_entry->handle,
+-								found_entry->rt_funcs, found_entry->rt_funcs_current_count,
++								(void *)found_entry->rt_funcs, found_entry->rt_funcs_current_count,
+ 								found_entry->rt_funcs_max_count, found_entry->begin_range, found_entry->end_range);
+ 			g_assert (!result);
+ 		}
+@@ -1453,7 +1469,7 @@
  	g_assert_not_reached ();
  	return NULL;
  #elif defined(HOST_WIN32)
@@ -1047,15 +1070,29 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.c mono/mono/mini/
 diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.h mono/mono/mini/mini-arm64.h
 --- a/mono/mini/mini-arm64.h
 +++ b/mono/mini/mini-arm64.h
-@@ -45,6 +45,7 @@
+@@ -17,6 +17,13 @@
+ 
+ #ifdef HOST_WIN32
+ #include <windows.h>
++#ifdef __arm64ec__
++/* An EC process's dynamic function tables are read as ARM64 entries (8 bytes, UnwindData at +4) by the
++ * unwinder (wine: RtlLookupFunctionEntry for EC code); mingw's RUNTIME_FUNCTION for this target is the
++ * 12-byte AMD64 layout. Every table this runtime registers is therefore built from ARM64 entries. */
++#define RUNTIME_FUNCTION ARM64_RUNTIME_FUNCTION
++#define PRUNTIME_FUNCTION PARM64_RUNTIME_FUNCTION
++#endif
+ #include <signal.h>
+ 
+ typedef void MONO_SIG_HANDLER_SIGNATURE ((*MonoW32ExceptionHandler));
+@@ -45,6 +52,7 @@
  #define UWOP_SAVE_FPLR 0x40
  #define UWOP_SAVE_FPLR_X 0x80
  #define UWOP_ALLOC_M 0xc000
-+#define UWOP_ALLOC_L 0xe00000
++#define UWOP_ALLOC_L 0xe0000000
  #define UWOP_SAVE_REGP 0xc800
  #define UWOP_SAVE_REG 0xd000
  #define UWOP_SET_FP 0xe1
-@@ -104,6 +105,20 @@
+@@ -104,6 +112,20 @@
  #define MONO_ARCH_INIT_TOP_LMF_ENTRY(lmf)
  
  /* Parameters used by the register allocator */
@@ -1076,7 +1113,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.h mono/mono/mini/
  /* r0..r7, r9..r14 (r15 is the imt/rgctx reg) */
  #define MONO_ARCH_CALLEE_REGS 0xfeff
  /* r19..r28 */
-@@ -111,6 +126,8 @@
+@@ -111,6 +133,8 @@
  
  /* v16/v17 is reserved for a scratch reg */
  #define MONO_ARCH_CALLEE_FREGS 0xfffc00ff
@@ -1085,7 +1122,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.h mono/mono/mini/
  /* v8..v15 */
  #define MONO_ARCH_CALLEE_SAVED_FREGS 0xff00
  
-@@ -215,6 +232,10 @@
+@@ -215,6 +239,10 @@
  #define MONO_ARCH_HAVE_OP_TAILCALL_MEMBASE 1
  #define MONO_ARCH_HAVE_OP_TAILCALL_REG 1
  #define MONO_ARCH_RGCTX_REG ARMREG_R15

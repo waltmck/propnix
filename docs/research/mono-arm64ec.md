@@ -527,3 +527,21 @@ Verification on the title: the packaged game on the Nix-built patched DLL with
 `MONO_THREADS_SUSPEND=preemptive` loaded a world 5 times out of 5 (2026-11-08), against 2 freezes in 3
 loads on the unpatched DLL. The shipped policy is unchanged: cooperative suspend, which does not depend
 on this poll at all.
+
+### 2026-11-08 — dynamic function tables under ARM64EC must be ARM64 entries
+
+Found while porting to Unity 6, whose unwind code reads the packed bit-fields of the ARM64 entry and
+so did not compile with mingw's `RUNTIME_FUNCTION`: for the arm64ec target mingw's `RUNTIME_FUNCTION`
+is the 12-byte AMD64 layout (`UnwindData` at +8; `_Static_assert`-verified), while wine's unwinder
+reads an EC process's growable tables as 8-byte `ARM64_RUNTIME_FUNCTION` entries (`UnwindData` at +4):
+`RtlLookupFunctionEntry` in dlls/ntdll/unwind.c casts the result of `lookup_dynamic_function_table` to
+`ARM64_RUNTIME_FUNCTION *` for EC code. The mono fork's Windows-ARM64 port fills `RUNTIME_FUNCTION`
+entries by field name (`BeginAddress`, `UnwindData`), so under ARM64EC every table it registered with
+`RtlAddGrowableFunctionTable` was misaligned from the second entry on: an OS-level walk through JIT
+frames (SEH dispatch after the vectored handler declines, `RtlCaptureStackBackTrace`, the crash
+reporter) could not unwind them. Managed exceptions never showed it because `mono_handle_exception`
+walks frames with mono's own unwind ops. Fix in patch 0002: under `__arm64ec__`, `mini-arm64.h` maps
+`RUNTIME_FUNCTION`/`PRUNTIME_FUNCTION` to the ARM64 entry types after `<windows.h>`, and the
+registration call passes the table as `void *`. The same applies to the mono fork upstream (prose
+report). Candidate explanation for the crash-handler hang seen on Space Engineers and REPO.
+

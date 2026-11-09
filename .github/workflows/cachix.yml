@@ -166,6 +166,8 @@ jobs:
             attrs: dxvk vkd3d
           - name: galaxy-stub
             attrs: galaxyStub
+          - name: unity-mono
+            attrs: unityMono
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/build-and-push

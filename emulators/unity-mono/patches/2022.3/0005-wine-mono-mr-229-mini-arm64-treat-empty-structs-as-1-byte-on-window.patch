@@ -1,0 +1,31 @@
+Subject: [PATCH] mini-arm64: Treat empty structs as 1 byte on Windows.
+
+wine-mono's mono fork, merge request !229 (Esme Povirk, merged 2026-06-22):
+https://gitlab.winehq.org/mono/mono/-/merge_requests/229
+
+Applied verbatim. Unity's 2022.3 branch has no Windows-ARM64 port of its own; wine-mono's arm64 Windows
+port (merge requests 176, 195, 215, 218, 229, 236 and 237, in that order) is the base the ARM64EC layer
+(0009) builds on.
+
+diff --git a/mono/mini/mini-arm64.c b/mono/mini/mini-arm64.c
+index a8145cc95072e5f20f42dd4be3a1d3057a846437..a5bc75fdcc568d4ccfe8d0e866cf8d91392f485d 100644
+--- a/mono/mini/mini-arm64.c
++++ b/mono/mini/mini-arm64.c
+@@ -1182,6 +1182,17 @@ add_valuetype (CallInfo *cinfo, ArgInfo *ainfo, MonoType *t)
+ 	guint32 align;
+ 
+ 	size = mini_type_stack_size_full (t, &align, cinfo->pinvoke);
++#ifdef TARGET_WIN32
++	/*
++	* Standard C and C++ doesn't allow empty structs, empty structs will always have a size of 1 byte.
++	* GCC have an extension to allow empty structs, https://gcc.gnu.org/onlinedocs/gcc/Empty-Structures.html.
++	* This cause a little dilemma since runtime build using non-GCC compiler will not be compatible with
++	* GCC build C libraries and the other way around. On platforms where empty structs has size of 1 byte
++	* it must be represented in call and cannot be dropped.
++	*/
++	if (size == 0 && MONO_TYPE_ISSTRUCT (t))
++		size = 1;
++#endif
+ 	align_size = ALIGN_TO (size, 8);
+ 
+ 	nregs = align_size / 8;

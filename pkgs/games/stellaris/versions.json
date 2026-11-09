@@ -6,12 +6,12 @@
           "pname": "stellaris-linux-binaries",
           "appId": 281990,
           "depotId": 281994,
-          "manifestId": "1994331557761953329",
-          "version": "25664273",
-          "outputHash": "sha256-jKsEwQ4tGev343xstFOaNXI4V1roOZp6VwMyQ+YTSNw=",
+          "manifestId": "2095397877082630946",
+          "version": "26325427",
+          "outputHash": "sha256-CgVvrMQFcejaROpat5i5igJUI9xr+FgGXlVVIgmkz54=",
           "title": "Stellaris (Linux, Steam)",
           "depotKeySha256": "c4afc23459f1a268dbf249e85abacc551d4bd7ee4da15a45df9f42b6f92166a0",
-          "manifestSha256": "e0a65f541ea719273a60beaa981d6ba7d5eafa4930944b9c6fe0f55c3c4ed85f",
+          "manifestSha256": "32a9bb4fe10cb0ceac5d375f9e0fc2c7577d7ae8bf29859f9c621974316e78ca",
           "steamApiInterfaces": [
             "STEAMAPPLIST_INTERFACE_VERSION001",
             "STEAMAPPS_INTERFACE_VERSION008",
@@ -50,12 +50,12 @@
           "pname": "stellaris-linux-data",
           "appId": 281990,
           "depotId": 281991,
-          "manifestId": "7568313918290590295",
-          "version": "25664273",
-          "outputHash": "sha256-Oc93rC6SWvu5QBZwl1s/XxnawRuxjC8odMXUnz6430I=",
+          "manifestId": "8497093903498207413",
+          "version": "26325427",
+          "outputHash": "sha256-SpsDIptfvvX4zxOHxmqAmXOVY1ko5A733b5uKo7tFV4=",
           "title": "Stellaris (Linux, Steam)",
           "depotKeySha256": "4e11012016545171c7e240de4ec8142718a9897ef93ec526251ecde8ed2537d5",
-          "manifestSha256": "a8ce26fa07f851652ef3e8035e6cb60825e44d11480514648e3bbd24b07580ab",
+          "manifestSha256": "b5acdb3bfa9e8dd5a95b3327eda50e34ea5c802e22d26e3466bb9696659406c2",
           "steamApiInterfaces": []
         }
       ]
@@ -126,11 +126,13 @@
       "pname": "stellaris-dlc-humanoids",
       "appId": 281990,
       "depotId": 756010,
-      "manifestId": "7057785433501895820",
-      "version": "4.4.6",
-      "outputHash": "sha256-tRYlifZcY+pHX+dWpRcVqO+wkUI4cANS2uJqHZLzaTM=",
+      "manifestId": "3890735863625954154",
+      "version": "26325427",
+      "outputHash": "sha256-FdJJ66be3POcj3MA49yA0G6NEr6+X2+Q0/W+5q3JxjM=",
       "title": "Stellaris: Humanoids Species Pack (Steam)",
-      "steamApiInterfaces": []
+      "steamApiInterfaces": [],
+      "depotKeySha256": "b0182a9449cde5339eced104b5737efcf60c6e0370c6380a17bf3bfa9fe6e23b",
+      "manifestSha256": "0c63177b117294cb89c5fae31a46311651f5aaabb4112d1d1dbd5acbd948c69b"
     },
     "distant-stars": {
       "pname": "stellaris-dlc-distant-stars",
@@ -146,11 +148,13 @@
       "pname": "stellaris-dlc-megacorp",
       "appId": 281990,
       "depotId": 944290,
-      "manifestId": "5027959061154273567",
-      "version": "4.4.6",
-      "outputHash": "sha256-OKOjpQ5v9DIezyZqQ8QNJbfB4VDiFajTFdRf175Gn3A=",
+      "manifestId": "5222887027375310786",
+      "version": "26325427",
+      "outputHash": "sha256-3tZidQlxF2QfNz26aPumOlyJROAzXB7DOZ2854jb30w=",
       "title": "Stellaris: MegaCorp (Steam)",
-      "steamApiInterfaces": []
+      "steamApiInterfaces": [],
+      "depotKeySha256": "a25a1cee252a060531b03231f5c7bcdda2785dffd0e28a367761a58e6ab1be6d",
+      "manifestSha256": "36eb9afacb27f248b2f04c9def75bf4c81b19944223d75441ed487b6f45aa7b7"
     },
     "ancient-relics": {
       "pname": "stellaris-dlc-ancient-relics",
@@ -166,11 +170,13 @@
       "pname": "stellaris-dlc-lithoids",
       "appId": 281990,
       "depotId": 1140000,
-      "manifestId": "1707277670014098752",
-      "version": "4.4.6",
-      "outputHash": "sha256-OUzRFlvel60R6TVSg/yIe9LYtrk2Qp6rZLTbMIIhYMM=",
+      "manifestId": "4439512390676489865",
+      "version": "26325427",
+      "outputHash": "sha256-uaB7QauiYl4svCbLrB7/lm7eDxp7xzQHm9UMGJrwlI8=",
       "title": "Stellaris: Lithoids Species Pack (Steam)",
-      "steamApiInterfaces": []
+      "steamApiInterfaces": [],
+      "depotKeySha256": "4ef499cd5249770196909d3cf740bdcf2af1833fb09fed90a57252548e4d5547",
+      "manifestSha256": "a5ed95c409790a465e7b7b39874ecc4614b16883de22d0c2c578367874127e99"
     },
     "federations": {
       "pname": "stellaris-dlc-federations",
@@ -186,11 +192,13 @@
       "pname": "stellaris-dlc-necroids",
       "appId": 281990,
       "depotId": 1341520,
-      "manifestId": "3322127761481394644",
-      "version": "4.4.6",
-      "outputHash": "sha256-Q6Cukf479ZPZmgM7ZXZ9RpHVxwwley60akX7lHUxITk=",
+      "manifestId": "4192641839961579584",
+      "version": "26325427",
+      "outputHash": "sha256-PAULofEwSH+KGqszcGfXNujvI43xJLIPP18MBDLwvUU=",
       "title": "Stellaris: Necroids Species Pack (Steam)",
-      "steamApiInterfaces": []
+      "steamApiInterfaces": [],
+      "depotKeySha256": "0eb9d74ab895152f83acb52a0bb927f7e960a1a1cca1d99441697bff6e13d167",
+      "manifestSha256": "4ac183da127428bc2c117fb9a8ed7e5aad6c4acf596e4f26c1457d90ac679b37"
     },
     "nemesis": {
       "pname": "stellaris-dlc-nemesis",
@@ -206,11 +214,13 @@
       "pname": "stellaris-dlc-aquatics",
       "appId": 281990,
       "depotId": 1749080,
-      "manifestId": "2352410094773288579",
-      "version": "4.4.6",
-      "outputHash": "sha256-1kBvYpMVoeLXnI6qFHp/r6r5yZx3sKOMPnO7vRYLr/k=",
+      "manifestId": "6183249967729970080",
+      "version": "26325427",
+      "outputHash": "sha256-QRxej32k9NFjWlTyDYfddTPxp9Okr8XjehizkDGXNJ4=",
       "title": "Stellaris: Aquatics Species Pack (Steam)",
-      "steamApiInterfaces": []
+      "steamApiInterfaces": [],
+      "depotKeySha256": "410ace4537812657f21aa30cebf71b950e14242e6f483b503b07e966ea858476",
+      "manifestSha256": "3db8025c310f6c620ca97bea4a48268b9fc80218f86c3c2f3e262dc4825dceb4"
     },
     "overlord": {
       "pname": "stellaris-dlc-overlord",
@@ -226,11 +236,13 @@
       "pname": "stellaris-dlc-toxoids",
       "appId": 281990,
       "depotId": 2115770,
-      "manifestId": "1045801664911037736",
-      "version": "4.4.6",
-      "outputHash": "sha256-7JYMboGC2tvnJat/AdCkPKgYiYpuhLRTycUa/zIMAp8=",
+      "manifestId": "5122427575866011480",
+      "version": "26325427",
+      "outputHash": "sha256-q67/d5JLlW1QOyM0JucJwfRoVUMLQmZnysuOnR5VuJ8=",
       "title": "Stellaris: Toxoids Species Pack (Steam)",
-      "steamApiInterfaces": []
+      "steamApiInterfaces": [],
+      "depotKeySha256": "8b4c3c157bc773bfd5eb5327251bbaed9f01d395d857662e6cb61bf28e0e2164",
+      "manifestSha256": "057e7c171f41f48e283443c727da68a9fb7f63d2f8bab1e95874515b9890e1fa"
     },
     "first-contact": {
       "pname": "stellaris-dlc-first-contact",
@@ -266,11 +278,13 @@
       "pname": "stellaris-dlc-machine-age",
       "appId": 281990,
       "depotId": 2840100,
-      "manifestId": "5013502338098449837",
-      "version": "4.4.6",
-      "outputHash": "sha256-M3+ChWgcX9cgdY3dCO2tUYmNMMi31myng2IYAI6DjUI=",
+      "manifestId": "8979615555578102134",
+      "version": "26325427",
+      "outputHash": "sha256-LVbIFLKG1wUE3xuS98AiJia7HJUgImhs0zLKmrlen58=",
       "title": "Stellaris: The Machine Age (Steam)",
-      "steamApiInterfaces": []
+      "steamApiInterfaces": [],
+      "depotKeySha256": "a79941bb13cc0591f2a18ba2e519c6bf0b5a2d3d370d796e407a3a704a913752",
+      "manifestSha256": "5f466521325946ebe1ad3ce39f2bf2c897b75aa0e9676334c75ccdd331a879c9"
     },
     "cosmic-storms": {
       "pname": "stellaris-dlc-cosmic-storms",
@@ -306,31 +320,37 @@
       "pname": "stellaris-dlc-infernals",
       "appId": 281990,
       "depotId": 3283220,
-      "manifestId": "4373441752470778623",
-      "version": "4.4.6",
-      "outputHash": "sha256-EGPqZ9/VQGf3YxNTKTZEV6zoCV6MOT8aCaRMcvLzSkE=",
+      "manifestId": "8041524973031863599",
+      "version": "26325427",
+      "outputHash": "sha256-sXFjhgvjhTD3kqhsgLhE8uH3ud2tLkPEk5zIHGe+ICw=",
       "title": "Stellaris: Infernals Species Pack (Steam)",
-      "steamApiInterfaces": []
+      "steamApiInterfaces": [],
+      "depotKeySha256": "e4c1a8a6a32e22aaf88bc25bab5e5c681f13c1af61f13a25bcc2227989fc27b2",
+      "manifestSha256": "8d18a1fcc0cb99ed2018eb25da31750b4f42bffd337a81218e414df75f17346d"
     },
     "biogenesis": {
       "pname": "stellaris-dlc-biogenesis",
       "appId": 281990,
       "depotId": 3417840,
-      "manifestId": "8331750570302919154",
-      "version": "4.4.6",
-      "outputHash": "sha256-LLCXcMzuSlQIFNsgJmygM4ArPEb5fILDwpZECFxU3jM=",
+      "manifestId": "7081683298429638352",
+      "version": "26325427",
+      "outputHash": "sha256-0uq8gVjYB7MpLg6sOf/e6Bnzp3vZ16bYs0WZwm0vwRY=",
       "title": "Stellaris: BioGenesis (Steam)",
-      "steamApiInterfaces": []
+      "steamApiInterfaces": [],
+      "depotKeySha256": "94fe4f7476eb59d627fb104efb8fddebc147c01becff952e8d9aa273bc3ee117",
+      "manifestSha256": "499cc6aa95ebcff6928c5ccace5aa3b00f5c9877a2e0e01964e59efc7648b510"
     },
     "shadows-of-the-shroud": {
       "pname": "stellaris-dlc-shadows-of-the-shroud",
       "appId": 281990,
       "depotId": 3417850,
-      "manifestId": "8092327340853379843",
-      "version": "4.4.6",
-      "outputHash": "sha256-wbYnP83x7r0cTi0ymtewL1KdUPuwtkLy+kbveaaYzHY=",
+      "manifestId": "3101765429910774633",
+      "version": "26325427",
+      "outputHash": "sha256-lL+xu1n8T78MOBYG1IrKtapZdWjoWGwowvhMiQfJglA=",
       "title": "Stellaris: Shadows of the Shroud (Steam)",
-      "steamApiInterfaces": []
+      "steamApiInterfaces": [],
+      "depotKeySha256": "06aa81ab5b415b8a9578661f8e5b799e1eb0902b603e08b6c60c1ecf06a1e39d",
+      "manifestSha256": "9db69d2eccf8a654bf44b8247662f036bcae2027798c9d0493164894fff42e49"
     },
     "stargazer": {
       "pname": "stellaris-dlc-stargazer",
@@ -346,11 +366,13 @@
       "pname": "stellaris-dlc-nomads",
       "appId": 281990,
       "depotId": 4241420,
-      "manifestId": "4308526494459266879",
-      "version": "4.4.6",
-      "outputHash": "sha256-xXTH67fMH3Cqg+g8AxVH3xyeZIAajlON+Oc+Gg6rgrk=",
+      "manifestId": "5251410910842664956",
+      "version": "26325427",
+      "outputHash": "sha256-bu/LC/sq+K3hUEnGH0sdr+L0ReThUWVvf2ItAlUWmwE=",
       "title": "Stellaris: Nomads (Steam)",
-      "steamApiInterfaces": []
+      "steamApiInterfaces": [],
+      "depotKeySha256": "fe1f135ad847dd48dfc61b6e5f042d47a855aa2616f8ec9b91bc16ec00f32ad9",
+      "manifestSha256": "cb58a24fe85c20e47282a57fe48425d5f67e0aa71e6911fb551f362999a89cf1"
     }
   }
 }

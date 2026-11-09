@@ -6,9 +6,9 @@
           "pname": "repo-3241661",
           "appId": 3241660,
           "depotId": 3241661,
-          "manifestId": "8225435692675993447",
-          "version": "23363152",
-          "outputHash": "sha256-/tue1px3NtIl2JYv0Bo0iw95ZpBIqu4GlDTsXXJK+SU=",
+          "manifestId": "3071300821150093080",
+          "version": "26407089",
+          "outputHash": "sha256-BWhDE5BZfJii0TkCtF0MHtJt7Jr4TycgKCS2vH7/Hi4=",
           "title": "R.E.P.O. (windows, Steam)",
           "steamApiInterfaces": [
             "STEAMAPPS_INTERFACE_VERSION008",
@@ -42,7 +42,9 @@
             "SteamParties002",
             "SteamUser023",
             "SteamUtils010"
-          ]
+          ],
+          "depotKeySha256": "ec7985745b8bf985c24c848ff0309b6ddf00b3ae59b1ae373d029836aa1160d6",
+          "manifestSha256": "4c1dd53b0fac07b2fd0cf87a2d85a7ecf825f7de04211d0f64d0841d9fedf63b"
         }
       ]
     }

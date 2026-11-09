@@ -6,12 +6,12 @@
           "pname": "rust-252495",
           "appId": 252490,
           "depotId": 252495,
-          "manifestId": "8312819573944875986",
-          "version": "26140533",
-          "outputHash": "sha256-jfOYpLjk2d0KlZQMt9kvynW2VwEQ1txYaUUsiVFLKqw=",
+          "manifestId": "1370875280057806627",
+          "version": "26499011",
+          "outputHash": "sha256-Pff6ru6jvGp8SXmKmXZEBq6+37LGOUugSgQdvdSwcXk=",
           "title": "Rust (windows, Steam)",
           "depotKeySha256": "3072a81ab1fe9b8b883f51af94d09e43b8819eed6ea0701e5c038fd63980accf",
-          "manifestSha256": "4df9ace2e9ce30de117ecfdd39a83ab980d5227c556ed10569f1a8b1d72e3940",
+          "manifestSha256": "8fdd1299007e7c3028a72fdf1af8be77d18b9ffa842a9ada6949705d9a47610c",
           "steamApiInterfaces": [
             "STEAMAPPS_INTERFACE_VERSION008",
             "STEAMHTMLSURFACE_INTERFACE_VERSION_005",
@@ -50,12 +50,12 @@
           "pname": "rust-252494",
           "appId": 252490,
           "depotId": 252494,
-          "manifestId": "7434183489735001434",
-          "version": "26140533",
-          "outputHash": "sha256-vCfn4ThKsovrC6Hr+ZMKa77VL4hT6dAJp4nr+ALBAAg=",
+          "manifestId": "1955748881557998549",
+          "version": "26499011",
+          "outputHash": "sha256-h8vJ1ekabP9imoQWZ+Po7PwKQxdfdkouCdvYAU4JeK8=",
           "title": "Rust (content, Steam)",
           "depotKeySha256": "d4198248ce9b53689a21f0e8fbd03a507506b8c7fc0483f461beb38e91beeb71",
-          "manifestSha256": "77cca51fcbc84ef25df735769289bd6ea6f79ce4f678d23042733d2eee1145ea",
+          "manifestSha256": "2ca93e01e36edc5a33c958a5c068921e86b3b42fa41718e764773f3bd3a21e4d",
           "steamApiInterfaces": []
         }
       ]

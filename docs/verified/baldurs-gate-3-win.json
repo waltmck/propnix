@@ -1,0 +1,33 @@
+{
+  "package": "baldurs-gate-3",
+  "version": "Release - v4.- Pa1.1.7631656 tch Patch8_HotFix10",
+  "versionSource": "versions.json GOG Galaxy pin (productId 1456460669, buildId 60063145568665078), string verbatim; the run record does not name the build it ran",
+  "date": "2026-09-01",
+  "verdict": "works",
+  "reporter": "waltmck",
+  "host": {
+    "arch": "x86_64-linux",
+    "note": "The shipped exe (bin/bg3_dx11.exe) on an HDR wayland session: Hyprland 0.56, mesa 26.1, RADV. The bg3.exe (native Vulkan) soak sessions ran under FEX/ARM64EC (aarch64-linux) and are undated; the graphics A/B, also on bg3.exe, does not record its host."
+  },
+  "backend": "wine",
+  "renderer": {
+    "d3d": "dxvk",
+    "path": "bg3_dx11.exe: D3D11 → DXVK → Vulkan → RADV; with env.DXVK_HDR = \"1\" the swapchain presents HDR10_ST2084"
+  },
+  "note": "Played on the GOG payload. bg3_dx11.exe launches and plays on x86_64, presenting HDR10_ST2084 with DXVK_HDR on an HDR wayland session. bg3.exe reaches the main menu, starts a new game, plays through the intro and autosaves (engine state machine reaches Running/Save); two ~18-minute sessions exited cleanly with no page faults. Menu, new game, intro cinematic, gameplay, autosave and a savegame round-trip (save then load) are verified, all with clean exits.",
+  "thisSessionVerified": [
+    "bg3_dx11.exe (x86_64, 2026-09-01): launches and plays; HDR10_ST2084 swapchain with DXVK_HDR on Hyprland 0.56 / mesa 26.1 / RADV",
+    "bg3.exe under FEX/ARM64EC: main menu, new game, intro, autosave (Running/Save); two ~18-minute sessions, clean exit, no page faults",
+    "savegame round-trip (save then load), clean exits, no page faults",
+    "graphics A/B on bg3.exe: winewayland 18 min clean exit / 0 faults / 0 swapchain recreates; x11 17 min clean exit / 0 faults. The tree default (winewayland) stays; the Skyrim SE fullscreen-Vulkan swapchain-recreate NULL-deref does not reproduce"
+  ],
+  "notMeasured": [
+    "a long bg3_dx11.exe session on aarch64-linux (DXVK is the aarch64 d3d default, but re-verify on that host before trusting a long session there)",
+    "performance under FEX",
+    "the Steam payload (four depots; never launched, reachable only via `.apply { fetcher = \"steam\"; }`)"
+  ],
+  "knownCaveats": [
+    "bg3.exe (native Vulkan) engages HDR only in its exclusive-fullscreen mode, which loses a state fight with winewayland and the compositor (the toplevel bounces out of fullscreen); bg3_dx11.exe gets HDR through DXVK's DXGI in any display mode",
+    "the engine writes `gold.<timestamp>.log` into the game dir, which is read-only, so `--logPath` is load-bearing: without it CreateFileW fails with STATUS_ACCESS_DENIED and the engine runs with no log sink"
+  ]
+}

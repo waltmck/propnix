@@ -13,14 +13,12 @@
     createIfNotExist = true;
   };
 
-  # KSP_x64_Data/Managed — the .NET managed assemblies. Presented as a per-launch EPHEMERAL, WRITABLE tmpfs
-  # SEEDED from the store payload: a source-less `type = "mount"` (→ ns-private tmpfs) plus `seed` (→ copy the
-  # real assemblies into it each launch). WHY: Mono's mono_image_open MAP_SHARED-maps each assembly, which the
-  # kernel does NOT handle for an overlay LOWER-layer file (overlayfs "Non-standard behavior" #2), and Mono
-  # also needs the containing directory WRITABLE — so serving Managed via the data-only `drive_c/game` overlay
-  # (or a ro-bind, or a plain overlay) fails "mscorlib.dll could not be loaded"; only real assemblies in a
-  # writable dir load (verified). ~28 MB, RAM-backed, always current (re-seeded from the pinned payload), no
-  # persistent state. (propnix-mount implements source-less-tmpfs + seed; see lib/builders/wine.nix / mount docs.)
+  # KSP_x64_Data/Managed — the .NET managed assemblies, as a per-launch EPHEMERAL, WRITABLE tmpfs SEEDED
+  # from the store payload: a source-less `type = "mount"` (→ ns-private tmpfs) plus `seed` (→ copy the real
+  # assemblies into it each launch). This player's Mono fails at startup ("mscorlib.dll could not be loaded")
+  # when Managed is served from the game-dir overlay or a read-only bind; only real files in a writable
+  # directory load (docs/research/unity-player-facts.md). ~28 MB, RAM-backed, re-seeded from the pinned
+  # payload every launch, no persistent state.
   mounts."drive_c/game/KSP_x64_Data/Managed" = {
     seed = "${payload}/KSP_x64_Data/Managed";
   };
@@ -38,11 +36,6 @@
     createIfNotExist = true;
   };
 
-  # BROKEN on aarch64 (see default.nix `broken.systems`): with the writable Managed tmpfs above, KSP passes
-  # mscorlib and RENDERS the loading screen, but ~90% of launches the main thread dies at the main-menu canvas
-  # build via a FEX-2607 CODEGEN bug — a wild WRITE to a fixed address from FEX-translated guest code →
-  # recursive access-violation → main-thread zombie (frozen last frame reads as a "stuck" loading screen).
-  # Intermittent + pervasive (the ~1/10 that clears the menu crashes again in asset loading). NOT fixable at
-  # the propnix/wine/FEX-config layer — every lever was exhausted; needs an upstream FEX fix. Native x86_64
-  # wine (no FEX) is unaffected. See the ksp-fex-blockers memory.
+  # Runs on aarch64 (wine+FEX) with the Managed tmpfs above. A main thread dying at the main-menu canvas
+  # build (a frozen loading screen) is the signature of an emulator page-size regression, not of this spec.
 }

@@ -295,10 +295,8 @@ pub fn run_inside_ns(
 
     // Steam-emulated build (cfg.steam_emu): gbe_fork generates its own identity and saves it under
     // drive_c/users — the PERSISTENT users overlay — so on wine it is stable across launches with no help
-    // from us. (The launcher used to seat the stored Steam account's SteamID64 here; that seeding was
-    // removed — it read the credential store as the launching human, which the group-ownership contract
-    // does not permit on declarative/shared hosts, and it never delivered the stable-identity behavior it
-    // was added for.)
+    // from us. The launcher does not seat a stored SteamID64 here: that would read the credential store as
+    // the launching human, which the group-ownership contract does not permit on declarative/shared hosts.
 
     // Warm the assembled prefix's PE-module closure (detached; see `spawn_prefetch`). The view is live from the
     // moment we start — propnix-mount laid it before re-exec'ing us — but this must come AFTER

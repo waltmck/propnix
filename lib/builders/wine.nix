@@ -408,7 +408,7 @@ let
         d3d = flat.d3d;
       };
       # Env vars the launcher unsets before anything else (per-game escape hatch from a user's global
-      # PROPNIX_* that breaks a title — e.g. Skyrim lists PROPNIX_FPS/PROPNIX_DPI).
+      # PROPNIX_* that breaks a title — e.g. Skyrim lists PROPNIX_DPI).
       brokenVariables = flat.brokenVariables;
       # HKCU overrides re-applied every launch (list of { key; name; value; type; }).
       userReg = flat.userReg;

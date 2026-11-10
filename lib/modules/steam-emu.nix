@@ -12,10 +12,10 @@
 #     libsteam_api without a declared path (Stellaris under box64). On NATIVE there is no preload at all:
 #     plain LD_PRELOAD is inherited by every child the game spawns, and games shell out to HOST binaries
 #     (Factorio execs `sh -c lsb_release` to stamp its log) — on a non-NixOS host the shim's nix-store
-#     RUNPATH then drags a second glibc into a foreign-distro process, which dies with SIGBUS (observed:
-#     every Factorio launch on Fedora coredumped its lsb_release child). Native is served entirely by the
-#     bind-over rows below, the same replace-the-file story as wine: the real ld.so resolves both
-#     DT_NEEDED and dlopen through the path, and the file AT the path is the shim.
+#     RUNPATH then drags a second glibc into a foreign-distro process, which dies with SIGBUS.
+#     Native is served entirely by the bind-over rows below, the same replace-the-file story as
+#     wine: the real ld.so resolves both DT_NEEDED and dlopen through the path, and the file AT the
+#     path is the shim.
 #   * `extraLowers` — the same tree unioned into the game dir, ABOVE every game tree (box64's CWD-fallback
 #     discovery; box64 never file-maps guest libraries, so the beside-the-library probe cannot work there).
 #   * per `.so` entry of `steam.emu.libPaths`, three `extraBinds` rows — the SAME settings-tree shim bound
@@ -43,12 +43,11 @@
 #   * On WINE, a declared `.dll` libPath is the ONLY mechanism — an enabled emu with none would be a
 #     silently-inert shim (the game loads its genuine dll, every DLC reads unowned), so mk-app.nix refuses
 #     that combination legibly instead.
-#   * The shim answers only the Steamworks surface its pin knows (gbe_fork tracks the current SDK — 1.64
-#     at this pin, covering every interface hollow-knight's SDK-1.60 lib carries, verified by symbol
-#     diff). A FUTURE game built against a newer SDK than the pin fails the same way the predecessor
-#     goldberg-emu 0.2.5 failed hollow-knight: the lib loads, init throws EntryPointNotFoundException, black
-#     screen — WORSE than absence. Triage: `nm -D <game's libsteam_api.so>` and check its newest entry
-#     points/interface strings exist in gbe_fork's .so; if not, bump emulators/gbe-fork first.
+#   * The shim answers only the Steamworks surface its pin serves. An interface revision the game's
+#     shipped library names but the pinned shim does not serve fails the BUILD (the builder's compat
+#     gate, which asks the shim itself): bump emulators/gbe-fork, or declare the revision in
+#     `steam.emu.neverRequested` when the game provably never asks. See
+#     docs/research/steam-entitlement.md.
 #
 # steam.emu SUPERSEDES `maskFiles` for the steam lib: the mask's whiteout re-overlays the file's parent,
 # which EINVALs once this module's `extraLowers` makes the game dir multi-lower — and with the shim bound
@@ -81,9 +80,9 @@ let
   # `${gbeFork}` tree. The tree is a symlinkJoin over every ABI, so referencing it would make ANY
   # steam.emu game (which is every Steam fetch by default) force all of them: on this host that means a
   # full pkgsCross bootstrap — a two-stage cross-GCC plus static protobuf/abseil/curl/mbedtls/opus/
-  # portaudio, ~1300 derivations, none of them substitutable — to build an x86_64 library that an aarch64
-  # payload will never load. `null` for the wine platforms, which have no preload and are served entirely
-  # by the `.dll` mirrors below: the root `.so` is stray there (see the header), so emitting it would drag
+  # portaudio, none of them substitutable — to build an x86_64 library that an aarch64 payload will
+  # never load. `null` for the wine platforms, which have no preload and are served entirely by the
+  # `.dll` mirrors below: the root `.so` is stray there (see the header), so emitting it would drag
   # a foreign-ABI shim into a pure-wine game's closure for a file nothing opens.
   linuxShim =
     {
@@ -258,11 +257,13 @@ in
 
         `true` (the default) is the honest answer for everything this module normally serves: there is no
         Steam session behind the shim, so a game that asks "am I logged on?" is told no, and an engine
-        that has an offline path takes it. Set it `false` ONLY for a title that is online-only by nature
-        (`online = true`, no single-player mode), where a client can read "not logged on" as "the Steam
-        client is coming back" and block on a logon that will never arrive. Flipping it does not give the
-        game a real Steam session and does not help it authenticate to any server that validates tickets
-        with Valve — it only stops the shim from volunteering a "no".
+        that has an offline path takes it. Set it `false` when the title's SDK needs a logged-on
+        state at boot: such a client reads "not logged on" as "the Steam client is coming back" and
+        blocks on a logon that will never arrive. Whether the title has a single-player mode does
+        not predict this — Victoria 3 has one and needs `false`. Flipping it does not give the game
+        a real Steam session and does not help it authenticate to any server that validates tickets
+        with Valve — it only stops the shim from volunteering a "no". Evidence:
+        docs/research/steam-entitlement.md.
       '';
     };
     emu.steamStub = lib.mkOption {
@@ -283,18 +284,13 @@ in
         UNWRAPPED title gains nothing from the extra two files. Which one a payload is, is a fact about its
         bytes: a 10th section named `.bind` whose range contains `AddressOfEntryPoint`.
 
-        The mechanism, the measurements behind it (a wine `+relay` trace placing the wrapper's Steam calls
-        in an anonymous mapping rather than any module), and the two alternatives that were tried and
-        MEASURED not to work, are in emulators/gbe-fork/steamstub-proxy.nix. VERIFIED on
-        pkgs/games/civilization-6 (x86_64-linux, 2026-09-03): without it the process exits 53 having
-        written nothing; with it the game reaches its rendered front end.
+        Mechanism and evidence: emulators/gbe-fork/steamstub-proxy.nix and
+        docs/research/steam-entitlement.md.
 
         IT ONLY SERVES `.bind`. gbe_fork's `stubdrm.cpp` looks up the section literally named
-        `.bind` and gives up when it is absent, and its `dllmain.cpp` then returns FALSE so Windows
-        unloads the dll immediately (observed as adjacent PROCESS_ATTACH/PROCESS_DETACH lines under
-        `+module`). Setting this on a title with no `.bind` section is therefore inert, not harmful — and
-        it does nothing for the OLDER `STEAM_DRM_IPC` handshake, which gbe_fork does not implement at all
-        (see pkgs/games/civilization-5 for that measurement).
+        `.bind`; on an exe without one the patcher unloads itself, so setting this there is inert,
+        not harmful. The OLDER `STEAM_DRM_IPC` handshake is not implemented at all
+        (docs/research/steam-drm.md).
       '';
     };
     emu.extraDlc = lib.mkOption {
@@ -363,14 +359,6 @@ in
         revision the game does use; that is a gbe_fork bump.
       '';
     };
-    # REMOVED. The revisions are scanned from the shipped library at build time (steam-offline-entitlement's
-    # `scanned`), so there is nothing left to pin by hand; a definition is refused by name below.
-    emu.interfaces = lib.mkOption {
-      type = lib.types.nullOr (lib.types.listOf lib.types.str);
-      default = null;
-      visible = false;
-      description = "Removed: interface revisions are scanned from the game's shipped steam_api library at build time.";
-    };
   };
 
   config = lib.mkIf cfg.steam.emu.enable {
@@ -378,13 +366,7 @@ in
     # every spawned host process, and the bind-over rows below already replace the file the real ld.so
     # resolves. mk-app.nix enforces that a native build declares its `.so` path, mirroring the wine rule.
     box64.guestPreload = lib.optionals (cfg.backend != "native") [ "${settings}/libsteam_api.so" ];
-    extraLowers =
-      lib.throwIf (cfg.steam.emu.interfaces != null)
-        "propnix (${cfg.pname}): `steam.emu.interfaces` was removed — the interface revisions are now scanned from the game's own shipped steam_api library at build time (see steam.emu.libPaths); drop the definition. A revision the library names but the game never requests goes in `steam.emu.neverRequested`."
-        [ settings ];
-    # steamclient mode: the backend starts the LOADER, which starts the game. The loader is in the
-    # settings tree, which unions into the game dir, so a bare filename is the right game-dir-relative
-    # path. `exe` itself stays the game's own binary — it is the icon source and what the INI names.
+    extraLowers = [ settings ];
     # The thin bind-over rows (`.so` libPaths; the .dll flavor travels INSIDE the tree as wine mirrors).
     # "game/" is the launcher's THIN_GAME_DIR contract (config.rs); a sibling target that does not exist
     # in the game tree is stubbed into the game overlay by propnix-mount's child-skeleton machinery, so

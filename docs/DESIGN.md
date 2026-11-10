@@ -359,7 +359,7 @@ The DLC framework on the **wine** path (Stellaris, §2, is the thin one): `versi
 
 **Tier 2 — launch smoke (payload-gated, local only).** `nix run` the title; the window-watcher confirms the window **maps**; screenshot-stddev catches a black window. Not in CI (CI cannot legally fetch payloads).
 
-**Tier 3 — the verified manifest (DESIGNED, ONE ENTRY SO FAR).** `docs/verified/<game>.json`, committed as data: `{ date, hostArch, kernel, mesa, box64/fex/wine versions, graphicsBackend, fps, resolution, status, notes }` — diffable on every emulator bump, and the maintainable substitute for a perf CI that cannot legally fetch payloads. **State the reality plainly: the directory currently holds `hollow-knight-win.json` and nothing else.** What actually records per-title status today is the README's supported-games tables plus each game's own `broken.systems`/`broken.reason` (KSP and Homeworld are the precedent), and those are what a reader should trust. Treat this tier as a design that is one game old, not as a populated source of truth — a claim of "hand-tested, see the manifest" is false for every title but one.
+**Tier 3 — the verified manifest.** `docs/verified/<game>-win.json`, committed as data: one compact record per verified run `{ package, version, date, verdict, reporter, host, backend, renderer, note, thisSessionVerified, notMeasured, knownCaveats }` — diffable on every emulator bump, and the maintainable substitute for a perf CI that cannot legally fetch payloads. The records are per-run verdicts (works / reaches-menu / boots), not a status table: what records per-title status is the README's supported-games tables plus each game's own `broken.systems`/`broken.reason`, and a title without a record has simply not had a run written down.
 
 ---
 

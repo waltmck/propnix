@@ -433,11 +433,9 @@ fn run_inner(cfg: &ThinConfig, settings: &Settings, paths: &Paths, passthrough: 
     }
 
     // Steam-emulated build (cfg.steam_emu): gbe_fork generates its own identity in its global settings
-    // under the data home — which on THIN is the ephemeral view, so it is minted afresh each launch. (The
-    // launcher used to seat the stored Steam account's SteamID64 here to stabilize it; that seeding was
-    // removed — it read the credential store as the launching human, which the group-ownership contract
-    // does not permit on declarative/shared hosts, and it never delivered the stable identity it was
-    // added for.)
+    // under the data home — which on THIN is the ephemeral view, so it is minted afresh each launch. The
+    // launcher does not seat a stored SteamID64 here: that would read the credential store as the
+    // launching human, which the group-ownership contract does not permit on declarative/shared hosts.
 
     // The baked LD_LIBRARY_PATH (native bridging libs ∪ x86_64 guest libs) box64 folds into both its native
     // bridge resolution and the guest search path — extended with the GL/Vulkan fallback stack when the

@@ -1,0 +1,34 @@
+{
+  "package": "space-engineers",
+  "version": "24675677",
+  "versionSource": "versions.json Steam pin (depot 244851, manifest 8665759898768632005); the run record does not name the build it ran",
+  "date": "2026-09-03",
+  "verdict": "reaches-menu",
+  "reporter": "waltmck",
+  "host": {
+    "arch": "x86_64-linux",
+    "note": "AMD Radeon RX 7900 XTX (RADV NAVI31). Headless sway (WLR_BACKENDS=headless + swaymsg create_output) with iron-lung as the known-good control in the same harness."
+  },
+  "backend": "wine",
+  "renderer": {
+    "d3d": "dxvk",
+    "path": "D3D11 (SharpDX) → DXVK → Vulkan → RADV; feature level 11.1, 1920x1080 swapchain on the winewayland surface"
+  },
+  "note": "Reaches the MAIN MENU and keeps drawing: the game log shows `MyGuiScreenMainMenu MyGuiScreenBase.LoadContent` ~36 s after launch, then `GUI Stats: Update … Draw …` for as long as it is left alone. `nix run` returns 137 (alive when the timeout kills it), never a crash. A `grim` capture of the compositor output is a fully rendered 1920x1080 VRage GUI frame. The config that ran includes the shared dosdevices overlay, `dllOverrides.d3dcompiler_47 = \"n,b\"` and `exeArgs = [ \"-skipintro\" ]`.",
+  "thisSessionVerified": [
+    "managed Main runs on the prefix's Wine Mono: `Environment.Version: Mono 6.13.0 (tarball)`, `Environment.CommandLine: C:\\game\\Bin64\\SpaceEngineers.exe`",
+    "DXVK adapter reported to the engine: `AdapterInfo` = `AMD Radeon RX 7900 XTX (RADV NAVI31) + DISPLAY1`, `feature_level 11.1: True`, `Multithreaded rendering supported = True`",
+    "main menu loaded ~36 s after launch, GUI frame rendered (grim capture), process alive at timeout (exit 137)",
+    "the gbe_fork shim is the loaded steam_api64 and the game accepts it: `Service.IsActive: True`, `Service.OwnsGame: True`, `Service.IsOnline: False`",
+    "cwd `Environment.CurrentDirectory: C:\\game\\Bin64`; the save bind receives `SpaceEngineers.cfg` and the per-run logs"
+  ],
+  "notMeasured": [
+    "dismissing the first-run `MyGuiScreenGDPR` / `MyGuiScreenWelcomeScreen` stack on top of the main menu, and anything past it (the headless seat has no input devices)",
+    "loading a world; workshop and mod.io paths",
+    "aarch64-linux (outside this record)"
+  ],
+  "knownCaveats": [
+    "the .wmv videos (intro, animated menu backgrounds `Content/Videos/Background0*.wmv`) do not decode: `Can't connect WM ASF Reader and WMVideo Decoder DMO` (0x80040217 = VFW_E_CANNOT_CONNECT); `-skipintro` steps around the intro, the menu backgrounds are absent",
+    "load-sensitive cold start: one launch at load average ~20 (many concurrent wine prefixes) died during cold start; the identical build at load ~3 reached the menu"
+  ]
+}

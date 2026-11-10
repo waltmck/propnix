@@ -112,7 +112,7 @@ pkgs.lib.makeScope pkgs.newScope (
 
     # ── propnix tools (Rust; arch-agnostic — built for the host arch from the same source) ──
     # The launcher LINKS the mount + prefetch helpers as library crates (path deps), so it's the single
-    # build; propnix-mount / propnix-prefetch are no longer separate packages.
+    # build.
     propnix-launcher = callPackage ../pkgs/propnix-launcher { }; # per-app launcher (splash + seal + in-process mount/prefetch + orchestration)
     propnix-cli = callPackage ../pkgs/propnix-cli { }; # the `propnix` CLI (cred management + `propnix pin` re-pinning)
 
@@ -263,11 +263,10 @@ pkgs.lib.makeScope pkgs.newScope (
     # llvm/llvm-project#190933 — the ARM64EC variadic exit-thunk fix, without which every `[out]` context
     # handle is corrupted and no Windows installer can register a service (RESEARCH §23).
     #
-    # Only the compiler is rebuilt; the mingw sysroots, libc++ 22 and compiler-rt builtins stay exactly as
-    # upstream shipped them. The alternative — pinning 20260812 (clang 23.1.0-rc3), the only release
-    # carrying the fix — was implemented, measured and rejected: libc++ 23 drops transitive includes and
-    # needs a patch per third-party source, and it hard-blocks fex-dlls outright. `llvmMingw` is what every
-    # consumer in this scope resolves, so nothing can accidentally build against the unpatched base.
+    # Only the compiler is rebuilt; the mingw sysroots, libc++ 22 and compiler-rt builtins stay
+    # exactly as upstream shipped them. `llvmMingw` is what every consumer in this scope resolves,
+    # so nothing can accidentally build against the unpatched base. Why a backport onto 22 rather
+    # than the clang-23 release that carries the fix: docs/research/llvm-mingw-toolchain.md.
     llvmMingwPrebuilt = callPackage ../emulators/llvm-mingw { };
     llvmMingwPatched = callPackage ../emulators/llvm-mingw/patched-22.nix {
       prebuilt = llvmMingwPrebuilt;
@@ -283,13 +282,6 @@ pkgs.lib.makeScope pkgs.newScope (
     # the large-host-page work plus the two 32-bit-guest fixes that make i386 guests usable, which is what
     # pkgs/games/civilization-5 runs on.
     fexInterpreter = callPackage ../emulators/fex-linux { };
-    # Graceful no-op GOG Galaxy SDK DLLs (Galaxy64/Galaxy/pops_api): bound over a game's bundled copies so a
-    # statically-imported online SDK never reaches GOG's services — propnix games run fully offline, the
-    # same policy as masking Steam's steam_api64.dll (winefex path; x86_64 = native wine, no stub).
-    # (galaxyStub is NOT here — it is arch-independent and lives in the common block above, because its
-    # output DLLs are x86_64/i386 PEs matching the GAME, never the host. It used to sit in this aarch64
-    # block only because it happened to build with llvmMingw, which made `galaxyStubDlls` a silent no-op
-    # on x86_64.)
     # box64 re-export: pass nixpkgs' box64 explicitly (else callPackage resolves `box64` from this scope →
     # itself → infinite recursion).
     box64 = callPackage ../emulators/box64-latest.nix { box64 = pkgs.box64; };

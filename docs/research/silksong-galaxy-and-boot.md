@@ -51,7 +51,7 @@ retries a symlink into dosdevices forever when the write cannot succeed, holding
 spins, so every other thread in the prefix blocks in any mountmgr IOCTL. Unity 6's first act after Mono
 init is exactly such an IOCTL (`NtQueryVolumeInformationFile` → `get_mountmgr_fs_info`), which is why the
 log stops one line early; the next line would have been `Input System module state changed to:
-Initialized.` The mechanism and the strace are in lib/backends/wine/defaults.nix at the `dosdevices` row.
+Initialized.` The mechanism and the strace are in wine-mountmgr-dosdevices.md.
 
 Proof, back to back on one headless sway with the same propnix-launcher binary, the two baked configs
 differing in nothing but that row:

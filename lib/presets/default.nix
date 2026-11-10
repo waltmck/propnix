@@ -37,10 +37,13 @@ rec {
   mergeTuning = lib.foldl' (mergeTwo [ ]) { };
 
   unity = {
-    # Unity frame pacing, agreeing with the launcher's PROPNIX_FPS modes (see the fps three-state):
-    # Unity persists `VidVSync` / `VidTFR` PlayerPrefs under HKCU\<key> — the value-name `_h<hash>`
-    # suffixes are Unity-global constants (the deterministic hash of the pref NAME, identical across
-    # games), so a fragment needs only the game's HKCU key ("Software\\<company>\\<product>").
+    # Frame pacing for the Team Cherry Unity titles, agreeing with the launcher's PROPNIX_FPS modes (see
+    # the fps three-state). `VidVSync` / `VidTFR` are the GAME's own PlayerPrefs (Hollow Knight's
+    # Assembly-CSharp.dll; Silksong persists the same pair), not Unity engine prefs, so the preset is
+    # inert on a Unity title that lacks them. Unity stores PlayerPrefs under HKCU\<key> with a
+    # `_h<hash>` suffix that is a deterministic function of the pref NAME alone (identical across games),
+    # so a fragment needs only the game's HKCU key ("Software\\<company>\\<product>").
+    # docs/research/unity-player-facts.md.
     #   Fixed (PROPNIX_FPS > 0): DXVK caps + forces vsync OFF → engine vsync OFF (else Unity paces to
     #   vblank and fights the cap) and the engine target frame rate = the cap.
     #   VRR (PROPNIX_FPS = 0): DXVK forces vsync ON, uncapped → engine vsync ON so it presents FIFO and

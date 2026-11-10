@@ -13,11 +13,10 @@
 #   * `dlc` is the set of trees ACTUALLY MOUNTED for this build, threaded from `config.dlc.enabled` rather
 #     than authored by hand. By construction it can only contain depots Steam decrypted for this account,
 #     so the emitted entitlement list cannot name content the account does not own.
-#   * Upstream unlocks EVERY DLC by default (`[app::dlcs] unlock_all` defaults to 1 — and its ancestor
-#     unlocked everything when the list file was missing). We therefore always emit `configs.app.ini` with
-#     an EXPLICIT `unlock_all=0` + the owned list: an empty `dlc` set yields an empty list — "own nothing",
-#     never "own everything". That inversion is the whole safety property, now stated as a key rather than
-#     hinging on file presence.
+#   * Upstream unlocks EVERY DLC by default (`[app::dlcs] unlock_all` defaults to 1). We therefore
+#     always emit `configs.app.ini` with an EXPLICIT `unlock_all=0` + the owned list: an empty `dlc`
+#     set yields an empty list — "own nothing", never "own everything". That inversion is the whole
+#     safety property.
 #
 # HOW THE SHIM FINDS IT — TWO PLACEMENTS, because the answer depends on the loader. Upstream looks for
 # `steam_settings/` (and `steam_interfaces.txt`) beside the loaded library, by readlink()ing the
@@ -42,9 +41,8 @@
 # to assume it belongs to someone. Identity is left entirely to gbe_fork: it generates one and saves it in
 # its GLOBAL settings — persistent on wine (the users overlay), per-launch on thin (the ephemeral view).
 # The local tree here deliberately leaves `[user::general]` unset so that global value is what the shim
-# resolves. (The launcher used to seat the stored Steam account's SteamID64 there; that seeding was
-# removed — it read the credential store as the launching human, which the group-ownership contract does
-# not permit on declarative/shared hosts, and it never delivered the stable identity it was added for.)
+# resolves. The launcher does not read the credential store for identity either: that would read it
+# as the launching human, which the group-ownership contract forbids on declarative/shared hosts.
 {
   lib,
   runCommandLocal,
@@ -116,35 +114,13 @@ let
     ]
     ++ lib.mapAttrsToList dlcLine dlc
   );
-  # Report the client as offline (the gbe_fork spelling of the ancestor's `offline.txt`).
-  #
-  # WHAT THIS KEY ACTUALLY REACHES — measured in the pinned source, because the name overpromises and an
-  # earlier revision of this comment claimed it meant "nothing reaches for the network or a lobby". It does
-  # not. `[main::connectivity] offline` is read once (dll/settings_parser.cpp: `steam_offline_mode`) into
-  # `Settings::offline`, and `Settings::is_offline()` has exactly THREE call sites in the whole tree, all in
-  # dll/steam_user.cpp:
-  #
-  #     BLoggedOn()      → `return !settings->is_offline();`            → false
-  #     BConnected()     → `return !settings->is_offline();`            → false
-  #     GetLogonState()  → k_ELogonStateNotLoggedOn instead of …LoggedOn
-  #
-  # Nothing else consults it. The shim's actual network behaviour is governed by the separate
-  # `disable_networking` / `disable_lan_only` keys, which we leave at their defaults either way — so this
-  # key is a pure STATEMENT ABOUT LOGON STATE, not a network switch. Upstream's own documentation of it
-  # (post_build/steam_settings.EXAMPLE/configs.main.EXAMPLE.ini) says the same and cuts both ways:
-  # "1=pretend steam is running in offline mode, mainly affects the function `ISteamUser::BLoggedOn()` /
-  # Some games that connect to online servers might only work if the steam emu behaves like steam is in
-  # offline mode".
-  #
-  # `1` stays the default because it is the honest answer for the offline-by-construction case this module
-  # exists to serve: there IS no Steam session here, so a game that asks "am I logged on?" should be told
-  # no. But a title whose boot links Steam to a second account system can read that "no" as "wait for the
-  # client to come back" and sit there forever, which is why it is now a knob (`steam.emu.offline`) rather
-  # than a constant — see pkgs/games/victoria-3, where flipping it alone turns "no log at all" into the
-  # engine's full log set and a D3D11 device. (It is NOT a general cure for a title that stops at Steam
-  # init, and the two cases look alike from the syscall side — both are wine's `server_select` waiting on a
-  # `wake_up_reply` that never comes. pkgs/games/rust stops INSIDE `SteamAPI_Init`, before this key is ever
-  # consulted, and flipping it there changes nothing; only a PE-level backtrace separates them.)
+  # Report the client as offline (the gbe_fork spelling of the ancestor's `offline.txt`). The key is
+  # a STATEMENT ABOUT LOGON STATE, not a network switch: it is read only by `BLoggedOn` /
+  # `BConnected` / `GetLogonState` (dll/steam_user.cpp), and network behaviour stays on the
+  # `disable_networking` / `disable_lan_only` defaults either way. `1` is the default because there
+  # IS no Steam session here, so a game asking "am I logged on?" is told no; a title whose boot
+  # reads that "no" as "wait for the client" sets `steam.emu.offline = false`. Source walk and
+  # per-title triage: docs/research/steam-entitlement.md.
   mainIni = ''
     [main::connectivity]
     offline=${if steamOffline then "1" else "0"}
@@ -153,32 +129,21 @@ let
   # Point the legacy global accessors at the same interface revisions the modern
   # `SteamInternal_FindOrCreateUserInterface` path resolves, so both routes agree if a game uses each.
   #
-  # NOT "harmless when unused" — an earlier revision of this comment said so, and pkgs/games/cities-skylines
-  # is the measured counter-example. dll/dll.cpp holds one `old_<itf>[128]` string per interface, each
-  # initialised to the version the shim was COMPILED against (`static char old_client[128] =
-  # STEAMCLIENT_INTERFACE_VERSION;`), and dll/settings_parser.cpp's `try_parse_old_steam_interfaces_file()`
-  # overwrites them from THIS FILE — matching a line to a slot by substring (`SteamClient` → CLIENT, …), so
-  # a slot with no line here KEEPS the modern revision. `SteamClient()` then returns
-  # `SteamInternal_CreateInterface(old_client)`, and dll/dll.cpp casts that to the REQUESTED version's class
-  # (`ISteamClient001` … `ISteamClient017` … each a real, differently-shaped vtable).
+  # NOT harmless when unused: each line overwrites the revision a legacy accessor (`SteamClient()`
+  # and kin) hands out — matched to its slot by substring; a slot with no line keeps the shim's
+  # modern revision — and that revision IS the vtable layout the game walks with its own SDK header,
+  # so the two must agree slot for slot (Cities: Skylines is the measured case;
+  # docs/research/steam-entitlement.md).
   #
-  # So the version named here IS the vtable layout the game gets. A game built against an older SDK walks
-  # that pointer with ITS header's layout, and the two must agree slot-for-slot. Cities: Skylines (SDK 1.34,
-  # `SteamClient017`) does not survive the disagreement: modern `ISteamClient` dropped
-  # `GetISteamUnifiedMessages`, so 017's slot 25 lands on the shim's `GetISteamController`, which does not
-  # recognise `STEAMUNIFIEDMESSAGES_INTERFACE_VERSION001` and calls
-  # `report_missing_impl_and_exit()` — a MODAL "Missing interface" MessageBox followed by
-  # `std::exit(0x4155149)`. OBSERVED, screenshotted, x86_64-linux 2026-09-03.
-  #
-  # The revisions are READ OUT OF THE GAME'S OWN SHIPPED LIBRARIES at build
-  # time, which is the ground truth the paragraph above demands — upstream's generate_interfaces tool,
-  # compiled from the pinned shim's source so its emission quirks (notably: several SteamClient revisions
-  # collapse to 017, because modern steam_api's versionless SteamClient() still returns the 017 shape)
-  # can never drift from the parser that reads the file. One scan per libPath; the results are placed
-  # per-DIRECTORY — beside each lib AND inside that directory's own `steam_settings/`, because gbe_fork
-  # reads `<module dir>/steam_settings/steam_interfaces.txt` FIRST and the beside-the-library copy only
-  # when that is absent (dll/settings_parser.cpp parse_old_steam_interfaces). A per-directory list placed
-  # beside the lib alone would be shadowed by the root list in the directory's settings copy.
+  # The revisions are READ OUT OF THE GAME'S OWN SHIPPED LIBRARIES at build time — upstream's
+  # generate_interfaces tool, compiled from the pinned shim's source so its emission quirks
+  # (notably: several SteamClient revisions collapse to 017, because modern steam_api's versionless
+  # SteamClient() still returns the 017 shape) can never drift from the parser that reads the file.
+  # One scan per libPath; the results are placed per-DIRECTORY — beside each lib AND inside that
+  # directory's own `steam_settings/`, because gbe_fork reads
+  # `<module dir>/steam_settings/steam_interfaces.txt` FIRST and the beside-the-library copy only
+  # when that is absent (dll/settings_parser.cpp parse_old_steam_interfaces). A per-directory list
+  # placed beside the lib alone would be shadowed by the root list in the directory's settings copy.
   #
   # Two deliberate hard failures, both at BUILD time, both naming their remedy:
   #   * a REQUIRED-flavour lib that is missing, or two same-flavour scans that disagree where one file
@@ -187,9 +152,9 @@ let
   #     differ, each directory carrying its own list;
   #   * a scanned revision the pinned shim does NOT SERVE — asked of the shim itself through
   #     `oracle` — because at runtime that is a SILENT exit 73 (report_missing_impl_and_exit:
-  #     0x4155149 & 0xFF) or a NULL vtable the moment the game asks for it, which is how factorio's
-  #     2.1.2x SDK bump presented. Bump emulators/gbe-fork, or — when the game provably never asks
-  #     (a library naming a family the game does not use) — declare it in `steam.emu.neverRequested`.
+  #     0x4155149 & 0xFF) or a NULL vtable the moment the game asks for it. Bump emulators/gbe-fork,
+  #     or — when the game provably never asks (a library naming a family the game does not use) —
+  #     declare it in `steam.emu.neverRequested`.
   scanned = runCommandLocal "${pname}-${toString appId}-interfaces" { } (
     ''
       set -euo pipefail

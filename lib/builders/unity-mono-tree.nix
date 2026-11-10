@@ -3,8 +3,10 @@
 # nothing else, for lib/modules/unity-mono.nix to union into the game dir above the payloads.
 #
 # The tree is built per game, from the payload's own bytes, and checks the declaration it embodies:
-#   1. The player's version string (UnityPlayer.dll carries `<major>.<minor>.<patch><type><n> (<hash>)`,
-#      UTF-16 in current players, ASCII in older ones) must begin with the declared stream. A runtime
+#   1. The player's version string must begin with the declared stream. UnityPlayer.dll carries
+#      `<major>.<minor>.<patch><type><n> (<hash>)` as UTF-16 from 2022.3 on and as ASCII in older
+#      players (whose UTF-16 copy is `<version>_<hash>`); the anchored, hash-suffixed form is tried
+#      first because the players also carry decoy version-like strings (`5.0.0a1`, `2018.3.0a1`). A runtime
 #      from another stream loads and then faults inside the player — the player binds to runtime
 #      internals that move between release lines — so the mismatch is refused here, not at launch.
 #   2. Every `mono_*` name the player carries that the SHIPPED runtime exports must be exported by the

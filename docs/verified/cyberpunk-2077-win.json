@@ -1,0 +1,33 @@
+{
+  "package": "cyberpunk-2077",
+  "version": "2.5_RedModFix",
+  "versionSource": "versions.json GOG Galaxy pin (buildId 60152385347545148); the run record does not name the build it ran",
+  "date": "2026-09-03",
+  "verdict": "reaches-menu",
+  "reporter": "waltmck",
+  "host": {
+    "arch": "x86_64-linux",
+    "note": "The real Hyprland session (not headless; a headless weston is not a valid harness for this stack), monitor at native 3840x2160."
+  },
+  "backend": "wine",
+  "renderer": {
+    "d3d": "dxvk",
+    "path": "D3D12 → vkd3d-proton (d3d12) → DXVK's dxgi (presentation) → Vulkan; swapchain at 3840x2160"
+  },
+  "note": "The spec, unmodified (base game, no DLC), boots to the attract-mode cinematics and the title screen at the monitor's native 3840x2160, presenting continuously: compositor screenshots of the \"WELCOME TO NIGHT CITY\" splash and of a Bink cutscene with live subtitles, taken seconds apart, plus a walk through the legal screen to \"PRESS ▯ TO CONTINUE\". It stayed alive to a `timeout -s KILL` (exit 137) with no ReportQueue minidump and no `Watchdog timeout!` assert. With the Galaxy stub bound it boots through that gate to the CD Projekt Red user agreement and the main menu.",
+  "thisSessionVerified": [
+    "continuous presentation at 3840x2160 through the title screen; alive at `timeout -s KILL` (exit 137); no ReportQueue minidump, no watchdog assert",
+    "the Galaxy64.dll mapped in the running game (read through `/proc/<pid>/root`) is md5-identical to the galaxy-stub's 33,869-byte Galaxy64.dll, not the payload's 14,208,648-byte SDK",
+    "with the stub bound: swapchain created at 3840x2160, no unhandled exception, GameThread out of its parked `read()`, `User()->SignInGalaxy` retries stop once OnAuthFailure is delivered, boot continues through \"PRESS ␣ TO CONTINUE\" to the user agreement and the main menu",
+    "vkd3d pipeline cache persisted: a 264 KB `vkd3d-proton.Cyberpunk2077.exe.cache.write` under $XDG_CACHE_HOME/propnix/<appid>/vkd3d"
+  ],
+  "notMeasured": [
+    "gameplay past the main menu",
+    "who calls SetColorSpace1 on this path, i.e. whether DXVK_HDR alone engages HDR10 or the in-game HDR Mode is also needed (`VKD3D_DEBUG=trace`, grep `dxgi_vk_swap_chain_SetColorSpace`); the in-game toggle could not be driven, since wtype's input does not reach winewayland",
+    "the phantom-liberty DLC variant (`.withDlc [ \"phantom-liberty\" ]`)",
+    "aarch64-linux (outside this record)"
+  ],
+  "knownCaveats": [
+    "two benign `err:` lines every run, because winewayland exposes no EDID (the monitor key holds an empty `BAD_EDID`): `readMonitorEdidFromKey: Failed to get EDID reg key size`, `DXGI: Failed to parse display metadata + colorimetry info, using blank.`"
+  ]
+}

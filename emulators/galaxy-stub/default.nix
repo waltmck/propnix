@@ -15,12 +15,10 @@
 # WINEDLLOVERRIDES — wine's loader resolves them from the exe's own directory first — so a bound stub is
 # the only mechanism that works.
 #
-# NOT A CRASH WORKAROUND. The SDK's RPC init used to fault wine's builtin rpcrt4 (`page fault on write
-# access to 0000000000000010`), which is how these stubs were first discovered. That was an ARM64EC
-# variadic exit-thunk defect in the compiler, fixed by the toolchain backport in emulators/llvm-mingw
-# (RESEARCH §23) — VERIFIED 2026-08-21 by running Prison Architect, the original casualty, with the real
-# Galaxy64.dll/pops_api.dll loaded: it reaches a window with no fault. So nothing here is load-bearing for
-# stability; keep it for the offline guarantee, and do not "fix" a crash that no longer exists.
+# NOT A CRASH WORKAROUND. These stubs are offline policy. The rpcrt4 fault the real SDK hit under
+# wine was an ARM64EC variadic exit-thunk defect in the compiler, fixed by the toolchain backport in
+# emulators/llvm-mingw (RESEARCH §23); the real SDK DLLs load without faulting. Nothing here is
+# load-bearing for stability, so do not "fix" a crash here (docs/research/galaxy-sdk-offline.md).
 #
 # THE TWO EXPORT SHAPES (dumped from the games' real DLLs with winedump -j import). Different SDK builds
 # expose the API differently, so the stub exports the UNION so it is a drop-in for either:
@@ -33,21 +31,20 @@
 # pops_api.dll (Prison Architect): POPS_Initialize/Shutdown/RunCallbacks/AccountLogInWithAuthToken/
 #   AutoStandardTelemetryEnable/LegalGetDocument/LegalGetDocumentsList/GenerateGUID.
 # The 64-bit union is `src/symbols64.txt` (one mangled symbol per line); add a game's extra imports there if
-# a new title needs them. The ABI strategy + the four C bodies each symbol aliases to are documented in
+# a new title needs them. The ABI strategy + the C bodies each symbol aliases to are documented in
 # `src/galaxy_stub.c` (and pops in `src/pops_stub.c`).
 #
 # ARCH. The stub DLLs match the GAME's arch, not the host: a game's Galaxy64.dll is x86_64, so wine's loader
 # resolves the import against x86_64 (even on aarch64/ARM64EC, where the tiny stub then runs emulated — its
 # cost is nil). So these are x86_64 (+ i386) PEs. BOTH hosts wire this in — see lib/default.nix and
-# lib/builders/wine.nix. (It used to be aarch64-only, purely because it happened to build with the ARM64EC
-# toolchain; that made `galaxyStubDlls` a silent no-op on x86_64. See TOOLCHAIN below.)
+# lib/builders/wine.nix.
 #
 # 32-BIT CALLERS CANNOT USE THIS. The whole design rests on one uniform vtable of zero-argument slots
 # standing in for interfaces of unknown arity, which is only ABI-valid where the CALLER cleans the stack.
 # i386 SDK interfaces are __thiscall (callee pops), so such a slot leaves the arguments behind and the
-# caller's next `ret` executes one of them — measured on homeworld-rm, the first i386 title to load
-# Galaxy.dll here (src/galaxy_stub.c has the disassembly and the crash log). lib/backends/wine/defaults.nix
-# therefore refuses `galaxyStubDlls` on i386 titles, which use `online = false` for the offline guarantee.
+# caller's next `ret` executes one of them — measured on homeworld-rm
+# (docs/research/galaxy-sdk-offline.md). lib/backends/wine/defaults.nix therefore refuses
+# `galaxyStubDlls` on i386 titles, which use `online = false` for the offline guarantee.
 # Galaxy.dll is still built: prison-architect (a 64-bit exe) binds a 32-bit copy it never loads.
 #
 # The GalaxyFactory / api:: exports are MSVC-mangled (64-bit uses PEAV/PEBV far-encoding, 32-bit PAV/PBV),
@@ -57,14 +54,11 @@
 # TOOLCHAIN, and why there are two. The stubs are plain C targeting x86_64 + i386 Windows — nothing here
 # is ARM64EC — so ANY mingw cross-compiler can build them. Which one we get depends on the host:
 #   * aarch64: `llvmMingw` already exists there (the ARM64EC toolchain wine/DXVK/vkd3d need), so building
-#     with it is free and keeps the aarch64 output bit-for-bit as it has always been.
+#     with it is free.
 #   * x86_64: that toolchain does NOT exist — `emulators/llvm-mingw` is `llvm-mingw-arm64ec`, a prebuilt
 #     pinned to the aarch64-HOSTED release and grafted with an ARM64EC exit-thunk patch whose clang build
 #     links multi-GB objects. Dragging it in to produce three tiny stubs would be absurd, so the x86_64 leg
 #     uses nixpkgs' ordinary cross-mingw GCC (`pkgsCross.mingwW64` / `pkgsCross.mingw32`), which is cached.
-# Before this, `galaxyStub` was simply absent on x86_64 and `galaxyStubDlls` SILENTLY did nothing there —
-# which quietly invalidated the de-Galaxy claims in several specs (see the knob's own comment in
-# backends/wine/defaults.nix for how that misled diagnosis).
 {
   lib,
   runCommand,
@@ -99,13 +93,14 @@ let
     name = "galaxy-stub-src";
   };
 
-  # llvm-mingw ships the i386 compiler-rt builtins with a broken archive index that DROPS __alloca /
-  # ___chkstk_ms (the same duplicate-member armap bug the toolchain's postFixup already fixes for the
-  # x86_64/aarch64 archives, but NOT i386). The 32-bit CRT's pseudo-relocator references __alloca, so a
-  # naive i686 link fails with `undefined symbol: __alloca`. Reindex a private copy here (reusing the
-  # toolchain's own reindex-ar.py) and link it in a group — contained entirely to this derivation, so it
-  # needs no llvm-mingw rebuild (which would cascade into wine/dxvk/FEX and disrupt other work). Pinned
-  # content-addressed like srcDir above.
+  # A gated GUARD, not a current defect: an llvm-mingw i386 compiler-rt builtins archive with
+  # duplicate member names has an index that DROPS __alloca / ___chkstk_ms (the armap bug the
+  # toolchain's postFixup fixes for the x86_64/aarch64 archives), and the 32-bit CRT's
+  # pseudo-relocator references __alloca, so the i686 link would fail with
+  # `undefined symbol: __alloca`. Should that happen, the build reindexes a private copy (reusing the
+  # toolchain's own reindex-ar.py) and links it in a group — contained to this derivation, with no
+  # llvm-mingw rebuild. The pinned release's archive measures clean, so the path does not fire
+  # (docs/research/llvm-mingw-toolchain.md). Pinned content-addressed like srcDir above.
   reindexPy = builtins.path {
     path = ../llvm-mingw/reindex-ar.py;
     name = "reindex-ar.py";
@@ -161,12 +156,10 @@ runCommand "galaxy-stub"
     ${cc64} -O2 -shared -o "$out/pops_api.dll" ${srcDir}/pops_stub.c
 
     # ── 32-bit stub (Galaxy.dll) — reindex the i386 builtins only if they actually need it ────────────
-    # On the pinned llvm-mingw (20260616 and 20260812 alike) the i386 archive is clean — 150 members, zero
-    # duplicate names, `__alloca` in the armap — and a plain i686 link succeeds, so the workaround is
-    # skipped. Keep it gated rather than
-    # unconditional: re-archiving is not free of risk — doing it to the ARM64EC builtins on this same
-    # toolchain DESTROYS EC symbol resolution, because it flattens the `obj.arm64ec/` member paths
-    # upstream now uses to disambiguate (RESEARCH §22).
+    # Skipped when the archive has no duplicate members (true on the pinned release). Kept gated,
+    # not unconditional: re-archiving is not free of risk — doing it to the ARM64EC builtins on this
+    # same toolchain DESTROYS EC symbol resolution, because it flattens the `obj.arm64ec/` member
+    # paths upstream uses to disambiguate (RESEARCH §22).
     rt_args=()
     ${lib.optionalString useLlvm ''
       i386_rt="$(ls ${toString llvmMingw}/lib/clang/*/lib/windows/libclang_rt.builtins-i386.a | head -1)"
@@ -180,8 +173,8 @@ runCommand "galaxy-stub"
         echo "i386 builtins index is upstream-correct — linking without the reindex workaround"
       fi
     ''}
-    # NB the whole block above is llvm-mingw-specific: it works around a BROKEN ARCHIVE INDEX in that
-    # toolchain's i386 compiler-rt builtins. GCC's mingw32 has no such archive and no such bug, so the
-    # x86_64 leg links straight through with an empty rt_args.
+    # NB the whole block above is llvm-mingw-specific: it guards against a BROKEN ARCHIVE INDEX in
+    # that toolchain's i386 compiler-rt builtins. GCC's mingw32 has no such archive and no such bug,
+    # so the x86_64 leg links straight through with an empty rt_args.
     ${cc32} -O2 -shared -o "$out/Galaxy.dll" ${srcDir}/galaxy_stub.c galaxy32.def "''${rt_args[@]}"
   ''

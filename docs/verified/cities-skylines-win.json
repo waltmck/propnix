@@ -1,0 +1,32 @@
+{
+  "package": "cities-skylines",
+  "version": "1.21.1-f9",
+  "versionSource": "the game's own log (`Game Version: 1.21.1-f9-steam-win`) and the build string on the main menu",
+  "date": "2026-09-03",
+  "verdict": "reaches-menu",
+  "reporter": "waltmck",
+  "host": {
+    "arch": "x86_64-linux",
+    "note": "AMD Radeon RX 7900 XTX (RADV NAVI31). Headless sway (WLR_BACKENDS=headless), iron-lung booted first as the control."
+  },
+  "backend": "wine",
+  "renderer": {
+    "d3d": "dxvk",
+    "path": "D3D11 (level 11.1) → DXVK → Vulkan → RADV on winewayland (tree defaults, no override); 1920x1080 VK_FORMAT_R8G8B8A8_UNORM FIFO swapchain, 4 images"
+  },
+  "note": "The MAIN MENU comes up and animates: the 3D city flyover behind the logo, the \"What's New\" panel, the radio player showing \"Downtown Radio\", \"0 / 5 mods enabled\" and the build string \"1.21.1-f9\" in the corner. Screenshotted out of the compositor across successive captures, each frame different (a live render, not a stuck first frame); the process was still alive when the harness killed it. Booted with the network namespace in place (online = false).",
+  "thisSessionVerified": [
+    "game log: `Game Version: 1.21.1-f9-steam-win`, `API: Steam Type: Steam` (the Steam layer initialised through the gbe_fork shim, which writes `AppData/Roaming/GSE Saves/settings/configs.user.ini`)",
+    "player log: `Direct3D: Version: Direct3D 11.0 [level 11.1] / Renderer: AMD Radeon RX 7900 XTX (RADV NAVI31)`",
+    "netns boot to the main menu prints exactly four complaints, all immediate (curl status 0, not a timeout) and caught: `PopsApi: [CurlCallManager::update] FAIL '…' http status was none of 100, 200, 304: 0`; `ApplicationException … at PopsApi.PopsApiWrapper.EndLegalGetDocumentsList … LegalDocumentLoader`; `Error loading news feed: Cannot connect to destination host`; `Paradox Account not linked to current Steam user account.  [HTTP]`",
+    "default cwd (the game dir) is right: `Files/` content and every `Cities_Data/Managed` assembly load from `C:\\game`"
+  ],
+  "notMeasured": [
+    "`.withAllDlc` in the in-game Content Manager (the four radio-station packs owned, tracks playing): it builds, but has not been booted",
+    "gameplay past the main menu",
+    "aarch64-linux (outside this record)"
+  ],
+  "knownCaveats": [
+    "offline (online = false) the Paradox Mods browser, the news feed and the DLC panel's store links do not work; `.apply { online = true; }` reverts"
+  ]
+}

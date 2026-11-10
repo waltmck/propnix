@@ -94,9 +94,9 @@ pub struct Config {
     pub defaults: Defaults,
     pub seal: Seal,
     /// Env var names the launcher UNSETS before doing anything else — a per-game escape hatch from a user's
-    /// global `PROPNIX_*` that a specific title cannot tolerate (e.g. Skyrim can't survive `PROPNIX_FPS`'s
-    /// forced vsync-off or `PROPNIX_DPI`'s LogPixels stamp, so it lists both). Cleared first, so it wins over
-    /// fact population, `Settings`, and the seal alike.
+    /// global `PROPNIX_*` that a specific title cannot tolerate (e.g. Skyrim can't survive `PROPNIX_DPI`'s
+    /// LogPixels stamp, so it lists it). Cleared first, so it wins over fact population, `Settings`, and
+    /// the seal alike.
     #[serde(rename = "brokenVariables", default)]
     pub broken_variables: Vec<String>,
     /// HKCU (user.reg) overrides re-applied on every launch (e.g. the black window colors).
@@ -137,11 +137,9 @@ pub struct Config {
     #[serde(rename = "setupScript", default)]
     pub setup_script: Option<String>,
     /// Whether this build carries the gbe_fork offline Steam-entitlement shim (steam.emu.enable).
-    /// Currently informational: the shim manages its own identity, and the launcher no longer seats a
-    /// stored SteamID64 into it (that seeding read the credential store as the launching human — which the
-    /// group-ownership contract does not permit on declarative/shared hosts — and never delivered the
-    /// stable identity it was added for). Kept so baked configs stay stable and the shim's presence
-    /// remains visible to future consumers.
+    /// Informational: the shim manages its own identity, and the launcher never reads the credential
+    /// store for one (the group-ownership contract forbids reading it as the launching human). Kept so
+    /// baked configs stay stable and the shim's presence remains visible to consumers.
     #[serde(rename = "steamEmu", default)]
     pub steam_emu: bool,
     /// The baked GL/Vulkan fallback stack (see `FallbackGl`); optional so a pre-existing baked config loads.
@@ -470,11 +468,9 @@ pub struct ThinConfig {
     #[serde(default)]
     pub mangohud: Option<String>,
     /// Whether this build carries the gbe_fork offline Steam-entitlement shim (steam.emu.enable).
-    /// Currently informational: the shim manages its own identity, and the launcher no longer seats a
-    /// stored SteamID64 into it (that seeding read the credential store as the launching human — which the
-    /// group-ownership contract does not permit on declarative/shared hosts — and never delivered the
-    /// stable identity it was added for). Kept so baked configs stay stable and the shim's presence
-    /// remains visible to future consumers.
+    /// Informational: the shim manages its own identity, and the launcher never reads the credential
+    /// store for one (the group-ownership contract forbids reading it as the launching human). Kept so
+    /// baked configs stay stable and the shim's presence remains visible to consumers.
     #[serde(rename = "steamEmu", default)]
     pub steam_emu: bool,
     /// The baked GL/Vulkan fallback stack (see `FallbackGl`); optional so a pre-existing baked config loads.

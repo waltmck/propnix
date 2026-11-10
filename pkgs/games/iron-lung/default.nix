@@ -24,7 +24,6 @@ mkApp (
     # because this game is a single-player submarine-horror short; the exe links no socket library at all.
     online = false;
     # GOG-Windows only (no native Linux build in the GOG Galaxy content system).
-    # the fetcher takes the NUMERIC productId (not the slug); pins verified reproducible (fetchGogGalaxyBuild hdr).
     fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
     # Primary task from goggame-1310178756.info (isPrimary FileTask), x86_64 PE — the real Unity player, not a
     # launcher stub. Full-color icon auto-extracted from its PE resources (icon.auto default).

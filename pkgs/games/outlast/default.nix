@@ -20,12 +20,11 @@ mkApp (
     # references it via config.payloads (config.wine is only forced by the wine backend, so this stays lazy).
     payload = lib.head config.payloads;
 
-    # The genuine Microsoft VC++ 2010 SP1 x64 msvcp100.dll, extracted from the game's OWN bundled redistributable
-    # (license-clean: it ships this runtime for its own use). WHY: OLGame.exe (x86_64) bundles msvcr100.dll beside
-    # itself but NOT msvcp100.dll, so wine supplies msvcp100 from system32 — which on aarch64 is wine's ARM64EC
-    # builtin, whose DllMain access-violates under FEX (verified: `err:module:loader_init "MSVCP100.dll" failed to
-    # initialize, aborting` → the whole process aborts at startup). Only the real MS x64 DLL loads; neither DLL
-    # overrides nor wine's own builtins fix it. Staged over system32 via the `extraSystem32` tuning field.
+    # The genuine Microsoft VC++ 2010 SP1 x64 msvcp100.dll, extracted from the game's OWN bundled
+    # redistributable (license-clean: it ships this runtime for its own use). OLGame.exe (x86_64)
+    # bundles msvcr100.dll beside itself but NOT msvcp100.dll, so wine supplies msvcp100 from
+    # system32 — on aarch64 its ARM64EC builtin, under which the game does not survive startup.
+    # Staged over system32 via the `extraSystem32` tuning field (below).
     #
     # Extraction chain (all deterministic; payload is a fixed FOD): UE3Redist.exe (Epic's UnSetup self-extractor)
     # → vcredist_x64_vs2010sp1.exe (MS self-extractor) → vc_red.cab → F_CENTRAL_msvcp100_x64 (the DLL under its
@@ -49,7 +48,7 @@ mkApp (
           cabextract -F '*msvcp100*' -d cab_out "$cab"
           dll=$(find cab_out -iname 'F_CENTRAL_msvcp100*' | head -1)
           test -n "$dll"
-          # Sanity: must be a PE32+ (x64) image — an MZ header and machine 0x8664 at the PE offset.
+          # Sanity: the extracted file must be a PE image (MZ header).
           head -c2 "$dll" | grep -q 'MZ'
           install -Dm444 "$dll" "$out/msvcp100.dll"
         '';
@@ -66,7 +65,6 @@ mkApp (
     # Steam-SDK class boilerplate (`UOnlineMatchmakingStats`, `SteamMatchmaking`) — engine surface the game
     # never uses, not a multiplayer mode.
     online = false;
-    # the fetcher takes the NUMERIC productId (not the slug); pins verified reproducible (fetchGogGalaxyBuild hdr).
     fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
     # UE3 x86_64 game binary launched DIRECTLY (not the 32-bit OutlastLauncher.exe isPrimary stub, which spawns
     # the game then exits → trips the propnix launcher's primary-child teardown). UE3 resolves content relative
@@ -74,7 +72,7 @@ mkApp (
     # OLGame.exe is the DRM-free build.
     exe = "Binaries/Win64/OLGame.exe";
 
-    # Save: CONFIRMED from the GOG install script (goggame-1207660064.script → savePath
+    # Save: from the GOG install script (goggame-1207660064.script → savePath
     # "{userdocs}/My Games/Outlast"). UE3 (shipping) redirects user config + saves + logs to
     # Documents\My Games\Outlast. Binding the whole folder captures saves + settings together, out to the
     # app's host save dir ($PROPNIX_SAVE_DIR/$PROPNIX_APPID, default …/propnix-saves/outlast).
@@ -85,10 +83,10 @@ mkApp (
       }
     ];
 
-    # Stage the real MS msvcp100.dll (built above) over wine's ARM64EC builtin in system32; fixes the
-    # DLL-init abort at startup. Harmless on x86_64 (a valid x64 DLL). With it, OLGame.exe clears DLL init,
-    # initializes DXVK D3D9, and opens its window (`-nosteam` NOT needed). Otherwise Outlast is well-behaved
-    # on the global wine defaults.
+    # Stage the real msvcp100 (see `msvcp100` above) over wine's builtin in system32. On aarch64
+    # the game exits during startup without it (re-tested 2026-11-08) and reaches its opening
+    # screen with it. Harmless on x86_64 (a valid x64 DLL). Otherwise Outlast is well-behaved on
+    # the global wine defaults.
     wine = {
       extraSystem32."msvcp100.dll" = "${msvcp100}/msvcp100.dll";
     };

@@ -1,0 +1,31 @@
+{
+  "package": "repo",
+  "version": "v0.4.4.3",
+  "versionSource": "the game's own Player.log (`VERSION: v0.4.4.3`); Unity 2022.3.67f2. versions.json pins Steam build 23363152",
+  "date": null,
+  "verdict": "reaches-menu",
+  "reporter": "waltmck",
+  "host": {
+    "arch": "x86_64-linux",
+    "note": "AMD Radeon RX 7900 XTX (RADV NAVI31), per Player.log. An otherwise busy machine: load ~7.6, five other wineservers alive."
+  },
+  "backend": "wine",
+  "renderer": {
+    "d3d": "dxvk",
+    "path": "D3D11 (level 11.1) → DXVK (tree default; the spec sets no d3d override) → Vulkan → RADV"
+  },
+  "note": "The main menu renders: title plus PRIVATE/PUBLIC GAME, JOIN FRIEND, SINGLEPLAYER, TUTORIAL, CUSTOMIZE, SETTINGS, QUIT over the animated truck scene, screenshotted twice from two independent launches. No per-title row was needed; the shared dosdevices overlay is what lets Unity past its first volume-information IOCTL.",
+  "thisSessionVerified": [
+    "Player.log: `Initialize engine version: 2022.3.67f2 (6bedba8691df)`",
+    "Player.log: `GfxDevice: creating device client; threaded=1; jobified=1`",
+    "Player.log: `Direct3D: Version: Direct3D 11.0 [level 11.1]` / `Renderer: AMD Radeon RX 7900 XTX (RADV NAVI31) (ID=0x744c)`",
+    "Player.log: `Begin MonoManager ReloadAssembly` / `- Loaded All Assemblies, in 0.220 seconds`",
+    "Player.log: `VERSION: v0.4.4.3` / `Steam - App ID: 3241660` / `Steam - User ID: 765611…`",
+    "the save bind `AppData/LocalLow/semiwork/REPO` catches every write: `MetaSave.es3`, `SettingsData.es3`, `DefaultKeyBindings.es3`, `CurrentKeyBindings.es3`, `Cache/` and `Player.log` land in `$PROPNIX_SAVE_DIR/repo`"
+  ],
+  "notMeasured": [
+    "gameplay and multiplayer past the main menu",
+    "aarch64-linux (outside this record)"
+  ],
+  "knownCaveats": []
+}

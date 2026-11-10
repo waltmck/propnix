@@ -1,0 +1,35 @@
+{
+  "package": "civilization-6",
+  "version": "15296837",
+  "versionSource": "versions.json Steam pin (app 289070 depots); the run record does not name the build it ran",
+  "date": "2026-09-03",
+  "verdict": "boots",
+  "reporter": "waltmck",
+  "host": {
+    "arch": "x86_64-linux",
+    "note": "AMD Radeon RX 7900 XTX (RADV NAVI31). `nix run .#civilization-6` under a headless sway (WLR_BACKENDS=headless); iron-lung passes the same harness as the control."
+  },
+  "backend": "wine",
+  "renderer": {
+    "d3d": "dxvk",
+    "path": "CivilizationVI.exe (DX11) → DXVK → Vulkan → RADV; CreateDefaultSwapChain 1920x1080 @60, Fullscreen"
+  },
+  "note": "Window, Bink logo movies, the ~2.5-minute intro cinematic, then the front end: the CIVILIZATION VI title card with its legal text and a live `Continue` button, screenshotted. Verified to render, not to play. The run needs `steam.emu.steamStub` (both exes are SteamStub v3.1-wrapped); without it the exe exits with status 53, no window and nothing written anywhere.",
+  "thisSessionVerified": [
+    "Renderer.log: `Renderer::CreateD3DDevice()` → `CreateDefaultSwapChain 1920x1080 @60, Fullscreen`, \"Selected GPU device: AMD Radeon RX 7900 XTX (RADV NAVI31)\"",
+    "UserInterface.log: `ForgeUI started up!` … `ContextBase::Initialize 'StartupScreen' / 'IntroScreen'`, `LOADING ../../../Base/Assets/UI/FrontEnd/IntroScreen.lua`",
+    "Modding.log, ArtDef.log, Lua.log, Database.log and Localization.log all populated",
+    "workingDir is right (the Lua loader resolves `../../../Base/Assets/…` onto real files); the Havok Script and SQLite layers come up; `Cache/Debug{Configuration,Gameplay,Localization}.sqlite` is built on first run",
+    "FiraxisLive logon runs with online = true: `FiraxisLive.log` and `AppData/Roaming/FiraxisLive/<id>/` appear"
+  ],
+  "notMeasured": [
+    "the main menu's Single Player path starting a game",
+    "DLC rulesets showing as owned in the game's own UI (the entitlement projection has never been read back from the game)",
+    "the front end with the network namespace (`.apply { online = false; }`)",
+    "the DX12 exe; aarch64-linux (outside this record)"
+  ],
+  "knownCaveats": [
+    "Rise and Fall and Gathering Storm ride in base depot 289085 with no depot derivation of their own, so the entitlement projection cannot attest them and they are expected to read as unowned (fix: pin their own depots with `dlcAppId` 645402 / 947510)",
+    "`steam.emu.offline` does not affect the SteamStub wrapper (it carries its own copy of Valve's API); flipping it changes nothing, so it stays at its default"
+  ]
+}

@@ -7,16 +7,12 @@
 #      prototype data and rebuilds every sprite atlas on each launch; with these on it writes
 #      `data-cache.dat` (~8 MB) and `atlas-cache.dat` (~1.4 GB with Space Age) into its write-data dir and
 #      reuses them. Both keys ship commented-out and default to false, so this is opt-in per install.
-#      MEASURED on the aarch64 build: both files appear during load and are written IN PLACE (no
-#      `.tmp` + rename), which is what lets the cache dir be redirected by bind rather than by overlay.
 #   2. `[other] check-updates=false` — so the on-launch update check never runs. This is not merely a
 #      preference: the payload is a READ-ONLY Nix store path, so Factorio's updater can never apply an
 #      update anyway — with it enabled, launching pops an "automatic updates / log in to download" dialog
 #      and makes a network request against an immutable install. Only the GOG build HAS this option (the
 #      string is absent from both Steam binaries — Wube compiles the updater out where Steam does the
-#      updating), and setting it on a build that does not support it is harmless: VERIFIED on the Steam
-#      aarch64 build, which reached "Factorio initialised" with the key present and preserved it in the
-#      file rather than rejecting the config.
+#      updating), and setting it is harmless on Steam builds (the key is preserved, not rejected).
 #
 # config.ini lives at %APPDATA%\Factorio\config\config.ini on Windows and ~/.factorio/config/config.ini on
 # Linux (config-path.cfg: `use-system-read-write-data-directories=true`), and the game's `saveBinds` row
@@ -29,13 +25,13 @@
 # update dialog, and a full atlas rebuild. So we SEED one.
 #
 # The seed must be STRUCTURALLY VALID or Factorio rejects it with a "configuration file has invalid
-# contents — reset it?" dialog. A bare `[other]` section is NOT enough (VERIFIED: rejected + logged
-# "Resetting config"). The minimum Factorio accepts is the `[path]` section with its runtime-magic
-# read/write tokens (how it resolves its data dirs) plus our own keys. VERIFIED on a fresh save dir: this
-# seed is accepted (no reset dialog), the game reaches "Factorio initialised", and no update/TLS check
-# runs. Factorio fills in every remaining default and keeps our values when it later rewrites the file (on
-# clean exit), after which the `ini_set` calls below maintain them. The `; version=N` line is a comment
-# Factorio regenerates — not a hard pin (a version bump just migrates).
+# contents — reset it?" dialog. A bare `[other]` section is NOT enough (Factorio logs "Resetting
+# config"). The minimum Factorio accepts is the `[path]` section with its runtime-magic read/write
+# tokens (how it resolves its data dirs) plus our own keys; with it no update/TLS check runs on the
+# first launch. Factorio fills in every remaining default and keeps our values when it later
+# rewrites the file (on clean exit), after which the `ini_set` calls below maintain them. The
+# `; version=N` line is a comment Factorio regenerates — not a hard pin (a version bump just
+# migrates).
 #
 # Env provided by the launcher:
 #   PROPNIX_SAVE_DIR, PROPNIX_APPID  — host save dir = $PROPNIX_SAVE_DIR/$PROPNIX_APPID
@@ -62,9 +58,8 @@ if [ ! -f "$cfg" ]; then
   exit 0
 fi
 
-# PRESERVE THE FILE'S OWN LINE ENDINGS. The Windows build writes CRLF and the Linux build writes LF
-# (MEASURED: 0 CRs in 3030 lines), and both read either — so sniff rather than assume. Hardcoding CRLF here
-# rewrote every line of a Linux-written config on each launch, and the two platforms share one save dir.
+# PRESERVE THE FILE'S OWN LINE ENDINGS (Windows writes CRLF, Linux LF; both read either and share
+# one save dir), so sniff rather than assume.
 if head -c 4096 "$cfg" | grep -q "$(printf '\r')"; then
   INI_CRLF=1
 else

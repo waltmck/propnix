@@ -3,16 +3,13 @@
 # file in `payloads` it emits a user-owned SPARSE stub sized to the original (size metadata, zero data
 # blocks); directories are mirrored; symlinks are preserved. The tree is packed into a reproducible SPARSE tar.
 #
-# WHY THE USER-OWNED MIRROR IS THE POINT, not just the sparseness: propnix's mount namespace maps ONLY the
-# caller's own uid (`propnix-mount`: `uid_map` = "<uid> <uid> 1"), so every root-owned store file inside it
-# reads as `nobody:nogroup` with the store's 0555/0444 modes. A plain overlay over such a lower cannot even
-# reach copy-up — the VFS write check on the LOWER directory fails first. MEASURED on this tree (x86_64,
-# Rust's two depots, `unshare --user --map-root-user --mount` + a bare `lowerdir=…,upperdir=…` overlay):
-# creating a file at the merged ROOT succeeds (the upper root always exists, nothing is copied up), but
-# `touch cfg/client.cfg` and appending to `cfg/keys_default.cfg` both fail EACCES against
-# `dr-xr-xr-x nobody nogroup cfg`. With this skeleton stacked on top, those same writes work — the stub dirs
-# are the caller's own, 0755. So "writable game dir" without a skeleton means "writable game dir ROOT only",
-# which is a trap: shallow writes work and deeper ones fail obscurely.
+# WHY THE USER-OWNED MIRROR IS THE POINT, not just the sparseness: propnix's mount namespace maps
+# ONLY the caller's own uid (`propnix-mount`: `uid_map` = "<uid> <uid> 1"), so every root-owned
+# store file inside it reads as `nobody:nogroup` with the store's 0555/0444 modes, and the VFS write
+# check on the LOWER directory fails before copy-up is ever reached. Without a skeleton only the
+# merged ROOT is writable (the upper root always exists), so shallow writes work and deeper ones
+# fail obscurely; the skeleton's stub dirs are the caller's own, 0755, which makes every depth
+# writable. The EACCES reproduction: docs/research/overlay-cow-from-store.md.
 #
 # IMPORTANT: the tar carries only structure + sizes, NOT the `user.overlay.*` xattrs. The Nix build sandbox's
 # filesystem does not support the `user.*` xattr namespace (`setfattr` → ENOTSUP), so the metacopy/redirect

@@ -11,14 +11,11 @@
 #   nix run .#baba-is-you --extra-sandbox-paths /propnix=/var/lib/propnix   # aarch64-linux or x86_64-linux
 #
 # ── ONE DEPOT, AND WHY THE LINUX ONE ──────────────────────────────────────────────────────────────────
-# App 736260 ships exactly three depots, one per OS, with no DLC at all (`listofdlc` is absent from its
-# appinfo and `dlc.available` below is correspondingly empty):
-#   736261  114 MB  windows
-#   736262  111 MB  macos
-#   736263  113 MB  linux   ← pinned
-# The native build is the obvious choice on both hosts: it removes wine from the aarch64 path entirely
-# (box64 emulates the ELF and bridges the host's real GL/audio libraries) and runs with nothing in the
-# way at all on x86_64. Its payload is one flat tree — `bin64/`, `Data/`, `Assets.dat`, `icon.bmp`.
+# App 736260 ships one depot per OS (736261 windows, 736262 macos, 736263 linux ← pinned) and no DLC
+# (`listofdlc` is absent from its appinfo, so no `dlc.available` is declared). The native build
+# removes wine from the aarch64 path entirely (box64 emulates the ELF and bridges the host's real
+# GL/audio libraries) and runs directly on x86_64. Its payload is one flat tree — `bin64/`, `Data/`,
+# `Assets.dat`, `icon.bmp`.
 {
   lib,
   mkApp,
@@ -40,7 +37,7 @@ mkApp (
     # engine binary is run from the game ROOT, which is propnix's default cwd. That makes the script pure
     # overhead: name the ELF directly and skip a shell (`workingDir` stays null for the same reason).
     exe = "bin64/Chowdren";
-    # Chowdren names its own window: WM_CLASS is the game's TITLE (measured: `xprop WM_CLASS` →
+    # Chowdren names its own window: WM_CLASS is the game's TITLE (`xprop WM_CLASS` →
     # "Baba Is You", "Baba Is You"), not the exe basename the desktop entry would otherwise guess —
     # without this the taskbar ties the icon to the splash only and the game window falls back to the
     # generic one.
@@ -52,16 +49,15 @@ mkApp (
     # size a launcher actually shows, so it makes a poor app icon.
     #
     # The better source is in the payload too. This title ships its art as LOOSE PNGs for modders
-    # (`Data/Sprites/`, 3983 of them) rather than packed — `Assets.dat` turned out to be a table of
-    # compressed blobs, and reversing it proved unnecessary once the loose tree was found. `baba_0_1.png`
-    # is the title character's own 24² sprite, frame 1: a high-contrast silhouette that stays legible
+    # (`Data/Sprites/`, 3983 of them) beside the packed `Assets.dat`. `baba_0_1.png` is the
+    # title character's own 24² sprite, frame 1: a high-contrast silhouette that stays legible
     # down to 16px.
     #
     # IT NEEDS A BACKDROP. The sprite is pure white on transparency (the engine tints sprites through the
     # level palette at runtime), so on its own it is INVISIBLE on any light theme — only the two dark eye
-    # pixels survive, which is exactly what a first attempt produced. So it is composited over the game's
-    # own background colour, read out of `Data/Palettes/default.png` at build time (pixel 1,0 — the dark
-    # navy every default level is drawn on) rather than hardcoded here, so the two always agree.
+    # pixels survive. So it is composited over the game's own background colour, read out of
+    # `Data/Palettes/default.png` at build time (pixel 1,0 — the dark navy every default level is
+    # drawn on) rather than hardcoded here, so the two always agree.
     #
     # TWO SHAPE DETAILS, both forced by the shared pipeline (lib/icons/pipeline.sh), which trims its
     # source and then smooth-resizes it to 460²:
@@ -102,9 +98,7 @@ mkApp (
     # Derived from the binary, not copied from a sibling: `readelf -d` gives the hard needs (libGL,
     # libuuid, libm, libpthread, libc, libdl) and the SDL2 statically linked inside it dlopens the rest by
     # soname — the X11 set below, the audio set, and libudev for controller hotplug. No Vulkan: the
-    # renderer is GL. `zlib` is here because box64 says so: without it the launch logs "Error initializing
-    # native libz.so.1" as it tries to wrap the soname something in the process (the Steam shim's curl)
-    # pulls in.
+    # renderer is GL.
     #
     # `bridgingLibs` = what box64 WRAPS, so it needs the native aarch64 copy to bridge AND the x86_64 one
     # for the guest; `guestLibs` = guest-only. On x86_64 both collapse to the host set.
@@ -139,30 +133,15 @@ mkApp (
 
     steam.emu.libPaths = [ "bin64/libsteam_api.so" ];
 
-    # The shipped libsteam_api.so names STEAMVIDEO_INTERFACE_V003, which the pinned gbe_fork does not serve
-
-    # (its ISteamVideo ladder is V001, V002 and the current V007 — asked of the shim by the oracle, not
-
-    # guessed). Baba is a Chowdren title with no video feature: nothing in it opens ISteamVideo, so the
-
-    # revision is never requested and the game runs (verified in play with the shim). The library carries
-
-    # the accessor merely because its SDK has the family.
-
+    # The shipped libsteam_api.so names STEAMVIDEO_INTERFACE_V003, which the pinned gbe_fork lacks;
+    # this Chowdren title never opens ISteamVideo, so the revision is never requested.
     steam.emu.neverRequested = [ "STEAMVIDEO_INTERFACE_V003" ];
 
     # ── SDL'S VIDEO DRIVER: PINNED TO X11 ───────────────────────────────────────────────────────────────
-    # Without this the game EXITS 1 before drawing anything, and the reason is inherited state rather than
-    # anything about the title: a Wayland session commonly exports `SDL_VIDEODRIVER=wayland` (this host
-    # does), the launcher's seal scrubs only WINE*/FEX_*/BOX64_*/LD_*, so the value reaches the guest and
-    # SDL then reports
-    #     SDL could not be initialized: wayland not available
-    #     Could not open window: wayland not available
-    # and the process gives up. The X11 sonames ARE the ones this build carries (libX11/Xext/Xcursor/Xi/
-    # Xrandr/Xss, all dlopened by soname), so x11 is the backend it can actually use here — the same
-    # setting hollow-knight pins for every thin backend, where the measured reason is that SDL's Wayland
-    # path also trips box64's dynarec. Stating it in the game's `env` beats the inherited value, which is
-    # exactly what makes the launch independent of whoever's session started it.
+    # This build's static SDL2 has no usable Wayland backend: under `SDL_VIDEODRIVER=wayland` (the
+    # launcher's default in a Wayland session) it reports "wayland not available" and exits 1 before
+    # drawing. The X11 sonames are the ones it dlopens (libX11/Xext/Xcursor/Xi/Xrandr/Xss), so the
+    # game's `env` pins x11 over the launcher default.
     env.SDL_VIDEODRIVER = "x11";
 
     # ── SAVES ───────────────────────────────────────────────────────────────────────────────────────────
@@ -172,17 +151,14 @@ mkApp (
     # roots at the ephemeral per-launch view, so binding the propnix save dir at the XDG-relative path is
     # what makes progress persist while the game tree stays read-only.
     #
-    # SAVES AND SETTINGS ARE ROUTED APART, the papers-please/factorio shape. Everything the engine writes
-    # lands in that one directory, but it is two kinds of thing (measured — this is the tree a first run
-    # leaves behind):
-    #   ba.ba, <slot>ba.ba   PROGRESS — `[baba] firsttime=1`, per-level `…_intro`, `Previous=<level>`
-    #   SettingsC.txt        SETTINGS — an INI of keyboard/gamepad bindings, display and audio options,
-    #                        plus a `[savegame] slot/world` pointer, which is "where was I last", i.e.
-    #                        per-machine state rather than progress
-    # A `type = "file"` row redirects the settings file out of the directory that is itself bound, which
-    # no overlay can do (one upper cannot split writes by filename), and makes `create` TOUCH the source
-    # rather than mkdir it. The engine rewrites the file wholesale, so an empty one on a first launch just
-    # reads as "no settings yet".
+    # SAVES AND SETTINGS ARE ROUTED APART, the papers-please/factorio shape. The engine writes two
+    # kinds of thing into that one directory:
+    #   ba.ba, <slot>ba.ba  PROGRESS — `[baba] firsttime=1`, per-level `…_intro`, `Previous=<level>`
+    #   SettingsC.txt       SETTINGS — an INI of bindings, display and audio options, and a
+    #                       `[savegame] slot/world` "where was I last" pointer: per-machine state
+    # A `type = "file"` row redirects the settings file out of the bound directory (one overlay
+    # upper cannot split writes by filename) and makes `create` touch the source rather than mkdir
+    # it; the engine rewrites the file wholesale, so an empty one reads as "no settings yet".
     saveBinds = [
       {
         src = "$PROPNIX_SAVE_DIR/$PROPNIX_APPID";

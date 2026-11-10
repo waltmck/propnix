@@ -19,17 +19,13 @@
 # binaries (it `exec`s ../x64_/factorio or ../arm64/factorio after reading `arch`) — selecting that path
 # would hand box64 a shell script, so both arms name the real ELF directly.
 #
-# THE STEAM PINS ARE ON THE `experimental` BRANCH (2.1.x), deliberately: `bin/arm64/` exists only there.
-# Steam's `public` branch is still 2.0.77, whose Linux depot ships a single `bin/x64/factorio` and no ARM64
-# build — pinning it would delete the aarch64-linux platform. Every Steam row names the same branch, so the
-# platforms move together.
+# THE STEAM PINS ARE ON THE `experimental` BRANCH, deliberately: `bin/arm64/` exists only there; the
+# public branch's Linux depot has no ARM64 build, so pinning it would delete the aarch64-linux
+# platform. Every Steam row names the same branch, so the platforms move together.
 #
-# BUT THE ARM64 BINARY LAGS ITS OWN DEPOT, and that is Wube's doing, not a pinning mistake. MEASURED on the
-# depot whose branch is labelled 2.1.16: `bin/x64_/factorio` reports 2.1.16 and `bin/arm64/factorio` reports
-# 2.1.15 — same manifest, same branch, two engine versions, and the same 2.1.15 in the Space Age depot. They
-# evidently do not rebuild ARM for every release. Since all platforms share ONE save dir (see `saveBinds`),
-# a save written by the x86_64 build can be a minor version ahead of what the ARM64 build will open, and
-# Factorio refuses a save from a newer version. Worth knowing before blaming propnix for a rejected save.
+# Wube does not rebuild the ARM64 binary for every release, so it can lag the x86_64 binary in the
+# same depot. All platforms share ONE save dir (see `saveBinds`) and Factorio refuses a save from a
+# newer version, so an x86_64-written save can be too new for the ARM64 build.
 #
 #   nix run .#factorio                                                          # steam/aarch64-linux (native) on aarch64
 #   nix run '.#factorio.apply { emulatedPlatform = "x86_64-linux"; }'           # steam/linux under box64
@@ -51,7 +47,7 @@ mkApp (
     onLinux = lib.hasSuffix "-linux" config.emulatedPlatform;
     onGog = config.fetcher == "gog";
     # Factorio's user-data (write-data) dir, relative to the home each backend joins onto:
-    #   Windows: %APPDATA%\Factorio   (goggame savePath `{userappdata}/Factorio`; verified at runtime)
+    #   Windows: %APPDATA%\Factorio   (goggame savePath `{userappdata}/Factorio`)
     #   Linux:   ~/.factorio           (config-path.cfg `use-system-read-write-data-directories=true`)
     userData = if onLinux then ".factorio" else "AppData/Roaming/Factorio";
     # The three files Factorio writes into that root once the startup caches are on. Same names on every
@@ -90,20 +86,18 @@ mkApp (
         "bin/x64_/factorio" # NB the underscore: bin/x64/factorio is the arch dispatcher script
       else
         "bin/x64/factorio.exe";
-    # Factorio 2.x names its own window with a reverse-DNS Wayland app_id (measured on the running game:
-    # `hyprctl -j clients` → class=com.factorio.Factorio, xwayland=false), so the exe-derived
-    # StartupWMClass guess ("factorio") matches nothing and the game window loses its icon while the
-    # launcher's splash keeps it. Linux builds only — the Windows build under wine gets wine's
-    # exe-basename class, which IS the derived default.
+    # Factorio 2.x names its own window with a reverse-DNS Wayland app_id (com.factorio.Factorio),
+    # so the exe-derived StartupWMClass guess ("factorio") matches nothing and the game window loses
+    # its icon while the launcher's splash keeps it. Linux builds only — the Windows build under
+    # wine gets wine's exe-basename class, which IS the derived default.
     wmClass = lib.mkIf (lib.hasSuffix "-linux" config.emulatedPlatform) "com.factorio.Factorio";
 
     # Full-color icon: factorio.exe's PE resources top out at 48px (pixelated upscaled) AND the high-res game
     # asset is off-centre in its canvas, so use the 1024px icon Wube ships in the game data via `icon.png` —
     # autocropped + recentred into a crisp, centred hicolor theme + splash png (lib/icons/from-png.nix). The
-    # same relative path exists in every payload this game has — verified against all five pinned trees (GOG
-    # Windows + its Space Age, and the Steam Windows/Linux depots + both Space Age depots), each carrying an
-    # identical 1185524-byte file — so it needs no per-axis branch. The symbolic variant is a vendored gear (Font
-    # Awesome 6 Solid, CC BY 4.0 — attribution in the .svg header).
+    # same relative path exists in every pinned payload, so it needs no per-axis branch. The
+    # symbolic variant is a vendored gear (Font Awesome 6 Solid, CC BY 4.0 — attribution in the .svg
+    # header).
     icon.png = "${lib.head config.payloads}/data/core/graphics/factorio.icon/Assets/factorio.png";
     icon.symbolic = ./factorio-symbolic.svg;
 
@@ -120,12 +114,9 @@ mkApp (
       "bin/x64_/libsteam_api.so"
       "bin/x64/steam_api64.dll"
     ];
-    # Interface revisions are scanned from each shipped library above at build time (the entitlement's
-    # only mechanism), so the weekly pin refresh can carry a Steamworks SDK bump without hand-edits here.
-    # The other half of such a bump — the game's SDK outrunning the pinned shim — is refused by the scan's
-    # build-time gate; its runtime form was a silent exit 73 at "Initializing Steam API" (gbe_fork
-    # report_missing_impl_and_exit), which is how the 2.1.2x bump presented before the gate existed.
-    # Factorio 2.1.2x needs gbe_fork >= 2026_09_27.
+    # Interface revisions are scanned from each shipped library above at build time, so a pin
+    # refresh can carry a Steamworks SDK bump; an SDK newer than the pinned gbe_fork is refused at
+    # build time.
 
     # Save: Factorio's user-data dir (saves + mods + blueprints + config + player-data + log). Both OS
     # layouts bind to the SAME host dir, which is right — the formats are cross-platform, so a save made by
@@ -149,8 +140,7 @@ mkApp (
     # `player-data.json`. That rules out the usual overlay: an overlay has ONE upper, so it cannot route
     # writes by filename — `upper = state` sends the saves to state too, `upper = save` sends the cache
     # back. Binding the files individually is what routes by name, and it is safe here because the engine
-    # writes them IN PLACE (MEASURED at 0.2s polling across a full load: no `.tmp` ever appears, so there
-    # is no rename to hit EBUSY on a bind mountpoint).
+    # writes them IN PLACE (no rename, so nothing hits EBUSY on a bind mountpoint).
     #
     # `type = "file"` is what makes `create` TOUCH the source on first launch instead of mkdir'ing it — a
     # directory there would make Factorio's open() fail obscurely. One declaration serves every platform:
@@ -181,17 +171,17 @@ mkApp (
     # This is the union those dlopens must find. Only ever forced by a thin backend.
     box64 = import ./box64-tuning.nix;
 
-    # box64-SPECIFIC, and measured here: the x86_64 build under box64 dies during init with
+    # box64-SPECIFIC: the x86_64 build under box64 dies during init with
     # `SDLWindow.cpp:190: SDL couldn't be initialized. SDL_Error: wayland not available`, then aborts. The
     # same wall hollow-knight hits — SDL's Wayland backend does not survive box64 — and the same fix: pin
     # SDL to x11 and let XWayland carry it. The NATIVE faces need none of this (the aarch64 build runs
     # straight on Wayland), so this is gated on the backend rather than on the platform.
     env.SDL_VIDEODRIVER = lib.mkIf (config.backend == "box64") "x11";
 
-    # Maintain config.ini before launch — on EVERY platform, because its main job is now the startup
+    # Maintain config.ini before launch — on EVERY platform, because its main job is the startup
     # caches (`cache-prototype-data`, `cache-sprite-atlas`), which cut load time on all four combos. The
     # script also asserts `check-updates=false`, which only the GOG build actually has; setting it on a
-    # Steam build is verified harmless (see setup.sh). Top-level, not a wine knob: the hook runs in the
+    # Steam build is harmless (see setup.sh). Top-level, not a wine knob: the hook runs in the
     # OUTER phase before any prefix or view exists, so the thin backends honour it too.
     setupScript = mkSetupScript {
       name = "factorio-setup";

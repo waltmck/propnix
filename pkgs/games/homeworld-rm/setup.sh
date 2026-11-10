@@ -9,27 +9,21 @@
 # does no `$VAR` expansion, see cities-skylines), and the value we need is the LIVE display size. The HW2/HWRM
 # engine's own answer to that is an options FILE: before it parses argv it seeds its option map with
 # `params = ../commandLine.txt` and immediately loads that file, one option per line, with the same parser
-# argv gets (disassembly cited in wine-tuning.nix). So the file is not a workaround — it is the engine's
-# supported way to supply command-line options that are not on the command line.
+# argv gets (docs/research/homeworld-rm-engine.md). So the file is not a workaround — it is the
+# engine's supported way to supply command-line options that are not on the command line.
 #
-# THE OPTIONS. All three are read by HomeworldRM.exe's video-settings resolver (VA 0x415032), which reads
-# `screenResolutionW`/`screenResolutionH`/`screenFullscreen` from the player profile FIRST and then lets the
-# command line overwrite them — so this is applied EVERY launch and self-corrects across a resolution or
-# monitor change (the same discipline as Skyrim's iSize), and it works on a fresh prefix where no profile
-# exists yet. Their spellings and semantics are from the exe's own code, not from lore:
+# THE OPTIONS. The engine's video-settings resolver reads the player profile FIRST and then lets the
+# command line overwrite it, so writing them EVERY launch self-corrects across a resolution or
+# monitor change and works on a fresh prefix with no profile:
 #
-#   w / h        `cmdline_get_int("w", &v)` / `("h", &v)` at 0x4150f3 / 0x41511e. Clamped to a FLOOR of
-#                1024x768 unless `-forceResolution` is also given. We deliberately do NOT pass
-#                `forceResolution`: the clamp only bites below 1024x768, and on a display that small the
-#                engine's own minimum is the safer answer than a window it may not be able to render.
-#   fullscreen   `cmdline_has("fullscreen")` at 0x4150ca → forces fullscreen on (`windowed` is the opposite
-#                switch, at 0x4150dd). The profile default is already 1, but a profile that has been set
-#                windowed would otherwise give a correctly-sized WINDOW rather than fullscreen; asserting it
-#                every launch is the same call don't-starve's setup.sh makes for Klei's `fullscreen`.
+#   w / h        the size; clamped to a floor of 1024x768 unless `-forceResolution` is also
+#                given. Deliberately NOT passed: below 1024x768 the engine's own minimum is safer.
+#   fullscreen   forces fullscreen on (`windowed` is the opposite switch), so a profile that has
+#                been set windowed still starts fullscreen rather than as a correctly-sized window.
 #
-# FILE FORMAT (parser at 0x7a9822): one option per line; a leading `-`/`+` is optional and stripped; `#` in
-# the first column is a comment; names are matched case-insensitively; a line is `name = value`, `name value`
-# or a bare flag. LF is fine — the reader is `fscanf(" %511[^\n]")`.
+# FILE FORMAT: one option per line; a leading `-`/`+` is optional and stripped; `#` in the first
+# column is a comment; names are matched case-insensitively; a line is `name = value`, `name value`
+# or a bare flag; LF is fine.
 #
 # Env provided by the launcher:
 #   PROPNIX_WIDTH, PROPNIX_HEIGHT — the compositor's primary-output mode, physical px (may be UNSET if the

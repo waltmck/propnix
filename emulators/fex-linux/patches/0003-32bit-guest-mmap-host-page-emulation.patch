@@ -71,7 +71,10 @@ TWO DELIBERATE NARROWINGS, both of them about not answering a request with a dif
 On a 4 KiB host every change here is a no-op: the slack is zero, the rounding is identity, and MapExact's
 alignment test never fires.
 
---- a/Source/Tools/LinuxEmulation/LargePageMap.h
+diff --git a/Source/Tools/LinuxEmulation/LargePageMap.h b/Source/Tools/LinuxEmulation/LargePageMap.h
+new file mode 100644
+index 00000000..cefb504e
+--- /dev/null
 +++ b/Source/Tools/LinuxEmulation/LargePageMap.h
 @@ -0,0 +1,136 @@
 +// SPDX-License-Identifier: MIT
@@ -210,6 +213,8 @@ alignment test never fires.
 +}
 +
 +} // namespace FEX::LargePage
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp
+index 60b0ef19..5bc64d15 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp
 @@ -1,6 +1,7 @@
@@ -217,13 +222,13 @@ alignment test never fires.
  #include "LinuxSyscalls/LinuxAllocator.h"
  #include "LinuxSyscalls/Syscalls.h"
 +#include "LargePageMap.h"
-
+ 
  #include <FEXCore/Utils/MathUtils.h>
  #include <FEXCore/Utils/TypeDefines.h>
-@@ -173,16 +174,28 @@
+@@ -173,16 +174,28 @@ void* MemAllocator32Bit::Mmap(void* addr, size_t length, int prot, int flags, in
    // Remove the MAP_32BIT flag if it exists now
    flags &= ~FEX::HLE::X86_64_MAP_32BIT;
-
+ 
 +  // We are choosing the address here, so it costs nothing to choose one the kernel will accept: a
 +  // MAP_FIXED_NOREPLACE at a 4 KiB-granular address fails with EINVAL on a larger-page host, and the
 +  // retry logic below only treats EEXIST as "try elsewhere", so such a candidate aborts the whole
@@ -249,9 +254,9 @@ alignment test never fires.
 +  if (LowerPage != 0) {
 +    LowerPage = FEXCore::AlignUp(LowerPage, PagesPerHostPage);
    }
-
+ 
    uint64_t UpperPage = LowerPage + PagesLength;
-@@ -230,8 +243,11 @@
+@@ -230,8 +243,11 @@ restart: {
    if (Addr == 0) {
      return AllocateNoHint();
    } else {
@@ -262,10 +267,10 @@ alignment test never fires.
 +    // often not host-page-aligned, which the kernel refuses; MapExact emulates those mappings instead.
 +    void* MappedPtr = FEX::LargePage::MapExact(reinterpret_cast<void*>(PageAddr << FEXCore::Utils::FEX_PAGE_SHIFT),
 +                                               PagesLength << FEXCore::Utils::FEX_PAGE_SHIFT, prot, flags, fd, offset);
-
+ 
      if (MappedPtr != MAP_FAILED) {
        SetUsedPages(PageAddr, PagesLength);
-@@ -522,7 +538,13 @@
+@@ -522,7 +538,13 @@ uint64_t MemAllocator32Bit::Shmdt(const void* shmaddr) {
  class MemAllocatorPassThrough final : public FEX::HLE::MemAllocator {
  public:
    void* Mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset) override {
@@ -280,17 +285,19 @@ alignment test never fires.
      if (Result == ~0ULL) {
        return reinterpret_cast<void*>(-errno);
      }
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+index dae19b75..e3f93158 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
-@@ -19,6 +19,7 @@
- #include <sys/shm.h>
-
+@@ -20,6 +20,7 @@ $end_info$
+ #include <xxhash.h>
+ 
  #include "LinuxSyscalls/Syscalls.h"
 +#include "LargePageMap.h"
  #include "LinuxSyscalls/SignalDelegator.h"
-
+ 
  #include <FEXCore/Debug/InternalThreadState.h>
-@@ -346,68 +347,11 @@
+@@ -349,68 +350,11 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
        }
        LOGMAN_THROW_A_FMT(Is64Bit || (Result >> 32) == 0 || (Result >> 32) == 0xFFFFFFFF, "values must fit to 32 bits");
      } else {
@@ -363,3 +370,4 @@ alignment test never fires.
 +        return reinterpret_cast<void*>(-errno);
        }
      }
+ 

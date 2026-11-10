@@ -57,6 +57,10 @@ pub struct Paths {
     pub runtime: PathBuf, // $XDG_RUNTIME_DIR/propnix/<appid> (the single-instance lock lives here)
     pub dxvk_cache: PathBuf, // cache/dxvk (DXVK_STATE_CACHE_PATH — the shader cache; NOT a log dir)
     pub vkd3d_cache: PathBuf, // cache/vkd3d (VKD3D_SHADER_CACHE_PATH — D3D12 pipeline cache)
+    /// `cache/fex` — FEX's disk cache of JIT-compiled guest blocks (FEX_DISKCACHEPATH), the FEX sibling of
+    /// box64's DynaCache: filled on the first launch, reused on later ones. FEX keys it by its own version
+    /// and the emulated image, and prunes entries from older FEX builds itself.
+    pub fex_cache: PathBuf,
 }
 
 fn env_nonempty(k: &str) -> Option<String> {
@@ -162,6 +166,7 @@ impl Settings {
         let runtime = util::runtime_dir().join("propnix").join(&self.appid);
         let dxvk_cache = cache.join("dxvk");
         let vkd3d_cache = cache.join("vkd3d");
+        let fex_cache = cache.join("fex");
         Paths {
             state,
             wine_state,
@@ -170,6 +175,7 @@ impl Settings {
             runtime,
             dxvk_cache,
             vkd3d_cache,
+            fex_cache,
         }
     }
 }

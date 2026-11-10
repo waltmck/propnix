@@ -36,8 +36,10 @@ Note what is NOT wrong here: the emulator. ConvertNanosecondsToCycles errs long 
 frequency, never short, so a real wait is never cut off early. The defects are entirely in the test's
 choice of measuring clock and its zero-tolerance comparison across clock domains.
 
---- a/FEXCore/unittests/APITests/FutexSpinTest.cpp	2026-09-20 22:12:49.206418593 -0400
-+++ b/FEXCore/unittests/APITests/FutexSpinTest.cpp	2026-09-20 22:12:49.258418035 -0400
+diff --git a/FEXCore/unittests/APITests/FutexSpinTest.cpp b/FEXCore/unittests/APITests/FutexSpinTest.cpp
+index 65f7276f..ac10ad3e 100644
+--- a/FEXCore/unittests/APITests/FutexSpinTest.cpp
++++ b/FEXCore/unittests/APITests/FutexSpinTest.cpp
 @@ -6,16 +6,31 @@
  
  constexpr auto SleepAmount = std::chrono::milliseconds(250);
@@ -74,7 +76,7 @@ choice of measuring clock and its zero-tolerance comparison across clock domains
  }
  
  TEST_CASE("FutexSpin-Sleep-8bit") {
-@@ -26,10 +41,10 @@
+@@ -26,10 +41,10 @@ TEST_CASE("FutexSpin-Sleep-8bit") {
    std::chrono::nanoseconds SleptAmount;
  
    std::thread t([&Test, &SleptAmount, &ActualSpinLoop]() {
@@ -87,7 +89,7 @@ choice of measuring clock and its zero-tolerance comparison across clock domains
      SleptAmount = end - now;
    });
  
-@@ -53,35 +68,41 @@
+@@ -53,35 +68,41 @@ TEST_CASE("FutexSpin-Sleep-8bit") {
  TEST_CASE("FutexSpin-Timed-16bit") {
    uint16_t Test {};
  

@@ -24,6 +24,10 @@ mono-mmap-windows.c / mono-codeman.c: JIT memory must be registered in the proce
 the emulator treats it as x64 bytes: allocate through NtAllocateVirtualMemoryEx with
 MEM_EXTENDED_PARAMETER_EC_CODE and never from an executable heap.
 
+mini-arm64.c prolog: the stack probe for frames over 4 KiB calls `__chkstk_arm64ec` — the EC helper, same
+x15 = size/16 convention — and only when that address is EC code; the `__chkstk` export is the x64-facing
+fast-forward stub, which EC code must never branch to.
+
 mini-arm64.h: ARM64EC reserves x13, x14, x23, x24, x28 and v16-v31 for the emulator (absent from every
 captured CONTEXT, not preserved across x64 code); keep them out of the allocator, x27 is args_reg. The
 dynamic function tables are built from ARM64_RUNTIME_FUNCTION entries: the unwinder reads an EC
@@ -46,9 +50,10 @@ mini-arm64.c, mini.c, cpu-arm64.md: the EC boundary.
     occupies s0 AND s1, so no register-to-register order is safe.
   * Thunks live in EC-marked code manager memory and are cached per shape.
 
-exceptions-arm64.c: UWOP_ALLOC_L for prologs allocating more than 512 KiB (the 4-byte alloc_l unwind
-code; the same change as the mono fork's MR 236, which wine-mono 11.2.0 predates — drop this hunk on the
-next wine-mono bump).
+exceptions-arm64.c: the growable function tables are registered from ARM64_RUNTIME_FUNCTION entries
+(the mini-arm64.h type mapping above; the two RtlAddGrowableFunctionTable calls take the table as a
+plain pointer), and the vectored handler and mono_arch_ip_from_context read the PC through
+MONO_WIN32_CONTEXT_PC.
 
 Not handled: varargs p/invoke signatures (a trap with a warning at thunk creation).
 
@@ -60,9 +65,12 @@ runtime's own safepoints; SuspendThread is never called on a running thread) or 
 on conditional back-edges (propnix emulators/fex/patches/0003). This build takes the first and keeps the
 policy runtime-selectable (MONO_THREADS_SUSPEND). configure defaults hybrid on only for X86|AMD64 hosts,
 so the flag is explicit. Investigation and measurements: docs/research/mono-arm64ec.md.
+
+diff --git a/configure.ac b/configure.ac
+index cc8c5ea93..e8314ad19 100644
 --- a/configure.ac
 +++ b/configure.ac
-@@ -190,6 +190,14 @@
+@@ -190,6 +190,14 @@ case "$host" in
  
  		# Windows 7 or later is required
  		WIN32_CPPFLAGS="-DWINVER=0x0601 -D_WIN32_WINNT=0x0601 -D_WIN32_IE=0x0501 -D_UNICODE -DUNICODE -DWIN32_THREADS -DFD_SETSIZE=1024"
@@ -77,7 +85,7 @@ so the flag is explicit. Investigation and measurements: docs/research/mono-arm6
  		CPPFLAGS="$CPPFLAGS $WIN32_CPPFLAGS"
  		WIN32_LDFLAGS="-lbcrypt -lmswsock -lws2_32 -lole32 -loleaut32 -lpsapi -lversion -ladvapi32 -lwinmm -lkernel32 -lntdll -liphlpapi"
  		LDFLAGS="$LDFLAGS $WIN32_LDFLAGS"
-@@ -4307,7 +4315,7 @@
+@@ -4307,7 +4315,7 @@ case "$host" in
  		BTLS_SUPPORTED=no
  		BTLS_PLATFORM=arm
  		;;
@@ -86,10 +94,11 @@ so the flag is explicit. Investigation and measurements: docs/research/mono-arm6
  		TARGET=ARM64;
  		arch_target=arm64;
  		BTLS_SUPPORTED=no
-diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/cpu-arm64.md mono/mono/mini/cpu-arm64.md
+diff --git a/mono/mini/cpu-arm64.md b/mono/mini/cpu-arm64.md
+index 9d8636faa..59f8b362c 100644
 --- a/mono/mini/cpu-arm64.md
 +++ b/mono/mini/cpu-arm64.md
-@@ -81,24 +81,24 @@
+@@ -81,24 +81,24 @@ rcompare: src1:f src2:f len:12
  arglist: src1:i len:12
  setlret: src1:i src2:i len:12
  check_this: src1:b len:4
@@ -132,7 +141,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/cpu-arm64.md mono/mono/mini/
  
  tailcall: len:255 clob:c # FIXME len
  tailcall_membase: src1:b len:255 clob:c # FIXME len
-@@ -376,9 +376,9 @@
+@@ -376,9 +376,9 @@ icompare_imm: src1:i len:12
  
  long_conv_to_ovf_i4_2: dest:i src1:i src2:i len:36
  
@@ -145,10 +154,11 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/cpu-arm64.md mono/mono/mini/
  dyn_call: src1:i src2:i len:216 clob:c
  
  # This is different from the original JIT opcodes
-diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/exceptions-arm64.c mono/mono/mini/exceptions-arm64.c
+diff --git a/mono/mini/exceptions-arm64.c b/mono/mini/exceptions-arm64.c
+index 557774ee9..fde29f6a9 100644
 --- a/mono/mini/exceptions-arm64.c
 +++ b/mono/mini/exceptions-arm64.c
-@@ -136,7 +136,7 @@
+@@ -136,7 +136,7 @@ static LONG CALLBACK seh_vectored_exception_handler(EXCEPTION_POINTERS* ep)
  				 * restore_stack will restore stack protection and then
  				 * resume control to the saved stack_restore_ctx */
  				mono_sigctx_to_monoctx (ctx, &jit_tls->stack_restore_ctx);
@@ -157,7 +167,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/exceptions-arm64.c mono/mono
  			}
  		} else {
  			info.handled = FALSE;
-@@ -716,7 +716,7 @@
+@@ -716,7 +716,7 @@ mono_arch_unwindinfo_insert_range_in_table (const gpointer code_block, gsize blo
  				// Allocate new growable handle table for entry.
  				g_assert_checked (new_entry->handle == NULL);
  				DWORD result = RtlAddGrowableFunctionTable (&new_entry->handle,
@@ -166,40 +176,15 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/exceptions-arm64.c mono/mono
  									new_entry->rt_funcs_max_count, new_entry->begin_range, new_entry->end_range);
  				g_assert (!result);
  
-@@ -765,6 +765,20 @@
+@@ -778,6 +778,7 @@ push_unwind_op4 (PUNWIND_INFO unwindinfo, guint32 op)
  	DEBUG_UWOP ("UNWIND OP: %x\n", op);
  }
  
 +/* alloc_l: 11100000'xxxxxxxx'xxxxxxxx'xxxxxxxx — allocate x*16 bytes, x < 2^24 (frames above 512 KiB) */
-+static void
-+push_unwind_op4 (PUNWIND_INFO unwindinfo, guint32 op)
-+{
-+	unwindinfo->code_count+=4;
-+	g_assert (unwindinfo->code_count <= MONO_MAX_UNWIND_CODES);
-+	unwindinfo->unwind_codes[MONO_MAX_UNWIND_CODES - unwindinfo->code_count] = op >> 24;
-+	unwindinfo->unwind_codes[MONO_MAX_UNWIND_CODES - unwindinfo->code_count + 1] = op >> 16;
-+	unwindinfo->unwind_codes[MONO_MAX_UNWIND_CODES - unwindinfo->code_count + 2] = op >> 8;
-+	unwindinfo->unwind_codes[MONO_MAX_UNWIND_CODES - unwindinfo->code_count + 3] = op;
-+	unwindinfo->xdata.CodeWords = (unwindinfo->code_count + 3) >> 2;
-+	DEBUG_UWOP ("UNWIND OP: %x\n", op);
-+}
-+
  static void
  initialize_unwind_info_internal_ex (GSList *unwind_ops, PUNWIND_INFO unwindinfo)
  {
-@@ -843,8 +857,10 @@
- 						push_unwind_op1 (unwindinfo, UWOP_ALLOC_S | (alloc_amount >> 4));
- 					else if ((alloc_amount & 0xffff800f) == 0)
- 						push_unwind_op2 (unwindinfo, UWOP_ALLOC_M | (alloc_amount >> 4));
-+					else if ((alloc_amount & 0xf000000f) == 0)
-+						push_unwind_op4 (unwindinfo, UWOP_ALLOC_L | (alloc_amount >> 4));
- 					else
--						g_assert_not_reached (); // TODO: UWOP_ALLOC_L
-+						g_assert_not_reached ();
- 					prev_when = unwind_op_data->when;
- 					prev_cfa_ofs = unwind_op_data->val;
- 					break;
-@@ -1117,7 +1133,7 @@
+@@ -1132,7 +1133,7 @@ mono_arch_unwindinfo_insert_rt_func_in_table (const gpointer code, gsize code_si
  			g_free (found_entry->rt_funcs);
  			found_entry->rt_funcs = new_rt_funcs;
  			DWORD result = RtlAddGrowableFunctionTable (&found_entry->handle,
@@ -208,7 +193,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/exceptions-arm64.c mono/mono
  								found_entry->rt_funcs_max_count, found_entry->begin_range, found_entry->end_range);
  			g_assert (!result);
  		}
-@@ -1453,7 +1469,7 @@
+@@ -1468,7 +1469,7 @@ mono_arch_ip_from_context (void *sigctx)
  	g_assert_not_reached ();
  	return NULL;
  #elif defined(HOST_WIN32)
@@ -217,7 +202,8 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/exceptions-arm64.c mono/mono
  #else
  	return (gpointer)UCONTEXT_REG_PC (sigctx);
  #endif
-diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.c mono/mono/mini/mini-arm64.c
+diff --git a/mono/mini/mini-arm64.c b/mono/mini/mini-arm64.c
+index dc809bc43..4fdc81377 100644
 --- a/mono/mini/mini-arm64.c
 +++ b/mono/mini/mini-arm64.c
 @@ -17,6 +17,7 @@
@@ -228,7 +214,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.c mono/mono/mini/
  #include "cpu-arm64.h"
  #include "ir-emit.h"
  #include "aot-runtime.h"
-@@ -249,9 +250,16 @@
+@@ -249,9 +250,16 @@ mono_arch_cpu_init (void)
  {
  }
  
@@ -245,7 +231,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.c mono/mono/mini/
  #if defined(TARGET_IOS) || defined(TARGET_WATCHOS) || defined(TARGET_OSX)
  	ios_abi = TRUE;
  #endif
-@@ -327,6 +335,726 @@
+@@ -327,6 +335,726 @@ mono_arm_emit_imm64 (guint8 *code, int dreg, gint64 imm)
  	return emit_imm64 (code, dreg, imm);
  }
  
@@ -972,7 +958,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.c mono/mono/mini/
  /*
   * emit_imm_template:
   *
-@@ -1355,7 +2083,6 @@
+@@ -1366,7 +2094,6 @@ get_call_info (MonoMemPool *mp, MonoMethodSignature *sig)
  	cinfo->gr = 0;
  	cinfo->fr = 0;
  	cinfo->stack_usage = 0;
@@ -980,7 +966,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.c mono/mono/mini/
  	/* Parameters */
  	if (sig->hasthis)
  		add_general (cinfo, cinfo->args + 0, 8, FALSE);
-@@ -2111,8 +2838,14 @@
+@@ -2122,8 +2849,14 @@ mono_arch_get_global_int_regs (MonoCompile *cfg)
  
  	/* r28 is reserved for cfg->arch.args_reg */
  	/* r27 is reserved for the imt argument */
@@ -996,7 +982,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.c mono/mono/mini/
  
  	return regs;
  }
-@@ -2212,9 +2945,9 @@
+@@ -2223,9 +2956,9 @@ mono_arch_allocate_vars (MonoCompile *cfg)
  	offset += 16;
  
  	if (cinfo->stack_usage) {
@@ -1009,7 +995,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.c mono/mono/mini/
  	}
  
  	if (cfg->method->save_lmf) {
-@@ -4262,6 +4995,16 @@
+@@ -4273,6 +5006,16 @@ mono_arch_output_basic_block (MonoCompile *cfg, MonoBasicBlock *bb)
  
  			call = (MonoCallInst*)ins;
  			const MonoJumpInfoTarget patch = mono_call_to_patch (call);
@@ -1026,7 +1012,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.c mono/mono/mini/
  			code = emit_call (cfg, code, patch.type, patch.target);
  			code = emit_move_return_value (cfg, code, ins);
  			break;
-@@ -4272,6 +5015,13 @@
+@@ -4283,6 +5026,13 @@ mono_arch_output_basic_block (MonoCompile *cfg, MonoBasicBlock *bb)
  		case OP_FCALL_REG:
  		case OP_RCALL_REG:
  		case OP_VCALL2_REG:
@@ -1040,7 +1026,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.c mono/mono/mini/
  			code = mono_arm_emit_blrx (code, sreg1);
  			code = emit_move_return_value (cfg, code, ins);
  			break;
-@@ -4320,7 +5070,7 @@
+@@ -4331,7 +5081,7 @@ mono_arch_output_basic_block (MonoCompile *cfg, MonoBasicBlock *bb)
  				g_assert (sreg1 != ARMREG_IP1);
  				g_assert (sreg1 != ARMREG_LR);
  				g_assert (sreg1 != ARMREG_SP);
@@ -1049,7 +1035,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.c mono/mono/mini/
  				if ((sreg1 << 1) & MONO_ARCH_CALLEE_SAVED_REGS) {
  					arm_movx (code, branch_reg, sreg1);
  				} else {
-@@ -4335,7 +5085,7 @@
+@@ -4346,7 +5096,7 @@ mono_arch_output_basic_block (MonoCompile *cfg, MonoBasicBlock *bb)
  				g_assert (ins->inst_basereg != ARMREG_IP1);
  				g_assert (ins->inst_basereg != ARMREG_LR);
  				g_assert (ins->inst_basereg != ARMREG_SP);
@@ -1058,7 +1044,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.c mono/mono/mini/
  				code = emit_ldrx (code, branch_reg, ins->inst_basereg, ins->inst_offset);
  				break;
  
-@@ -4348,7 +5098,7 @@
+@@ -4359,7 +5109,7 @@ mono_arch_output_basic_block (MonoCompile *cfg, MonoBasicBlock *bb)
  			// at least for larger values of stack_usage.
  			for (int i = 0; i < call->stack_usage; i += sizeof (target_mgreg_t)) {
  				code = emit_ldrx (code, ARMREG_LR, ARMREG_SP, i);
@@ -1067,7 +1053,41 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.c mono/mono/mini/
  			}
  
  			/* Restore registers */
-diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.h mono/mono/mini/mini-arm64.h
+@@ -5000,7 +5750,17 @@ mono_arch_emit_prolog (MonoCompile *cfg)
+ 
+ 		if (!pChkstk) {
+ 			HMODULE hntdll = GetModuleHandleW (L"ntdll");
++#ifdef __arm64ec__
++			/* The `__chkstk` export is the x64-facing fast-forward stub (x64 bytes); EC code uses the EC
++			 * helper, which takes the same x15 = frame size / 16. Only an EC-code address may be called here. */
++			pChkstk = GetProcAddress (hntdll, "__chkstk_arm64ec");
++			if (pChkstk && !arm64ec_is_ec_code (pChkstk)) {
++				g_warning ("ntdll's __chkstk_arm64ec is not EC code; large frames will not be probed");
++				pChkstk = NULL;
++			}
++#else
+ 			pChkstk = GetProcAddress (hntdll, "__chkstk");
++#endif
+ 		}
+ 
+ 		arm_stpx_pre (code, ARMREG_FP, ARMREG_LR, ARMREG_SP, -prealloc);
+@@ -5008,9 +5768,11 @@ mono_arch_emit_prolog (MonoCompile *cfg)
+ 		mono_emit_unwind_op_offset (cfg, code, ARMREG_FP, (- prealloc) + 0);
+ 		mono_emit_unwind_op_offset (cfg, code, ARMREG_LR, (- prealloc) + 8);
+ 
+-		code = emit_imm (code, ARMREG_R15, (cfg->stack_offset - prealloc) / 16);
+-		code = emit_imm64 (code, ARMREG_IP0, (guint64)pChkstk);
+-		code = emit_blrx (code, ARMREG_IP0);
++		if (pChkstk) {
++			code = emit_imm (code, ARMREG_R15, (cfg->stack_offset - prealloc) / 16);
++			code = emit_imm64 (code, ARMREG_IP0, (guint64)pChkstk);
++			code = emit_blrx (code, ARMREG_IP0);
++		}
+ 		arm_ldpx (code, ARMREG_FP, ARMREG_LR, ARMREG_SP, 0);
+ 
+ 		code = emit_subx_sp_imm (code, cfg->stack_offset - prealloc);
+diff --git a/mono/mini/mini-arm64.h b/mono/mini/mini-arm64.h
+index 1e113f399..3c4f92d4b 100644
 --- a/mono/mini/mini-arm64.h
 +++ b/mono/mini/mini-arm64.h
 @@ -17,6 +17,13 @@
@@ -1084,15 +1104,18 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.h mono/mono/mini/
  #include <signal.h>
  
  typedef void MONO_SIG_HANDLER_SIGNATURE ((*MonoW32ExceptionHandler));
-@@ -45,6 +52,7 @@
+@@ -45,9 +52,9 @@ LONG CALLBACK seh_handler(EXCEPTION_POINTERS* ep);
  #define UWOP_SAVE_FPLR 0x40
  #define UWOP_SAVE_FPLR_X 0x80
  #define UWOP_ALLOC_M 0xc000
 +#define UWOP_ALLOC_L 0xe0000000
  #define UWOP_SAVE_REGP 0xc800
  #define UWOP_SAVE_REG 0xd000
+-#define UWOP_ALLOC_L 0xe0000000
  #define UWOP_SET_FP 0xe1
-@@ -104,6 +112,20 @@
+ #define UWOP_NOP 0xe3
+ #define UWOP_END 0xe4
+@@ -105,6 +112,20 @@ typedef struct {
  #define MONO_ARCH_INIT_TOP_LMF_ENTRY(lmf)
  
  /* Parameters used by the register allocator */
@@ -1113,7 +1136,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.h mono/mono/mini/
  /* r0..r7, r9..r14 (r15 is the imt/rgctx reg) */
  #define MONO_ARCH_CALLEE_REGS 0xfeff
  /* r19..r28 */
-@@ -111,6 +133,8 @@
+@@ -112,6 +133,8 @@ typedef struct {
  
  /* v16/v17 is reserved for a scratch reg */
  #define MONO_ARCH_CALLEE_FREGS 0xfffc00ff
@@ -1122,7 +1145,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.h mono/mono/mini/
  /* v8..v15 */
  #define MONO_ARCH_CALLEE_SAVED_FREGS 0xff00
  
-@@ -215,6 +239,10 @@
+@@ -216,6 +239,10 @@ typedef struct {
  #define MONO_ARCH_HAVE_OP_TAILCALL_MEMBASE 1
  #define MONO_ARCH_HAVE_OP_TAILCALL_REG 1
  #define MONO_ARCH_RGCTX_REG ARMREG_R15
@@ -1133,10 +1156,39 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-arm64.h mono/mono/mini/
  #define MONO_ARCH_IMT_REG MONO_ARCH_RGCTX_REG
  #define MONO_ARCH_VTABLE_REG ARMREG_R0
  #define MONO_ARCH_HAVE_GENERALIZED_IMT_TRAMPOLINE 1
-diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini.c mono/mono/mini/mini.c
+diff --git a/mono/mini/mini-codegen.c b/mono/mini/mini-codegen.c
+index 414d48a8a..d2d17d3a0 100644
+--- a/mono/mini/mini-codegen.c
++++ b/mono/mini/mini-codegen.c
+@@ -176,7 +176,7 @@ mono_regstate_alloc_int (MonoRegState *rs, regmask_t allow)
+ {
+ 	regmask_t mask = allow & rs->ifree_mask;
+ 
+-#if defined(__x86_64__) && defined(__GNUC__)
++#if defined(__x86_64__) && !defined(__arm64ec__) && defined(__GNUC__)
+  {
+ 	guint64 i;
+ 
+diff --git a/mono/mini/mini-windows.c b/mono/mini/mini-windows.c
+index ffde9695d..e504b2e19 100644
+--- a/mono/mini/mini-windows.c
++++ b/mono/mini/mini-windows.c
+@@ -301,8 +301,8 @@ thread_timer_expired (HANDLE thread)
+ 	if (GetThreadContext (thread, &context)) {
+ 		guchar *ip;
+ 
+-#ifdef _M_ARM64
+-		ip = (guchar *) context.Pc;
++#if defined(_M_ARM64) || defined(_M_ARM64EC)
++		ip = (guchar *) MONO_WIN32_CONTEXT_PC (&context);
+ #elif defined(_WIN64)
+ 		ip = (guchar *) context.Rip;
+ #else
+diff --git a/mono/mini/mini.c b/mono/mini/mini.c
+index 0e097fa55..7b050a6ad 100644
 --- a/mono/mini/mini.c
 +++ b/mono/mini/mini.c
-@@ -2136,6 +2136,12 @@
+@@ -2136,6 +2136,12 @@ mono_postprocess_patches_after_ji_publish (MonoCompile *cfg)
  	}
  }
  
@@ -1149,7 +1201,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini.c mono/mono/mini/mini.c
  void
  mono_codegen (MonoCompile *cfg)
  {
-@@ -2144,6 +2150,7 @@
+@@ -2144,6 +2150,7 @@ mono_codegen (MonoCompile *cfg)
  	guint8 *code;
  	MonoMemoryManager *code_mem_manager;
  	guint unwindlen = 0;
@@ -1157,7 +1209,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini.c mono/mono/mini/mini.c
  
  	if (mono_using_xdebug)
  		/*
-@@ -2217,6 +2224,10 @@
+@@ -2217,6 +2224,10 @@ mono_codegen (MonoCompile *cfg)
  	if (!cfg->compile_aot)
  		unwindlen = mono_arch_unwindinfo_init_method_unwind_info (cfg);
  #endif
@@ -1168,7 +1220,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini.c mono/mono/mini/mini.c
  
  	if (cfg->method->dynamic) {
  		/* Allocate the code into a separate memory pool so it can be freed */
-@@ -2228,15 +2239,18 @@
+@@ -2228,15 +2239,18 @@ mono_codegen (MonoCompile *cfg)
  
  		if (mono_using_xdebug)
  			/* See the comment for cfg->code_domain */
@@ -1190,7 +1242,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini.c mono/mono/mini/mini.c
  	if (cfg->thunk_area) {
  		cfg->thunks_offset = cfg->code_size + unwindlen;
  		cfg->thunks = code + cfg->thunks_offset;
-@@ -2248,6 +2262,10 @@
+@@ -2248,6 +2262,10 @@ mono_codegen (MonoCompile *cfg)
  	g_free (cfg->native_code);
  	cfg->native_code = code;
  	code = cfg->native_code + cfg->code_len;
@@ -1201,57 +1253,11 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini.c mono/mono/mini/mini.c
    
  	/* g_assert (((int)cfg->native_code & (MONO_ARCH_CODE_ALIGNMENT - 1)) == 0); */
  	mono_postprocess_patches (cfg);
-diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-codegen.c mono/mono/mini/mini-codegen.c
---- a/mono/mini/mini-codegen.c
-+++ b/mono/mini/mini-codegen.c
-@@ -176,7 +176,7 @@
- {
- 	regmask_t mask = allow & rs->ifree_mask;
- 
--#if defined(__x86_64__) && defined(__GNUC__)
-+#if defined(__x86_64__) && !defined(__arm64ec__) && defined(__GNUC__)
-  {
- 	guint64 i;
- 
-diff -ruN /var/lib/games/mono-ec/pristine/mono/mini/mini-windows.c mono/mono/mini/mini-windows.c
---- a/mono/mini/mini-windows.c
-+++ b/mono/mini/mini-windows.c
-@@ -301,8 +301,8 @@
- 	if (GetThreadContext (thread, &context)) {
- 		guchar *ip;
- 
--#ifdef _M_ARM64
--		ip = (guchar *) context.Pc;
-+#if defined(_M_ARM64) || defined(_M_ARM64EC)
-+		ip = (guchar *) MONO_WIN32_CONTEXT_PC (&context);
- #elif defined(_WIN64)
- 		ip = (guchar *) context.Rip;
- #else
-diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/monobitset.c mono/mono/utils/monobitset.c
---- a/mono/utils/monobitset.c
-+++ b/mono/utils/monobitset.c
-@@ -286,7 +286,7 @@
- 			 : "=r" (r) : "g" (mask)); 
- 	 return nth_bit + r;
-  }
--#elif defined(__x86_64) && defined(__GNUC__)
-+#elif defined(__x86_64) && !defined(__arm64ec__) && defined(__GNUC__)
-  {
- 	guint64 r;
- 
-@@ -314,7 +314,7 @@
- 	__asm__("bsfl %1,%0\n\t"
- 			: "=r" (r) : "rm" (mask));
- 	return r;
--#elif defined(__x86_64) && defined(__GNUC__)
-+#elif defined(__x86_64) && !defined(__arm64ec__) && defined(__GNUC__)
- 	guint64 r;
- 
- 	__asm__("bsfq %1,%0\n\t"
-diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-codeman.c mono/mono/utils/mono-codeman.c
+diff --git a/mono/utils/mono-codeman.c b/mono/utils/mono-codeman.c
+index 91ece8cf7..27ab839eb 100644
 --- a/mono/utils/mono-codeman.c
 +++ b/mono/utils/mono-codeman.c
-@@ -68,7 +68,7 @@
+@@ -68,7 +68,7 @@ static const MonoCodeManagerCallbacks *code_manager_callbacks;
  #define MAX_WASTAGE 32
  #define MIN_BSIZE 32
  
@@ -1260,7 +1266,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-codeman.c mono/mono/ut
  #define ARCH_MAP_FLAGS MONO_MMAP_32BIT
  #else
  #define ARCH_MAP_FLAGS 0
-@@ -206,6 +206,10 @@
+@@ -206,6 +206,10 @@ mono_codeman_allocation_type (MonoCodeManager const *cman)
  {
  #ifdef FORCE_MALLOC
  	return CODE_FLAG_MALLOC;
@@ -1271,7 +1277,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-codeman.c mono/mono/ut
  #else
  	return cman->dynamic ? CODE_FLAG_MALLOC : CODE_FLAG_MMAP;
  #endif
-@@ -367,7 +371,7 @@
+@@ -367,7 +371,7 @@ mono_code_manager_invalidate (MonoCodeManager *cman)
  {
  	CodeChunk *chunk;
  
@@ -1280,10 +1286,11 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-codeman.c mono/mono/ut
  	int fill_value = 0xcc; /* x86 break */
  #else
  	int fill_value = 0x2a;
-diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-context.c mono/mono/utils/mono-context.c
+diff --git a/mono/utils/mono-context.c b/mono/utils/mono-context.c
+index 47b2deadc..9d982a10b 100644
 --- a/mono/utils/mono-context.c
 +++ b/mono/utils/mono-context.c
-@@ -158,7 +158,7 @@
+@@ -158,7 +158,7 @@ mono_monoctx_to_sigctx (MonoContext *mctx, void *sigctx)
  #endif
  }
  
@@ -1292,7 +1299,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-context.c mono/mono/ut
  
  #include <mono/utils/mono-context.h>
  
-@@ -521,11 +521,59 @@
+@@ -521,11 +521,59 @@ mono_monoctx_to_sigctx (MonoContext *mctx, void *ctx)
  #include <windows.h>
  #endif
  
@@ -1352,7 +1359,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-context.c mono/mono/ut
  #elif defined(HOST_WIN32)
  	CONTEXT *context = (CONTEXT*)sigctx;
  
-@@ -564,6 +612,8 @@
+@@ -564,6 +612,8 @@ mono_monoctx_to_sigctx (MonoContext *mctx, void *sigctx)
  	memcpy (UCONTEXT_GREGS (sigctx), mctx->regs, sizeof (host_mgreg_t) * 31);
  	UCONTEXT_REG_SET_PC (sigctx, (gpointer)mctx->pc);
  	UCONTEXT_REG_SET_SP (sigctx, mctx->regs [ARMREG_SP]);
@@ -1361,10 +1368,11 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-context.c mono/mono/ut
  #elif defined(HOST_WIN32)
  	CONTEXT *context = (CONTEXT*)sigctx;
  
-diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-context.h mono/mono/utils/mono-context.h
+diff --git a/mono/utils/mono-context.h b/mono/utils/mono-context.h
+index 7eb3a45bf..1f0f6e412 100644
 --- a/mono/utils/mono-context.h
 +++ b/mono/utils/mono-context.h
-@@ -246,7 +246,7 @@
+@@ -246,7 +246,7 @@ typedef struct {
  
  #define MONO_ARCH_HAS_MONO_CONTEXT 1
  
@@ -1373,7 +1381,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-context.h mono/mono/ut
  
  #include <mono/arch/amd64/amd64-codegen.h>
  
-@@ -495,6 +495,20 @@
+@@ -495,6 +495,20 @@ typedef struct {
  #define MONO_CONTEXT_GET_BP(ctx) (gpointer)(gsize)((ctx)->regs [ARMREG_FP])
  #define MONO_CONTEXT_GET_SP(ctx) (gpointer)(gsize)((ctx)->regs [ARMREG_SP])
  
@@ -1394,10 +1402,11 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-context.h mono/mono/ut
  #if defined (HOST_TVOS)
  
  #define MONO_CONTEXT_GET_CURRENT(ctx) do { \
-diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-memory-model.h mono/mono/utils/mono-memory-model.h
+diff --git a/mono/utils/mono-memory-model.h b/mono/utils/mono-memory-model.h
+index de71af7ef..f93b853e1 100644
 --- a/mono/utils/mono-memory-model.h
 +++ b/mono/utils/mono-memory-model.h
-@@ -49,7 +49,7 @@
+@@ -49,7 +49,7 @@ enum {
  #define LOAD_BARRIER mono_memory_read_barrier ()
  #define STORE_BARRIER mono_memory_write_barrier ()
  
@@ -1406,10 +1415,11 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-memory-model.h mono/mo
  /*
  Both x86 and amd64 follow the SPO memory model:
  -Loads are not reordered with other loads
-diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-mmap-windows.c mono/mono/utils/mono-mmap-windows.c
+diff --git a/mono/utils/mono-mmap-windows.c b/mono/utils/mono-mmap-windows.c
+index a7612ad75..46bd82672 100644
 --- a/mono/utils/mono-mmap-windows.c
 +++ b/mono/utils/mono-mmap-windows.c
-@@ -79,6 +79,37 @@
+@@ -79,6 +79,37 @@ mono_setmmapjit (int flag)
  	/* Ignored on HOST_WIN32 */
  }
  
@@ -1447,7 +1457,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-mmap-windows.c mono/mo
  void*
  mono_valloc (void *addr, size_t length, int flags, MonoMemAccountType type)
  {
-@@ -90,7 +121,7 @@
+@@ -90,7 +121,7 @@ mono_valloc (void *addr, size_t length, int flags, MonoMemAccountType type)
  	int prot = mono_mmap_win_prot_from_flags (flags);
  	/* translate the flags */
  
@@ -1456,7 +1466,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-mmap-windows.c mono/mo
  
  	mono_account_mem (type, (ssize_t)length);
  
-@@ -101,7 +132,7 @@
+@@ -101,7 +132,7 @@ void*
  mono_valloc_aligned (size_t length, size_t alignment, int flags, MonoMemAccountType type)
  {
  	int prot = mono_mmap_win_prot_from_flags (flags);
@@ -1465,7 +1475,7 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-mmap-windows.c mono/mo
  	char *aligned;
  
  	if (!mem)
-@@ -112,7 +143,7 @@
+@@ -112,7 +143,7 @@ mono_valloc_aligned (size_t length, size_t alignment, int flags, MonoMemAccountT
  
  	aligned = mono_aligned_address (mem, length, alignment);
  
@@ -1474,7 +1484,30 @@ diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/mono-mmap-windows.c mono/mo
  	g_assert (aligned);
  
  	mono_account_mem (type, (ssize_t)length);
-diff -ruN /var/lib/games/mono-ec/pristine/mono/utils/valgrind.h mono/mono/utils/valgrind.h
+diff --git a/mono/utils/monobitset.c b/mono/utils/monobitset.c
+index ecbe76cd5..e2c74a599 100644
+--- a/mono/utils/monobitset.c
++++ b/mono/utils/monobitset.c
+@@ -286,7 +286,7 @@ my_g_bit_nth_lsf (gsize mask, gint nth_bit)
+ 			 : "=r" (r) : "g" (mask)); 
+ 	 return nth_bit + r;
+  }
+-#elif defined(__x86_64) && defined(__GNUC__)
++#elif defined(__x86_64) && !defined(__arm64ec__) && defined(__GNUC__)
+  {
+ 	guint64 r;
+ 
+@@ -314,7 +314,7 @@ my_g_bit_nth_lsf_nomask (gsize mask)
+ 	__asm__("bsfl %1,%0\n\t"
+ 			: "=r" (r) : "rm" (mask));
+ 	return r;
+-#elif defined(__x86_64) && defined(__GNUC__)
++#elif defined(__x86_64) && !defined(__arm64ec__) && defined(__GNUC__)
+ 	guint64 r;
+ 
+ 	__asm__("bsfq %1,%0\n\t"
+diff --git a/mono/utils/valgrind.h b/mono/utils/valgrind.h
+index e5c3e246d..aa08c010b 100644
 --- a/mono/utils/valgrind.h
 +++ b/mono/utils/valgrind.h
 @@ -130,7 +130,7 @@

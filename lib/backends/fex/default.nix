@@ -30,7 +30,7 @@
   mangohud,
   mkPatchedExes,
   mkThinBuild,
-  # nixpkgs FEX-Emu (bin/FEXInterpreter); aarch64-only scope attr, null on x86_64 (FEX emulates x86 ON
+  # emulators/fex-linux (bin/FEX); aarch64-only scope attr, null on x86_64 (FEX emulates x86 ON
   # ARM64 — there is no x86_64-host build, which is what `brokenSystems` below reports).
   fexInterpreter ? null,
 }:
@@ -113,7 +113,7 @@
       inherit cfg enabledDlc executables;
       block = {
         backend = "fex";
-        emulator = if fexInterpreter != null then "${fexInterpreter}/bin/FEXInterpreter" else null;
+        emulator = if fexInterpreter != null then "${fexInterpreter}/bin/FEX" else null;
         # Guest libraries, in resolution order: the game trees first in mount-priority order (their
         # bundled .so's — UnityPlayer.so, a shipped OpenAL — win over the system copies, and a DLC's copy
         # wins over the base's just as it does in the union), then FEX's thunks, then the declared guest

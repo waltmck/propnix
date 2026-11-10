@@ -105,7 +105,7 @@ propnix/
 │   └── presets/default.nix        # unity.framePacing / unity.fullscreen fragments + mergeTuning
 ├── emulators/                     # first-class, game-independent, pinned translation layers
 │   ├── wine-hangover/             # arm64ec wine (aarch64) / native wine (x86_64) — same source
-│   ├── fex/                       # FEX-2607 ARM64EC DLLs (HODLL64) + wowbox64 (box64 -DWOW64=ON, HODLL)
+│   ├── fex/                       # FEX-2611 ARM64EC DLLs (HODLL64) + wowbox64 (box64 -DWOW64=ON, HODLL)
 │   ├── box64-latest.nix           # regular box64 for x86_64 Linux guests (thin backend)
 │   ├── fex-linux/                 # FEXInterpreter for i386|x86_64 LINUX guests + our large-host-page
 │   │                              #   and 32-bit-guest patches (the `fex` thin backend; D12)

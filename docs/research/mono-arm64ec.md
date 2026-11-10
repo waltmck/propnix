@@ -43,7 +43,7 @@ and EC lives at the boundaries:
   support libraries (SDL3, FAudio, FNA3D, FNAMF, monodx, WPF natives, btls) as arm64ec; `mono.make`
   fills the arm64ec runtime slot with the x86_64 build on purpose. The mono fork
   (gitlab.winehq.org/mono/mono, branch wine-mono) landed the ARM64-Windows port Jan–Jun 2026
-  (MRs 176, 195, 215, 218, 229, 236, 237). wine-mono 11.2.0 (2026-06-17), the version the pinned
+  (MRs 176, 195, 215, 218, 229, 236, 237). wine-mono 11.2.0 (2026-06-17), the version the originally pinned
   Hangover compiles in, predates the last two merges; the PoC uses 11.3.0's source and class
   libraries together.
 - Unity's fork (github.com/Unity-Technologies/mono): same mono 6.13.0 base; `mini-arm64.c` differs
@@ -172,7 +172,7 @@ matches, and FEX "resumes" through its never-initialised `RestartJump` buffer. T
 never run x64 code (wine enters mscoree's `_CorExeMain` directly for a CLR image), so every managed
 null check hit this. The x64 runtime's threads have JIT'd and hold a real guard page, which is why the
 same test passes there. Fix = require a non-zero guard page:
-`emulators/fex/patches/0002-jit-guard-page-needs-a-guard-page.patch` (not yet wired into
+`emulators/fex/patches/0002-jit-guard-page-needs-a-guard-page.patch` (the `JITGuardPage != 0` check; upstream from FEX-2611, so the patch no longer exists) (not yet wired into
 `emulators/fex/default.nix` — doing so rebuilds fexdlls and every prefix). Verified through the
 incremental FEX tree `/var/lib/games/fex-build` (`build-ec.sh`, ~20 s per rebuild; `nix develop
 .#legacyPackages.aarch64-linux.fexdlls` supplies the toolchain) with the DLL dropped into the test
@@ -236,6 +236,16 @@ JIT compilation: `exceptions-arm64.c` `initialize_unwind_info_internal_ex` had a
 assertion for a prolog allocating more than 512 KiB (`UWOP_ALLOC_M` covers 15 bits of 16-byte units).
 Some SE method has such a frame. Not EC-specific — the mono fork's ARM64-Windows port would assert on
 real Windows ARM64 too. Implemented the 3-byte `alloc_l` opcode (`11100000'x[24]`, x = size/16).
+
+### wine-mono 11.3.0: the stack probe
+
+wine-mono 11.3.0 carries the mono fork's MR 237, whose prolog probes frames over 4 KiB by calling the
+`__chkstk` ntdll export it resolves with GetProcAddress. Under ARM64EC that export is the x64-facing
+fast-forward stub, so the first large frame ends in an illegal instruction inside ntdll (Space Engineers:
+"fatal error in the mono runtime" followed by wine's "Unhandled illegal instruction" at an ntdll address,
+before the main menu). The patch routes the probe to `__chkstk_arm64ec`, the EC helper with the same
+x15 = size/16 convention, and emits no probe when that address is not EC code — the fix the Unity
+runtimes carry (unity-mono-arm64ec.md). 11.2.0 predates MR 237, so the earlier pin never hit it.
 
 ### 2026-11-07 — Space Engineers, attempt 2: main menu, world load, then Havok
 
@@ -350,7 +360,7 @@ hosts, `--enable-cooperative-suspend`, the FEX guard-page patch wired in, diagno
   the ARM64EC build is installed as `bin/libmono-2.0-x86_64.dll` (the name mscoree asks for). Guards: machine
   `IMAGE_FILE_MACHINE_ARM64EC` + CHPE metadata (llvm-readobj), size ≤ 8 MB after `arm64ec-w64-mingw32-strip`
   (a fully stripped runtime passes the whole harness). `lib/default.nix` passes `llvmMingw` on aarch64 only.
-- `emulators/fex/patches/0002-jit-guard-page-needs-a-guard-page.patch`: picked up automatically (every file under
+- `emulators/fex/patches/0002-jit-guard-page-needs-a-guard-page.patch` (the `JITGuardPage != 0` check; upstream from FEX-2611, so the patch no longer exists): picked up automatically (every file under
   patches/ is applied).
 - `emulators/wine-mono/tests/`: the harness sources and how to run them (not CI).
 - Diagnostics left in the runtime: `MONO_ARM64EC_DEBUG=1` prints every exit/entry thunk's address range (and the

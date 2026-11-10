@@ -25,35 +25,48 @@ this was brought up as research:
   8. SyscallsSMCTracking.cpp GuestMmap: emulate the guest ld.so's sub-host-page file-backed MAP_FIXED of
      each shared-library PT_LOAD (anon-back the host-page span, pread the segment bytes, preserve
      neighbour fragments), since ELF only guarantees vaddr == offset mod 4 KiB.
+  9. Allocator.cpp GetHostVABits: the host-VA probe maps the top GUEST page of each candidate range with
+     MAP_FIXED_NOREPLACE, an address that is never host-aligned on a larger page, so every probe EINVALs
+     and FEX aborts before any guest runs. Probe with one host page.
 
 Verified: x86_64 Linux ELFs, static and dynamically linked, run correctly and stably on a 16 KiB host.
 
---- a/Source/Tools/LinuxEmulation/VDSO_Emulation.cpp
-+++ b/Source/Tools/LinuxEmulation/VDSO_Emulation.cpp
-@@ -820,6 +820,12 @@
-       auto PageSize = sysconf(_SC_PAGESIZE);
-       PageSize = PageSize > 0 ? PageSize : FEXCore::Utils::FEX_PAGE_SIZE;
-
-+      // propnix 16K-host: MAP_FIXED_NOREPLACE requires a host-page-aligned address, and
-+      // VDSOSize/VDSOHint are only 4K-aligned. On a 16K host every attempt EINVALs and the
-+      // top-down scan spins for ~2^33 iterations (the hang). Snap both to the host page.
-+      Mapping.VDSOSize = (Mapping.VDSOSize + PageSize - 1) & ~(static_cast<uint64_t>(PageSize) - 1);
-+      VDSOHint &= ~(static_cast<uint64_t>(PageSize) - 1);
-+
-       // Scan top down and try to allocate a location
-       void* VDSOPointerBase {};
-       do {
+diff --git a/External/jemalloc_glibc/pregen/include/jemalloc/internal/jemalloc_internal_defs.h b/External/jemalloc_glibc/pregen/include/jemalloc/internal/jemalloc_internal_defs.h
+index 51d4815f..cbfcdc33 100644
 --- a/External/jemalloc_glibc/pregen/include/jemalloc/internal/jemalloc_internal_defs.h
 +++ b/External/jemalloc_glibc/pregen/include/jemalloc/internal/jemalloc_internal_defs.h
 @@ -190,7 +190,7 @@
  /* #undef LG_QUANTUM */
-
+ 
  /* One page is 2^LG_PAGE bytes. */
 -#define LG_PAGE 12
 +#define LG_PAGE 16
-
+ 
  /* Maximum number of regions in a slab. */
  /* #undef CONFIG_LG_SLAB_MAXREGS */
+diff --git a/FEXCore/Source/Utils/Allocator.cpp b/FEXCore/Source/Utils/Allocator.cpp
+index 51962232..0bed80b5 100644
+--- a/FEXCore/Source/Utils/Allocator.cpp
++++ b/FEXCore/Source/Utils/Allocator.cpp
+@@ -121,10 +121,13 @@ FEX_DEFAULT_VISIBILITY size_t GetHostVABits() {
+     // Instead, try allocating the page at the top of the range.
+     // If this succeeds OR the page is reported as already existing,
+     // we know we're in valid VA space. Otherwise, we must go lower.
+-    void* Addr = reinterpret_cast<void*>((1ULL << Bits) - FEXCore::Utils::FEX_PAGE_SIZE);
+-    void* Ptr = ::mmap(Addr, FEXCore::Utils::FEX_PAGE_SIZE, PROT_NONE, MAP_FIXED_NOREPLACE | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++    // The probe is one HOST page: MAP_FIXED_NOREPLACE needs a host-page-aligned address, and the top guest
++    // page of a range is not one on a host whose page is larger than the guest's.
++    static const size_t HostPageSize = [] { const long p = sysconf(_SC_PAGESIZE); return p > 0 ? static_cast<size_t>(p) : FEXCore::Utils::FEX_PAGE_SIZE; }();
++    void* Addr = reinterpret_cast<void*>((1ULL << Bits) - HostPageSize);
++    void* Ptr = ::mmap(Addr, HostPageSize, PROT_NONE, MAP_FIXED_NOREPLACE | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+     if (Ptr != (void*)~0ULL) {
+-      ::munmap(Ptr, FEXCore::Utils::FEX_PAGE_SIZE);
++      ::munmap(Ptr, HostPageSize);
+     }
+     if (Ptr != (void*)~0ULL || errno == EEXIST) {
+       HostVABits = Bits;
+diff --git a/FEXCore/include/FEXCore/Utils/AllocatorHooks.h b/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
+index c4cadf40..1aef65d0 100644
 --- a/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
 +++ b/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
 @@ -8,6 +8,7 @@
@@ -64,10 +77,10 @@ Verified: x86_64 Linux ELFs, static and dynamically linked, run correctly and st
  #else
  #define NTDDI_VERSION 0x0A000005
  #include <memoryapi.h>
-@@ -138,7 +139,33 @@
+@@ -139,7 +140,33 @@ inline bool VirtualProtect(void* Ptr, size_t Size, ProtectOptions options) {
      prot |= PROT_EXEC;
    }
-
+ 
 -  return ::mprotect(Ptr, Size, prot) == 0;
 +  // propnix 16K-host support: the kernel rejects mprotect on a region not aligned to the
 +  // host page size, so a 4K-granular guest/JIT request (e.g. a code-buffer guard page)
@@ -97,14 +110,16 @@ Verified: x86_64 Linux ELFs, static and dynamically linked, run correctly and st
 +  const size_t L = (End - A + HostPageSize - 1) & ~(HostPageSize - 1);
 +  return ::mprotect(reinterpret_cast<void*>(A), L, prot) == 0;
  }
-
+ 
  inline void VirtualTHPControl(const void* Ptr, size_t Size, THPControl Control) {
+diff --git a/Source/Tools/FEXInterpreter/ELFCodeLoader.h b/Source/Tools/FEXInterpreter/ELFCodeLoader.h
+index 5850c83d..6dd6238c 100644
 --- a/Source/Tools/FEXInterpreter/ELFCodeLoader.h
 +++ b/Source/Tools/FEXInterpreter/ELFCodeLoader.h
-@@ -134,60 +134,59 @@
+@@ -134,60 +134,59 @@ class ELFCodeLoader final : public FEX::CodeLoader {
      const bool DynELF = Elf.ehdr.e_type == ET_DYN;
      const bool NeedsLateBRKMap = BrkBase && !DynELF;
-
+ 
 +    // propnix 16K-host ELF loader: a 16K host cannot MAP_FIXED a segment whose vaddr is
 +    // 4K-aligned-but-not-16K-aligned (the common case). Instead of mapping each PT_LOAD
 +    // file-backed at its exact vaddr, reserve the whole image span as ONE RWX anonymous
@@ -138,17 +153,17 @@ Verified: x86_64 Linux ELFs, static and dynamically linked, run correctly and st
        if (BrkBase) {
 -        BrkLoadBase = LoadBase + (TotalSize - BRK_SIZE);
 +        BrkLoadBase = LoadBase + (SpanSize - BRK_SIZE);
-+      }
+       }
 +    } else {
 +      auto rv = Handler->GuestMmap(Thread, reinterpret_cast<void*>(SpanBase), SpanEnd - SpanBase,
 +                                   PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
 +      if (FEX::HLE::HasSyscallError((uintptr_t)rv)) {
 +        LogMan::Msg::EFmt("propnix: failed to reserve ELF image span @ {:x}", SpanBase);
 +        return {};
-       }
++      }
 +      LoadBase = 0;
      }
-
+ 
      for (const auto& Header : Elf.phdrs) {
        if (Header.p_type != PT_LOAD) {
          continue;
@@ -198,11 +213,13 @@ Verified: x86_64 Linux ELFs, static and dynamically linked, run correctly and st
          }
        }
      }
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+index 94bdd378..dae19b75 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
-@@ -59,8 +59,15 @@
+@@ -86,8 +86,15 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
      auto FaultBase = FEXCore::AlignDown(FaultAddress, FEXCore::Utils::FEX_PAGE_SIZE);
-
+ 
      auto UnprotectRegionCallback = [](uintptr_t Start, uintptr_t Length) {
 -      auto rv = mprotect((void*)Start, Length, PROT_READ | PROT_WRITE);
 -      LogMan::Throw::AFmt(rv == 0, "mprotect({}, {}) failed", Start, Length);
@@ -216,12 +233,12 @@ Verified: x86_64 Linux ELFs, static and dynamically linked, run correctly and st
 +      auto rv = mprotect((void*)A, L, PROT_READ | PROT_WRITE);
 +      LogMan::Throw::AFmt(rv == 0, "mprotect({}, {}) failed", A, L);
      };
-
+ 
      if (Entry->second.Flags.Shared) {
-@@ -111,6 +118,21 @@
+@@ -138,6 +145,21 @@ void SyscallHandler::MarkGuestExecutableRange(FEXCore::Core::InternalThreadState
    const auto Base = Start & FEXCore::Utils::FEX_PAGE_MASK;
    const auto Top = FEXCore::AlignUp(Start + Length, FEXCore::Utils::FEX_PAGE_SIZE);
-
+ 
 +  // propnix 16K-host: SMC read-protects code pages so guest writes to code fault and are
 +  // re-translated. The host kernel can only mprotect on host-page boundaries, so a code
 +  // range that is 4K-granular must be snapped OUT to the enclosing host page(s). This
@@ -240,23 +257,23 @@ Verified: x86_64 Linux ELFs, static and dynamically linked, run correctly and st
    {
      if (SMCChecks != FEXCore::Config::CONFIG_SMC_MTRACK) {
        return;
-@@ -154,13 +176,13 @@
+@@ -181,13 +203,13 @@ void SyscallHandler::MarkGuestExecutableRange(FEXCore::Core::InternalThreadState
                const auto MirroredBase = std::max(VMAOffsetBase, OffsetBase);
                const auto MirroredSize = std::min(OffsetTop, VMAOffsetTop) - MirroredBase;
-
+ 
 -              auto rv = mprotect((void*)(MirroredBase - VMAOffsetBase + VMABase), MirroredSize, PROT_READ);
 +              auto rv = SnapProtectRO(MirroredBase - VMAOffsetBase + VMABase, MirroredSize);
                LogMan::Throw::AFmt(rv == 0, "mprotect({}, {}) failed", MirroredBase, MirroredSize);
              }
            } while ((VMA = VMA->ResourceNextVMA));
-
+ 
          } else if (Mapping->second.Prot.Writable) {
 -          int rv = mprotect((void*)ProtectBase, ProtectSize, PROT_READ);
 +          int rv = SnapProtectRO(ProtectBase, ProtectSize);
-
+ 
            LogMan::Throw::AFmt(rv == 0, "mprotect({}, {}) failed", ProtectBase, ProtectSize);
          }
-@@ -283,9 +305,68 @@
+@@ -327,9 +349,68 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
        }
        LOGMAN_THROW_A_FMT(Is64Bit || (Result >> 32) == 0 || (Result >> 32) == 0xFFFFFFFF, "values must fit to 32 bits");
      } else {
@@ -327,9 +344,9 @@ Verified: x86_64 Linux ELFs, static and dynamically linked, run correctly and st
 +        }
        }
      }
-
-@@ -425,7 +506,16 @@
-
+ 
+@@ -473,7 +554,16 @@ uint64_t SyscallHandler::GuestMprotect(FEXCore::Core::InternalThreadState* Threa
+ 
    {
      auto lk = FEXCore::GuardSignalDeferringSection(VMATracking.Mutex, Thread);
 -    Result = ::mprotect(addr, len, prot);
@@ -346,65 +363,69 @@ Verified: x86_64 Linux ELFs, static and dynamically linked, run correctly and st
      if (Result == -1) {
        return -errno;
      }
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
+index 69e10b3d..33472502 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
-@@ -169,7 +169,11 @@
+@@ -167,7 +167,11 @@ void ThreadManager::SetThreadName(const char* name) {
    pthread_setname_np(pthread_self(), name);
  }
-
+ 
 -constexpr size_t CALLRET_STACK_ALLOC_SIZE = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + 2 * FEXCore::Utils::FEX_PAGE_SIZE;
 +// propnix 16K-host: guard pages are a full host page each (see ThreadStateObject::CallRetGuardSize),
 +// so the total allocation depends on the runtime host page size.
 +static size_t CallRetStackAllocSize() {
 +  return FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + 2 * FEX::HLE::ThreadStateObject::CallRetGuardSize();
 +}
-
- FEX::HLE::ThreadStateObject* ThreadManager::CreateThread(uint64_t InitialRIP, uint64_t StackPointer, const FEXCore::Core::CPUState* NewThreadState,
-                                                          uint64_t ParentTID, FEX::HLE::ThreadStateObject* InheritThread) {
-@@ -185,15 +189,15 @@
-
+ 
+ FEX::HLE::ThreadStateObject*
+ ThreadManager::CreateThread(const FEXCore::Core::CPUState* NewThreadState, uint64_t ParentTID, FEX::HLE::ThreadStateObject* InheritThread) {
+@@ -183,15 +187,15 @@ ThreadManager::CreateThread(const FEXCore::Core::CPUState* NewThreadState, uint6
+ 
    // Allocate the call-ret stack with guard pages on both sides
    auto AllocBase =
 -    reinterpret_cast<uint64_t>(FEXCore::Allocator::mmap(nullptr, CALLRET_STACK_ALLOC_SIZE, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
 +    reinterpret_cast<uint64_t>(FEXCore::Allocator::mmap(nullptr, CallRetStackAllocSize(), PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-
+ 
 -  FEXCore::Allocator::VirtualName("FEXMem_CallRetStacks", reinterpret_cast<void*>(AllocBase), CALLRET_STACK_ALLOC_SIZE);
 +  FEXCore::Allocator::VirtualName("FEXMem_CallRetStacks", reinterpret_cast<void*>(AllocBase), CallRetStackAllocSize());
-
+ 
    // Disable HUGEPAGE on callret stacks.
 -  FEXCore::Allocator::VirtualTHPControl(reinterpret_cast<void*>(AllocBase), CALLRET_STACK_ALLOC_SIZE, FEXCore::Allocator::THPControl::Disable);
 +  FEXCore::Allocator::VirtualTHPControl(reinterpret_cast<void*>(AllocBase), CallRetStackAllocSize(), FEXCore::Allocator::THPControl::Disable);
-
+ 
    // Set the base used for invalidation to the start past the guard pages
 -  ThreadStateObject->Thread->CallRetStackBase = reinterpret_cast<void*>(AllocBase + FEXCore::Utils::FEX_PAGE_SIZE);
 +  ThreadStateObject->Thread->CallRetStackBase = reinterpret_cast<void*>(AllocBase + FEX::HLE::ThreadStateObject::CallRetGuardSize());
    ::mprotect(ThreadStateObject->Thread->CallRetStackBase, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE, PROT_READ | PROT_WRITE);
    Frame->State.callret_sp = ThreadStateObject->GetCallRetStackInfo().DefaultLocation;
-
-@@ -295,7 +299,7 @@
+ 
+@@ -293,7 +297,7 @@ void ThreadManager::HandleThreadDeletion(FEX::HLE::ThreadStateObject* Thread, bo
    }
-
+ 
    // Free the call-ret stack
 -  FEXCore::Allocator::munmap(reinterpret_cast<void*>(Thread->GetCallRetStackInfo().AllocationBase), CALLRET_STACK_ALLOC_SIZE);
 +  FEXCore::Allocator::munmap(reinterpret_cast<void*>(Thread->GetCallRetStackInfo().AllocationBase), CallRetStackAllocSize());
-
+ 
    // If the LDT segment exists then deallocate it.
    if (Thread->ldt_entry_count) {
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
+index dfcd4b0e..96282a07 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
-@@ -8,6 +8,8 @@
-
+@@ -8,6 +8,8 @@ $end_info$
+ 
  #pragma once
-
+ 
 +#include <unistd.h>
 +
  #include "Common/SHMStats.h"
-
+ 
  #include "LinuxSyscalls/Types.h"
-@@ -115,10 +117,19 @@
+@@ -115,10 +117,19 @@ struct ThreadStateObject : public FEXCore::Allocator::FEXAllocOperators {
      uint64_t DefaultLocation;
    };
-
+ 
 +  // propnix 16K-host: the call-ret stack guard pages must each be a full host page so that
 +  // CallRetStackBase (AllocBase + one guard) is host-page-aligned; otherwise the RW mprotect
 +  // that commits the stack is rejected with EINVAL on a 16K kernel and every guest CALL faults.
@@ -421,3 +442,21 @@ Verified: x86_64 Linux ELFs, static and dynamically linked, run correctly and st
 +    return {Base - Guard, Base + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + Guard,
              Base + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE / 4};
    }
+ 
+diff --git a/Source/Tools/LinuxEmulation/VDSO_Emulation.cpp b/Source/Tools/LinuxEmulation/VDSO_Emulation.cpp
+index 50a9bae5..9418029f 100644
+--- a/Source/Tools/LinuxEmulation/VDSO_Emulation.cpp
++++ b/Source/Tools/LinuxEmulation/VDSO_Emulation.cpp
+@@ -822,6 +822,12 @@ VDSOMapping LoadVDSOThunks(FEXCore::Core::InternalThreadState* Thread, bool Is64
+       auto PageSize = sysconf(_SC_PAGESIZE);
+       PageSize = PageSize > 0 ? PageSize : FEXCore::Utils::FEX_PAGE_SIZE;
+ 
++      // propnix 16K-host: MAP_FIXED_NOREPLACE requires a host-page-aligned address, and
++      // VDSOSize/VDSOHint are only 4K-aligned. On a 16K host every attempt EINVALs and the
++      // top-down scan spins for ~2^33 iterations (the hang). Snap both to the host page.
++      Mapping.VDSOSize = (Mapping.VDSOSize + PageSize - 1) & ~(static_cast<uint64_t>(PageSize) - 1);
++      VDSOHint &= ~(static_cast<uint64_t>(PageSize) - 1);
++
+       // Scan top down and try to allocate a location
+       void* VDSOPointerBase {};
+       do {

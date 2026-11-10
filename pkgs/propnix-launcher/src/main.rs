@@ -221,6 +221,9 @@ fn run_outer(
         let _ = std::fs::create_dir_all(&paths.dxvk_cache);
         let _ = std::fs::create_dir_all(&paths.vkd3d_cache);
     }
+    if cfg.backend == "winefex" {
+        let _ = std::fs::create_dir_all(&paths.fex_cache);
+    }
 
     // Single-instance guard. The lock is held by this outer process (CLOEXEC → not inherited past here).
     let wm_class = Path::new(&cfg.exe)

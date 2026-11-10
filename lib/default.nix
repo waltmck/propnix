@@ -272,7 +272,7 @@ pkgs.lib.makeScope pkgs.newScope (
       prebuilt = llvmMingwPrebuilt;
     };
     llvmMingw = llvmMingwPatched;
-    fexdlls = callPackage ../emulators/fex { }; # FEX-2607 from source + ./patches (+ box64 wowbox64)
+    fexdlls = callPackage ../emulators/fex { }; # FEX-2611 from source + ./patches (+ box64 wowbox64)
 
     # FEXInterpreter — the LINUX x86_64/i386-on-aarch64 emulator for the THIN FEX backend (distinct from
     # fexdlls, the Windows/ARM64EC DLLs wine loads).

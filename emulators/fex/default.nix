@@ -1,8 +1,8 @@
 # FEX's Windows emulator DLLs, built FROM SOURCE. WINE loads these to run foreign-architecture PE code
 # under an ARM64 host:
-#   * libarm64ecfex.dll  — x86_64 guests. FEX-Emu/FEX @ FEX-2607, arm64ec triple.
+#   * libarm64ecfex.dll  — x86_64 guests. FEX-Emu/FEX @ FEX-2611, arm64ec triple.
 #                          IMAGE_FILE_MACHINE_ARM64EC (0xA641).
-#   * libwow64fex.dll     — i386 guests. FEX-Emu/FEX @ FEX-2607, aarch64 triple.
+#   * libwow64fex.dll     — i386 guests. FEX-Emu/FEX @ FEX-2611, aarch64 triple.
 #                          IMAGE_FILE_MACHINE_ARM64 (0xAA64) — see note below.
 #   * wowbox64.dll        — i386 guests (box64's emulator, the WOW64 default; FEX's libwow64fex.dll is the
 #                          alternative). Built from AndreRH/box64 branch wow64.
@@ -20,7 +20,7 @@
 #   WOW64}). wowbox64.dll is an ENTIRELY SEPARATE PROJECT — box64's WOW64 build (AndreRH/box64, branch
 #   wow64) — which Hangover ships as the default i386 emulator. It cannot be "built from FEX source"; it
 #   is built here from box64 source so $out ships all three emulators. It is pinned to the box64 commit
-#   Hangover 11.9 uses (7eeb5016).
+#   Hangover 11.16 uses (2f130fab).
 #
 # WINDOWS target, distinct from ../fex-portable:
 #   * ../fex-portable  = FEX built as a LINUX aarch64 binary that JITs x86_64/i386 *Linux* ELFs (a
@@ -49,25 +49,25 @@
   llvmMingw,
 }:
 let
-  # --- FEX-Emu/FEX (UPSTREAM) tag FEX-2607 ---------------------------------------------------------
+  # --- FEX-Emu/FEX (UPSTREAM) tag FEX-2611 ---------------------------------------------------------
   # The ARM64EC/WOW64 Windows build lives in upstream FEX as of the arm64ec merge: Source/Windows/
   # {ARM64EC,WOW64} + Data/CMake/toolchain_mingw.cmake + the CI at .github/workflows/mingw_build.yml.
   # AndreRH/FEX (branch arm64ec) is only Hangover's PIN (submodule) of upstream FEX, +2 trivial commits vs
   # upstream main (ahead 2 / behind 20): a debug print ("starting FEX based libarm64ecfex.dll") and a
   # private-header struct rename (IMAGE_LOAD_CONFIG_CODE_INTEGRITY). NEITHER is functional arm64ec code, so
-  # building the newer upstream FEX-2607 tag (which also has the x87/THP/memory wins) needs no fork.
-  rev = "FEX-2607";
+  # building the upstream FEX-2611 tag needs no fork.
+  rev = "FEX-2611";
   # Content-addressed so only the patches' bytes feed the build (see `patches` below).
   patchesDir = builtins.path {
     path = ./patches;
     name = "fex-patches";
   };
-  revHash = "1cc4b93e7a71c883ec021b71359f136394dc1f3c";
+  revHash = "8f92e80dccd043e5f9e2cec1be69f5168562eab9";
 
   # --- box64 (AndreRH/box64, branch wow64) → wowbox64.dll ------------------------------------------
-  # Pinned to the exact commit Hangover 11.9 bundles (its box64 submodule at tag hangover-11.9). box64 has
+  # Pinned to the exact commit Hangover 11.16 bundles (its box64 submodule at tag hangover-11.16). box64 has
   # NO git submodules (external/musl is vendored in-tree), so fetchSubmodules is unnecessary.
-  box64Rev = "7eeb5016493dab4e143d53da50dd47bfb44a9509";
+  box64Rev = "2f130fab1d6e1a4ee8a71dc60cfdfcc839ad192a";
 
   # wowbox64 is a CMake SUPERBUILD: the outer box64 project (native aarch64 compiler) computes the
   # dynarec source lists (DYNAREC_PASS/ASM, INTERPRETER) and drives an ExternalProject that
@@ -76,13 +76,13 @@ let
   # toolchain file cannot build box64. This is exactly Hangover's build path.
   wowbox64 = stdenv.mkDerivation {
     pname = "wowbox64";
-    version = "box64-hangover-11.9";
+    version = "box64-hangover-11.16";
 
     src = fetchFromGitHub {
       owner = "AndreRH";
       repo = "box64";
       rev = box64Rev;
-      hash = "sha256-XESbBWXSj2vrwVaHsVIU+m/Ru/hOXcx9ywrA2WqXG/o=";
+      hash = "sha256-vcF3zYONE1P3DcXoo9PEETMDTA08QQi042SHt+hAT+Q=";
     };
 
     nativeBuildInputs = [
@@ -133,7 +133,7 @@ let
 in
 stdenv.mkDerivation {
   pname = "fex-wine-dlls";
-  version = "FEX-2607";
+  version = rev;
 
   # Every file under ./patches becomes a FEX patch — drop a `NNNN-name.patch` in to add one, delete it to
   # remove it; no code change. Applied in NUMERIC-PREFIX order via naturalSort, exactly as
@@ -161,7 +161,7 @@ stdenv.mkDerivation {
     repo = "FEX";
     rev = rev;
     fetchSubmodules = true;
-    hash = "sha256-9nDivYerWJfL1Nioeo9rgX44FH7JoriSY7xQe4QiDOA=";
+    hash = "sha256-CbPDqE1H3d+obgmddkhZ9iaB8Kk3bQb9aN2OQogbGJE=";
   };
 
   nativeBuildInputs = [
@@ -255,5 +255,5 @@ stdenv.mkDerivation {
     inherit wowbox64; # the box64 sub-derivation, exposed for debugging/reuse
   };
 
-  meta.description = "FEX x86_64/i386 + box64 i386 emulator DLLs for WINE-on-ARM64, built from source (FEX-2607 + box64 Hangover-11.9 pin)";
+  meta.description = "FEX x86_64/i386 + box64 i386 emulator DLLs for WINE-on-ARM64, built from source (${rev} + box64 Hangover-11.16 pin)";
 }

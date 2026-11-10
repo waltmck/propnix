@@ -1,5 +1,5 @@
 # emulators/fex-linux — FEX-Emu as a LINUX aarch64 binary that JITs x86_64 and i386 *Linux* ELFs.
-# Output: bin/FEX, bin/FEXInterpreter, bin/FEXServer. This is what the THIN `fex` backend runs
+# Output: bin/FEX (the loader/interpreter), bin/FEXServer. This is what the THIN `fex` backend runs
 # (lib/backends/fex); it is a different build and a different target from emulators/fex, which
 # cross-compiles FEX and box64 to *Windows* PE DLLs for wine to load.
 #
@@ -29,14 +29,16 @@
 # on a 16K host); that is what keeps the thin FEX backend broken for Unity/Mono titles. It does not affect
 # a native C++ guest, which is what this was added for.
 #
-# Expressed as `pkgs.fex.overrideAttrs` over the exact version nixpkgs pins, rather than vendoring the
-# tree: nixpkgs' build machinery (cmake flags, the x86_32/x86_64 guest thunk toolchains, FEXServer) is
-# reused unchanged, and the fork stays a reviewable set of patches. The version assert below is the
-# tripwire — these patches are cut against one source, so a nixpkgs bump must be looked at rather than
-# silently producing a half-patched emulator.
+# Expressed as `pkgs.fex.overrideAttrs` with OUR source pin, rather than vendoring the tree: nixpkgs'
+# build machinery (cmake flags, the x86_32/x86_64 guest thunk toolchains, FEXServer, its thunk-path
+# substitutions) is reused unchanged, and the fork stays a reviewable set of patches cut against the
+# pinned tag. The source is pinned here (not inherited from nixpkgs) so the emulator version is this
+# repo's decision; nixpkgs' `--replace-fail` substitutions fail the build loudly if a FEX release moves
+# the lines they rewrite, which is the tripwire for a pin bump.
 {
   lib,
   fex,
+  fetchFromGitHub,
   python3,
   # Cross-built guest glibcs, used ONLY by the install check: their own `getconf` is a real dynamically
   # linked guest of each width, and its PT_INTERP is an absolute store path, so it resolves under
@@ -51,19 +53,23 @@ let
     name = "fex-linux-patches";
   };
 
-  # The source these patches were cut against.
-  expectedVersion = "2605";
+  # The pinned upstream tag; ./patches are cut against exactly this source (submodules included: jemalloc
+  # is one, and patches/0001 edits its pregenerated header). A bump re-cuts the patches and re-runs the
+  # i386/x86_64 static-guest check — a partially applied large-host-page patch produces an emulator that
+  # starts and then faults unpredictably.
+  version = "2611";
+  src = fetchFromGitHub {
+    owner = "FEX-Emu";
+    repo = "FEX";
+    tag = "FEX-${version}";
+    fetchSubmodules = true;
+    hash = "sha256-CbPDqE1H3d+obgmddkhZ9iaB8Kk3bQb9aN2OQogbGJE=";
+  };
 in
-lib.throwIf (fex.version or "" != expectedVersion)
-  ''
-    emulators/fex-linux: nixpkgs' fex is version ${fex.version or "<unknown>"}, but ./patches is cut
-    against ${expectedVersion}. Re-cut them against the new source (and re-run the i386/x86_64 static-guest
-    check) rather than loosening this assert — a partially-applied large-host-page patch produces an
-    emulator that starts and then faults unpredictably, which is expensive to diagnose.
-  ''
-  (
+(
     fex.overrideAttrs (old: {
       pname = "fex-linux";
+      inherit version src;
 
       # Applied with -p1 in patchPhase, before nixpkgs' own postPatch thunk-path substitutions (disjoint
       # lines, so ordering is safe).
@@ -115,7 +121,7 @@ lib.throwIf (fex.version or "" != expectedVersion)
           guest=$1; want=$2
           [ -x "$guest" ] || { echo "  dynamic $want-bit: SKIP (absent)"; continue; }
           set +e
-          got=$(FEX_ROOTFS=/ "$out/bin/FEXInterpreter" "$guest" LONG_BIT 2>&1); rc=$?
+          got=$(FEX_ROOTFS=/ "$out/bin/FEX" "$guest" LONG_BIT 2>&1); rc=$?
           set -e
           echo "  dynamic $want-bit -> exit $rc: $got"
           if [ "$rc" != 0 ] || [ "$got" != "$want" ]; then
@@ -126,9 +132,9 @@ lib.throwIf (fex.version or "" != expectedVersion)
 
         for g in h64 h32; do
           # Each guest exits 42 and prints a line; a plain 0 could arrive by accident.
-          # NB: not `out=$(...)` — that would shadow $out and point FEXInterpreter at nothing.
+          # NB: not `out=$(...)` — that would shadow $out and point FEX at nothing.
           set +e
-          guestout=$("$out/bin/FEXInterpreter" "$FEXTEST/$g" 2>&1); rc=$?
+          guestout=$("$out/bin/FEX" "$FEXTEST/$g" 2>&1); rc=$?
           set -e
           echo "  $g -> exit $rc: $guestout"
           if [ "$rc" != 42 ]; then
@@ -144,11 +150,11 @@ lib.throwIf (fex.version or "" != expectedVersion)
       passthru = (old.passthru or { }) // {
         # Dependents can assert on the fork rather than hoping they were handed the patched build.
         portableHostPage = true;
-        upstreamVersion = expectedVersion;
+        upstreamVersion = version;
       };
 
       meta = (old.meta or { }) // {
-        description = "FEX-Emu ${expectedVersion} for Linux x86_64/i386 guests on large-host-page aarch64 (propnix fork)";
+        description = "FEX-Emu ${version} for Linux x86_64/i386 guests on large-host-page aarch64 (propnix fork)";
       };
     })
   )

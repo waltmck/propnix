@@ -42,20 +42,22 @@ compares the result against the address it asked for, and a host-aligned request
 Verified on a 16 KiB aarch64 host with static test guests (emulators/fex-linux/tests/mk_hello.py): i386
 and x86_64 both run correctly and repeatably, where i386 was ~2/5 before.
 
+diff --git a/FEXCore/Source/Utils/Allocator/64BitAllocator.cpp b/FEXCore/Source/Utils/Allocator/64BitAllocator.cpp
+index b136ec50..97c798d0 100644
 --- a/FEXCore/Source/Utils/Allocator/64BitAllocator.cpp
 +++ b/FEXCore/Source/Utils/Allocator/64BitAllocator.cpp
-@@ -27,6 +27,7 @@
+@@ -25,6 +25,7 @@
  #include <sys/mman.h>
  #include <sys/utsname.h>
  #include <sys/user.h>
 +#include <unistd.h>
  #include <type_traits>
  #include <utility>
-
-@@ -34,6 +35,20 @@
-
+ 
+@@ -32,6 +33,20 @@ namespace Alloc::OSAllocator {
+ 
  thread_local FEXCore::Core::InternalThreadState* TLSThread {};
-
+ 
 +// The size of a page as the KERNEL sees it, which is not FEX_PAGE_SIZE.
 +//
 +// FEX_PAGE_SIZE is the GUEST page size and is correctly 4 KiB for an x86 guest. This allocator, however,
@@ -73,21 +75,21 @@ and x86_64 both run correctly and repeatably, where i386 was ~2/5 before.
  class OSAllocator_64Bit final : public Alloc::HostAllocator {
  public:
    OSAllocator_64Bit();
-@@ -257,7 +272,9 @@
+@@ -254,7 +269,9 @@ void* OSAllocator_64Bit::Mmap(void* addr, size_t length, int prot, int flags, in
    }
-
+ 
    bool Fixed = (flags & MAP_FIXED) || (flags & MAP_FIXED_NOREPLACE);
 -  length = FEXCore::AlignUp(length, FEXCore::Utils::FEX_PAGE_SIZE);
 +  // Whole host pages: a mapping is the kernel's minimum unit, so rounding to the guest page here would
 +  // leave the next allocation starting inside a page this one already owns.
 +  length = FEXCore::AlignUp(length, HostPageSize());
-
+ 
    uint64_t AddrEnd = Addr + length;
    size_t NumberOfPages = length / FEXCore::Utils::FEX_PAGE_SIZE;
-@@ -284,6 +301,15 @@
+@@ -281,6 +298,15 @@ again:
      uint64_t AllocatedPage {~0ULL};
      uint64_t NumberOfPages = length >> FEXCore::Utils::FEX_PAGE_SHIFT;
-
+ 
 +    // The used-page bitmap is indexed in GUEST pages and stays that way — but the address this lambda
 +    // picks is passed straight to mmap(MAP_FIXED), so the START has to be host-page-aligned. Ask the scan
 +    // for enough extra pages to absorb that alignment, so that after rounding the start up the requested
@@ -100,28 +102,28 @@ and x86_64 both run correctly and repeatably, where i386 was ~2/5 before.
      if (Region->FreeSpace >= length) {
        uint64_t LastAllocation =
          StartingPosition ? (StartingPosition - Region->SlabInfo->Base) >> FEXCore::Utils::FEX_PAGE_SHIFT : Region->LastPageAllocation;
-@@ -294,7 +320,7 @@
+@@ -291,7 +317,7 @@ again:
          // Backward scan
          // We need to do a backward scan first to fill any holes
          // Otherwise we will very quickly run out of VMA regions (65k maximum)
 -        auto SearchResult = Region->UsedPages.BackwardScanForRange<true>(LastAllocation, NumberOfPages, Region->NumManagedPages);
 +        auto SearchResult = Region->UsedPages.BackwardScanForRange<true>(LastAllocation, ScanPages, Region->NumManagedPages);
-
+ 
          AllocatedPage = SearchResult.FoundElement;
-
-@@ -307,11 +333,14 @@
-
+ 
+@@ -304,11 +330,14 @@ again:
+ 
        // Foward Scan
        if (AllocatedPage == ~0ULL) {
 -        auto SearchResult = Region->UsedPages.ForwardScanForRange<true>(LastAllocation, NumberOfPages, RegionNumberOfPages);
 +        auto SearchResult = Region->UsedPages.ForwardScanForRange<true>(LastAllocation, ScanPages, RegionNumberOfPages);
          AllocatedPage = SearchResult.FoundElement;
        }
-
+ 
        if (AllocatedPage != ~0ULL) {
 +        // Safe because the scan reserved `ScanPages`: rounding up moves the start by at most
 +        // PagesPerHostPage - 1, so the NumberOfPages we actually map remain inside the free run.
 +        AllocatedPage = FEXCore::AlignUp(AllocatedPage, PagesPerHostPage);
          AllocatedOffset = Region->SlabInfo->Base + AllocatedPage * FEXCore::Utils::FEX_PAGE_SIZE;
-
+ 
          // We need to setup protections for this

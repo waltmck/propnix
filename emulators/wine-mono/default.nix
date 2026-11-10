@@ -79,16 +79,16 @@
 }:
 let
   # MUST equal the wine we build against. See the guard at the bottom — it is not advisory.
-  version = "11.2.0";
+  version = "11.3.0";
 
   release = fetchurl {
     url = "https://dl.winehq.org/wine/wine-mono/${version}/wine-mono-${version}-x86.tar.xz";
-    hash = "sha256-yfsuKCOs8wsAC4gGF32w9AdReGE23T+Psr54l7FkPQY=";
+    hash = "sha256-VKGwERw/5LeF6uaIr5TSfmSZVwetZItv7oAAOBuA0pg=";
   };
 
   src = fetchurl {
     url = "https://dl.winehq.org/wine/wine-mono/${version}/wine-mono-${version}-src.tar.xz";
-    hash = "sha256-rr75tD3KgLPr5KCtoPRZJdgz83G6W0L1rPmZBGFWi6k=";
+    hash = "sha256-n08DKF++7UhJgO+7HrocGQaSRK6kAdL/FYXjmQeC7fc=";
   };
 
   # Only ./patches keys this build (like emulators/wine-hangover): unrelated repo edits never perturb the

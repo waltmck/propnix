@@ -76,6 +76,18 @@ impl ChildEnv {
             .join(";");
         push("WINEDLLOVERRIDES", joined);
 
+        if cfg.backend == "winefex" {
+            // FEX's disk cache of JIT'd guest blocks (the box64 DynaCache sibling, thin.rs): on by default,
+            // under the app's cache dir rather than FEX's %LOCALAPPDATA% default so it lives beside the
+            // shader caches. The guest sees the host dir through the prefix's `Z:` drive; FEX accepts the
+            // forward slashes. A game's own `env` is applied after this, so `FEX_DISKCACHE=0` still wins.
+            push("FEX_DISKCACHE", "1".to_string());
+            push(
+                "FEX_DISKCACHEPATH",
+                format!("Z:{}/", paths.fex_cache.to_string_lossy()),
+            );
+        }
+
         if settings.is_dxvk() {
             // Persist the pipeline/shader caches under XDG_CACHE_HOME so cold-start compile happens once.
             // Both DXVK (d3d9/10/11) and vkd3d-proton (d3d12) DLLs are installed on this backend, so a game

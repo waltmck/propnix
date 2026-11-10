@@ -2,14 +2,14 @@
 # HANGOVER'S WINE FORK, built by us.
 #
 # WHY THE FORK (not nixpkgs wine + cherry-picked patches): Hangover (AndreRH/hangover) is a superproject
-# whose `wine` submodule is AndreRH/wine branch `arm64ec` = **upstream wine 11.15 + Hangover's ~10
+# whose `wine` submodule is AndreRH/wine branch `arm64ec` = **upstream wine 11.16 + Hangover's ~10
 # ARM64EC/WoW64 commits, as one coherent tree**. That glue (WoW64 thread-suspension via the BT module,
 # HODLL emulator-DLL defaults, high-VA host allocations, mono autoinstall) is what makes the ARM64X-hybrid
 # core DLLs actually *host* an x86_64 (ARM64EC) process under FEX. It is NOT wine-staging.
 #   We previously tried replaying just those ~10 commits onto nixpkgs' wine-staging **11.12**; that broke
 #   at compile (`dlls/wow64/process.c` calling `RtlWow64SuspendThread`, whose declaration + ntdll.spec
 #   export are part of the upstream **11.15** baseline the commits assume — RESEARCH §22). Rather than
-#   hand-reconstruct 11.15 on an 11.12 base, we build the fork's coherent 11.15 tree directly — exactly
+#   hand-reconstruct it on an older base, we build the fork's coherent 11.16 tree directly — exactly
 #   what Hangover ships and tests.
 #
 # We reuse nixpkgs `wineWow64Packages.unstable` only for its build machinery (llvm-mingw PE cross-compile,
@@ -35,7 +35,7 @@
 #     HOST an x86_64 (ARM64EC) process under FEX. This is the winefex path.
 #   * x86_64-linux host: `--enable-archs=x86_64,i386` → a standard WoW64 wine from the SAME source; the
 #     Hangover ARM64EC/WoW64 commits are inert (they only add the arm64ec arch), so this is upstream wine
-#     11.15 behaviour. x86_64 Windows code runs NATIVELY — no FEX, no ARM64EC. Building the same source
+#     11.16 behaviour. x86_64 Windows code runs NATIVELY — no FEX, no ARM64EC. Building the same source
 #     (rather than nixpkgs' wine) guarantees identical wine across arches, which is the whole point.
 #
 # dontStrip rationale (aarch64 only): stripping the ARM64X PE DLLs (ntdll/kernel32/…) drops sections and
@@ -56,15 +56,15 @@ let
   # arm64ec is only meaningful (and only needed) when the HOST is ARM64 and must emulate x86_64.
   archs = if isAarch64 then "arm64ec,aarch64,x86_64,i386" else "x86_64,i386";
 
-  # Hangover's wine, pinned. `arm64ec` HEAD as of 2026-08-09 (upstream wine 11.15 + Hangover commits;
-  # tip commit "appwiz.cpl: Autoinstall x86 mono on ARM64"). Bump = new rev + re-hash (and re-run the
-  # 16K-page HK boot test — some wine+FEX combos stack-overflow on 16K, RESEARCH §22).
-  hangoverWineRev = "1c9ef214bd8c6134d971d903e0a33d8c0b745e84";
+  # Hangover's wine, pinned to the `wine` submodule of the hangover-11.16 tag (upstream wine 11.16 +
+  # Hangover's commits). Bump = new rev + re-hash, then re-run the 16K-page boot test of a wine+FEX title
+  # (emulators/wine-mono's guard also ties the wine-mono pin to this tree's WINE_MONO_VERSION).
+  hangoverWineRev = "3ea3a14941b6a122b892c84141ce9662c008081e";
   hangoverWineSrc = fetchFromGitHub {
     owner = "AndreRH";
     repo = "wine";
     rev = hangoverWineRev;
-    sha256 = "1a0icm3m0z14k8fk01k16nd5dsnzmvphi0m6d5n93p1ks83759m8";
+    hash = "sha256-kyF6jwhtb43r4Mngcs2BOSvJStE9cIXbk7PPqydUggI=";
   };
 
   # Every file under ./patches becomes a wine patch — drop a `NNNN-name.patch` in to add one, delete it to
@@ -82,7 +82,7 @@ let
 in
 (wineWow64Packages.unstable.override { gstreamerSupport = true; }).overrideAttrs (old: {
   pname = "wine-hangover";
-  version = "11.15" + lib.optionalString isAarch64 "-arm64ec";
+  version = "11.16" + lib.optionalString isAarch64 "-arm64ec";
   src = hangoverWineSrc;
 
   # Set --enable-archs per host arch (nixpkgs' default is aarch64,x86_64,i386).

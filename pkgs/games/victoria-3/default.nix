@@ -106,20 +106,13 @@ mkApp (
     steam.emu.libPaths = [ "binaries/steam_api64.dll" ];
 
     # NO d3d / graphics override: a D3D11 title (imports d3d11/dxgi), so the default d3d=dxvk
-    # applies. (`wine.dllOverrides.d3dcompiler_47` below is a separate axis: the HLSL COMPILER.)
+    # applies. The engine compiles its ps_5_0/vs_5_0 HLSL at runtime through wine's builtin
+    # d3dcompiler_47 (vkd3d-shader, extended by emulators/wine-hangover/patches/0009): native code
+    # on every host, where the shipped Microsoft compiler would run under the emulator.
 
     # The Paradox account SDK (PDXSDK.dll) waits on a Steam logon state at boot. gbe_fork's offline
     # mode answers "not logged on" and the engine deadlocks before any log, so the shim must not
     # claim offline (hung-process analysis: docs/research/steam-entitlement.md).
     steam.emu.offline = false;
-
-    # The engine compiles its ps_5_0 HLSL at runtime and wine's builtin d3dcompiler_47
-    # (vkd3d-shader) rejects it; depot 529342 ships Microsoft's dll beside the exe, so the override
-    # is native-only (`"n"`, no builtin fallback). `dxcompiler.dll`/`dxil.dll` are not
-    # wine-implemented names, so they already load native (docs/research/wine-builtin-gaps.md).
-    wine.dllOverrides.d3dcompiler_47 = {
-      value = "n";
-      reason = "native: the engine compiles its ps_5_0 HLSL at runtime and wine's builtin d3dcompiler_47 rejects it (E5002/E5000 from vkd3d-shader) → 'Failed creating shader state' and exit. Depot 529342 ships the real dll beside the exe.";
-    };
   }
 )

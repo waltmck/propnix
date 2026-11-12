@@ -1,0 +1,1023 @@
+vkd3d-shader: close HLSL front-end gaps that kept titles on Microsoft's d3dcompiler_47.
+
+Wine's builtin d3dcompiler_47 is vkd3d-shader's HLSL compiler. Titles that compile HLSL at runtime
+hand it source Microsoft's compiler accepts; each change below adds what one of them needed, in the
+shape of the native behaviour:
+
+- preproc: HLSL_VERSION is predefined (as 1) unless the caller's macros define it. Microsoft's own
+  D3DX_DXGIFormatConvert.inl selects its HLSL body on `#if HLSL_VERSION > 0`.
+- hlsl: the isnan() intrinsic — the bit test `(asuint(x) & 0x7fffffff) > 0x7f800000` on SM4+,
+  `x != x` below, built the way isinf() is.
+- hlsl: SampleGrad() gradients span the texture's own dimensions; an array slice is not a gradient
+  component, so a Texture2DArray takes float2 gradients.
+- hlsl: SV_Coverage as a pixel-shader INPUT: the vCoverage register, declared with a plain dcl_input
+  and no interpolation mode, and kept out of the input signature like the other dedicated registers.
+- hlsl: struct member functions. The lexer hands the parser each member function of a struct body as
+  one METHOD_TEXT token (its full text); once the struct type exists every method is first declared,
+  then defined, as the free function `__<struct>__<method>(inout <struct> __this, ...)`. Inside a
+  body a bare field name reads `__this.<field>` and a bare call names a method of the same struct
+  first (declared later in the struct too); `obj.Method(args)` calls it with obj as the inout
+  object, and overloads resolve as for free functions.
+- hlsl: `OP(k, c ? a : b)` with constants k, a, b folds into the arms, and `c ? k : k` folds to k.
+  An `[unroll]` loop bounded by a select of constants then unrolls to the larger bound with
+  per-iteration guards instead of running into the iteration cap.
+- hlsl: the parse location is saved around an intrinsic's template compile (upstream's fix), so
+  diagnostics after acos()/smoothstep()/... keep their line numbers.
+- hlsl: evaluating `cond ? x : y` under each assumption of cond walks the expression graph once per
+  evaluation, remembering each node's result. The graph is a DAG; walking it as a tree is exponential
+  in the sharing depth, and a shader that fills a 64-entry array in one unrolled loop and indexes it
+  in another never finished compiling.
+
+Upstream vkd3d carries the location fix and none of the rest. Findings: docs/research/wine-builtin-gaps.md.
+--- a/libs/vkd3d/libs/vkd3d-shader/hlsl.c
++++ b/libs/vkd3d/libs/vkd3d-shader/hlsl.c
+@@ -21,6 +21,7 @@
+ 
+ #include "hlsl.h"
+ #include <stdio.h>
++#include <ctype.h>
+ 
+ void hlsl_note_(struct hlsl_ctx *ctx, const struct vkd3d_shader_location *loc,
+         enum vkd3d_shader_log_level level, const char *function, const char *fmt, ...)
+@@ -5155,6 +5156,7 @@
+ 
+     ctx->location.source_name = source_files->sources[0];
+     ctx->location.line = ctx->location.column = 1;
++    vkd3d_string_buffer_init(&ctx->method_text);
+     vkd3d_string_buffer_cache_init(&ctx->string_buffers);
+ 
+     hlsl_ctx_init_locale(ctx);
+@@ -5244,6 +5246,7 @@
+ 
+ static void hlsl_ctx_cleanup(struct hlsl_ctx *ctx)
+ {
++    vkd3d_string_buffer_cleanup(&ctx->method_text);
+     struct hlsl_buffer *buffer, *next_buffer;
+     struct hlsl_scope *scope, *next_scope;
+     struct hlsl_ir_var *var, *next_var;
+@@ -5474,11 +5477,140 @@
+     return ret;
+ }
+ 
++/* A struct method is compiled as a free function under this name, with the object as its first
++ * parameter ("inout <struct> __this"); the lexer cannot produce the "::" spelling. */
++char *hlsl_method_name(struct hlsl_ctx *ctx, const struct hlsl_type *type, const char *name)
++{
++    if (!type->name)
++        return NULL;
++    return hlsl_sprintf_alloc(ctx, "__%s__%s", type->name, name);
++}
++
++static int compile_method_text(struct hlsl_ctx *ctx, const struct hlsl_type *type,
++        const char *text, const struct vkd3d_shader_location *loc)
++{
++    const struct hlsl_ir_function_decl *saved_cur_function = ctx->cur_function;
++    struct vkd3d_shader_code code = {.code = text, .size = strlen(text)};
++    const char *saved_internal_func_name = ctx->internal_func_name;
++    const struct hlsl_type *saved_method_type = ctx->method_type;
++    struct vkd3d_shader_location saved_location = ctx->location;
++    unsigned int saved_struct_body_depth = ctx->struct_body_depth;
++    bool saved_struct_kw_pending = ctx->struct_kw_pending;
++    void *saved_scanner = ctx->scanner;
++    int ret;
++
++    TRACE("%s\n", debugstr_a(text));
++
++    hlsl_push_scope(ctx);
++    ctx->scanner = NULL;
++    ctx->internal_func_name = NULL;
++    ctx->cur_function = NULL;
++    ctx->method_type = type;
++    ctx->struct_body_depth = 0;
++    ctx->struct_kw_pending = false;
++    ctx->location = *loc;
++    ret = hlsl_lexer_compile(ctx, &code);
++    ctx->scanner = saved_scanner;
++    ctx->internal_func_name = saved_internal_func_name;
++    ctx->cur_function = saved_cur_function;
++    ctx->method_type = saved_method_type;
++    ctx->struct_body_depth = saved_struct_body_depth;
++    ctx->struct_kw_pending = saved_struct_kw_pending;
++    ctx->location = saved_location;
++    hlsl_pop_scope(ctx);
++    return ret;
++}
++
++/* Split "<ret> <name>(<params>) {<body>}" into its parts; a parameter list containing parentheses
++ * is not supported. */
++static bool split_method_source(const char *text, size_t *ret_len, const char **name, size_t *name_len,
++        const char **params, size_t *params_len, const char **body)
++{
++    const char *open, *close, *end, *start;
++    unsigned int depth = 0;
++
++    if (!(open = strchr(text, '(')))
++        return false;
++    for (end = open; end > text && isspace((unsigned char)end[-1]); --end);
++    for (start = end; start > text && (isalnum((unsigned char)start[-1]) || start[-1] == '_'); --start);
++    if (start == end)
++        return false;
++    for (close = open; *close; ++close)
++    {
++        if (*close == '(')
++            ++depth;
++        else if (*close == ')' && !--depth)
++            break;
++    }
++    if (!*close || depth)
++        return false;
++    *ret_len = start - text;
++    *name = start;
++    *name_len = end - start;
++    *params = open + 1;
++    *params_len = close - open - 1;
++    *body = close + 1;
++    return true;
++}
++
++/* Every method is first declared, so that a body may call a method defined later in the struct,
++ * then defined. */
++bool hlsl_compile_struct_methods(struct hlsl_ctx *ctx, const struct hlsl_type *type,
++        const struct hlsl_method_source *methods, size_t count)
++{
++    unsigned int pass;
++    size_t i;
++
++    for (pass = 0; pass < 2; ++pass)
++    {
++        for (i = 0; i < count; ++i)
++        {
++            const char *name, *params, *body, *separator;
++            size_t ret_len, name_len, params_len, j;
++            char *mangled, *short_name, *text;
++            bool blank = true;
++            int ret;
++
++            if (!split_method_source(methods[i].text, &ret_len, &name, &name_len, &params, &params_len, &body))
++            {
++                hlsl_error(ctx, &methods[i].loc, VKD3D_SHADER_ERROR_HLSL_INVALID_SYNTAX,
++                        "Unsupported method declaration in struct \"%s\".", type->name);
++                return false;
++            }
++            for (j = 0; j < params_len; ++j)
++                blank = blank && isspace((unsigned char)params[j]);
++            separator = blank ? "" : ", ";
++
++            if (!(short_name = hlsl_sprintf_alloc(ctx, "%.*s", (int)name_len, name)))
++                return false;
++            mangled = hlsl_method_name(ctx, type, short_name);
++            vkd3d_free(short_name);
++            if (!mangled)
++                return false;
++            text = hlsl_sprintf_alloc(ctx, "%.*s %s(inout %s __this%s%.*s)%s", (int)ret_len, methods[i].text,
++                    mangled, type->name, separator, (int)params_len, params, pass ? body : ";");
++            vkd3d_free(mangled);
++            if (!text)
++                return false;
++            ret = compile_method_text(ctx, type, text, &methods[i].loc);
++            vkd3d_free(text);
++            if (ret)
++            {
++                hlsl_error(ctx, &methods[i].loc, VKD3D_SHADER_ERROR_HLSL_INVALID_SYNTAX,
++                        "Failed to compile method of struct \"%s\".", type->name);
++                return false;
++            }
++        }
++    }
++    return true;
++}
++
+ struct hlsl_ir_function_decl *hlsl_compile_internal_function(struct hlsl_ctx *ctx, const char *name, const char *hlsl)
+ {
+     const struct hlsl_ir_function_decl *saved_cur_function = ctx->cur_function;
+     struct vkd3d_shader_code code = {.code = hlsl, .size = strlen(hlsl)};
+     const char *saved_internal_func_name = ctx->internal_func_name;
++    struct vkd3d_shader_location saved_location = ctx->location;
+     struct vkd3d_string_buffer *internal_name;
+     struct hlsl_ir_function_decl *func;
+     void *saved_scanner = ctx->scanner;
+@@ -5505,6 +5637,7 @@
+     ctx->scanner = saved_scanner;
+     ctx->internal_func_name = saved_internal_func_name;
+     ctx->cur_function = saved_cur_function;
++    ctx->location = saved_location;
+     hlsl_pop_scope(ctx);
+     if (ret)
+     {
+--- a/libs/vkd3d/libs/vkd3d-shader/hlsl.h
++++ b/libs/vkd3d/libs/vkd3d-shader/hlsl.h
+@@ -1271,6 +1271,16 @@
+      * polluting the user namespace. */
+     const char *internal_func_name;
+ 
++    /* Struct methods. The lexer hands the parser each member function of a struct body as one
++     * METHOD_TEXT token holding its full text; the parser compiles those as free functions once
++     * the struct type is complete. method_type is the struct whose method body is being compiled,
++     * the rest is the lexer's capture state. */
++    const struct hlsl_type *method_type;
++    struct vkd3d_string_buffer method_text;
++    unsigned int method_brace_depth;
++    unsigned int struct_body_depth;
++    bool struct_kw_pending;
++
+     /* Whether the parser is inside a state block (effects' metadata) inside a variable declaration. */
+     uint32_t in_state_block : 1;
+     /* Whether the numthreads() attribute has been provided in the entry-point function. */
+@@ -1926,6 +1936,16 @@
+ 
+ struct hlsl_ir_function_decl *hlsl_compile_internal_function(struct hlsl_ctx *ctx, const char *name, const char *hlsl);
+ 
++struct hlsl_method_source
++{
++    char *text;
++    struct vkd3d_shader_location loc;
++};
++
++char *hlsl_method_name(struct hlsl_ctx *ctx, const struct hlsl_type *type, const char *name);
++bool hlsl_compile_struct_methods(struct hlsl_ctx *ctx, const struct hlsl_type *type,
++        const struct hlsl_method_source *methods, size_t count);
++
+ int hlsl_lexer_compile(struct hlsl_ctx *ctx, const struct vkd3d_shader_code *hlsl);
+ 
+ #endif
+--- a/libs/vkd3d/libs/vkd3d-shader/hlsl.l
++++ b/libs/vkd3d/libs/vkd3d-shader/hlsl.l
+@@ -32,6 +32,7 @@
+ #define YYLTYPE HLSL_YYLTYPE
+ 
+ static void update_location(struct hlsl_ctx *ctx, YYLTYPE *loc);
++static void count_lines(struct hlsl_ctx *ctx, const char *text, size_t len);
+ 
+ static void apply_escape_sequences(char *str);
+ 
+@@ -50,7 +51,8 @@
+ %option prefix="hlsl_yy"
+ %option reentrant
+ 
+-%x pp pp_line pp_pragma pp_ignore
++%x pp pp_line pp_pragma pp_ignore method_body
++%s struct_body
+ 
+ RESERVED1               auto|catch|char|class|const_cast|delete|dynamic_cast|enum
+ RESERVED2               explicit|friend|goto|long|mutable|new|operator|private|protected|public
+@@ -160,7 +162,10 @@
+ static                  {return KW_STATIC;              }
+ string                  {return KW_STRING;              }
+ String                  {return KW_STRING;              }
+-struct                  {return KW_STRUCT;              }
++struct                  {
++                            yyget_extra(yyscanner)->struct_kw_pending = true;
++                            return KW_STRUCT;
++                        }
+ StructuredBuffer        {return KW_STRUCTUREDBUFFER;    }
+ switch                  {return KW_SWITCH;              }
+ tbuffer                 {return KW_TBUFFER;             }
+@@ -351,7 +356,70 @@
+                         }
+ <pp>{ANY}               {}
+ 
++<struct_body>[^;{}()]*\([^()]*\)[ \t\r\n]*\{ {
++                            /* A member function: capture its text up to the matching brace. */
++                            struct hlsl_ctx *ctx = yyget_extra(yyscanner);
++
++                            count_lines(ctx, yytext, yyleng);
++                            vkd3d_string_buffer_clear(&ctx->method_text);
++                            vkd3d_string_buffer_printf(&ctx->method_text, "%s", yytext);
++                            ctx->method_brace_depth = 1;
++                            BEGIN(method_body);
++                        }
++<method_body>\{         {
++                            struct hlsl_ctx *ctx = yyget_extra(yyscanner);
++
++                            vkd3d_string_buffer_printf(&ctx->method_text, "{");
++                            ++ctx->method_brace_depth;
++                        }
++<method_body>\}         {
++                            struct hlsl_ctx *ctx = yyget_extra(yyscanner);
++
++                            vkd3d_string_buffer_printf(&ctx->method_text, "}");
++                            if (!--ctx->method_brace_depth)
++                            {
++                                BEGIN(struct_body);
++                                yylval->name = hlsl_strdup(ctx, ctx->method_text.buffer);
++                                return METHOD_TEXT;
++                            }
++                        }
++<method_body>[^{}\n]+   {
++                            vkd3d_string_buffer_printf(&yyget_extra(yyscanner)->method_text, "%s", yytext);
++                        }
++<method_body>\n         {
++                            struct hlsl_ctx *ctx = yyget_extra(yyscanner);
++
++                            vkd3d_string_buffer_printf(&ctx->method_text, "\n");
++                            ++ctx->location.line;
++                            ctx->location.column = 1;
++                        }
++
++\{                      {
++                            struct hlsl_ctx *ctx = yyget_extra(yyscanner);
++
++                            if (ctx->struct_kw_pending)
++                            {
++                                ctx->struct_kw_pending = false;
++                                if (!ctx->struct_body_depth++)
++                                    BEGIN(struct_body);
++                            }
++                            else if (ctx->struct_body_depth)
++                            {
++                                ++ctx->struct_body_depth;
++                            }
++                            return '{';
++                        }
++\}                      {
++                            struct hlsl_ctx *ctx = yyget_extra(yyscanner);
++
++                            if (ctx->struct_body_depth && !--ctx->struct_body_depth)
++                                BEGIN(INITIAL);
++                            return '}';
++                        }
++
+ {ANY}                   {
++                            if (yytext[0] != ':')
++                                yyget_extra(yyscanner)->struct_kw_pending = false;
+                             return (unsigned char)yytext[0];
+                         }
+ 
+@@ -363,6 +431,26 @@
+     ctx->location.column += yyget_leng(ctx->scanner);
+ }
+ 
++static void count_lines(struct hlsl_ctx *ctx, const char *text, size_t len)
++{
++    size_t i, last = 0;
++    unsigned int lines = 0;
++
++    for (i = 0; i < len; ++i)
++    {
++        if (text[i] == '\n')
++        {
++            ++lines;
++            last = i + 1;
++        }
++    }
++    if (lines)
++    {
++        ctx->location.line += lines;
++        ctx->location.column = 1 + (len - last);
++    }
++}
++
+ int hlsl_lexer_compile(struct hlsl_ctx *ctx, const struct vkd3d_shader_code *hlsl)
+ {
+     YY_BUFFER_STATE buffer;
+--- a/libs/vkd3d/libs/vkd3d-shader/hlsl.y
++++ b/libs/vkd3d/libs/vkd3d-shader/hlsl.y
+@@ -32,6 +32,8 @@
+ {
+     struct hlsl_struct_field *fields;
+     size_t count, capacity;
++    struct hlsl_method_source *methods;
++    size_t method_count, method_capacity;
+ };
+ 
+ struct parse_initializer
+@@ -4231,6 +4233,45 @@
+     return !!add_expr(ctx, params->instrs, HLSL_OP1_ISINF, args, bool_type, loc);
+ }
+ 
++static bool intrinsic_isnan(struct hlsl_ctx *ctx,
++        const struct parse_initializer *params, const struct vkd3d_shader_location *loc)
++{
++    struct hlsl_ir_function_decl *func;
++    unsigned int component_count;
++    struct hlsl_ir_node *arg;
++    const char *template;
++    char *body;
++
++    static const char template_sm4[] =
++            "typedef bool%u boolX;\n"
++            "typedef float%u floatX;\n"
++            "boolX isnan(floatX x)\n"
++            "{\n"
++            "    return (asuint(x) & 0x7fffffff) > 0x7f800000;\n"
++            "}\n";
++
++    static const char template_sm1[] =
++            "typedef bool%u boolX;\n"
++            "typedef float%u floatX;\n"
++            "boolX isnan(floatX x)\n"
++            "{\n"
++            "    return x != x;\n"
++            "}\n";
++
++    arg = intrinsic_float_convert_arg(ctx, params, params->args[0], loc);
++    component_count = hlsl_type_component_count(arg->data_type);
++    template = hlsl_version_ge(ctx, 4, 0) ? template_sm4 : template_sm1;
++
++    if (!(body = hlsl_sprintf_alloc(ctx, template, component_count, component_count)))
++        return false;
++    func = hlsl_compile_internal_function(ctx, "isnan", body);
++    vkd3d_free(body);
++    if (!func)
++        return false;
++
++    return !!add_user_call(ctx, func, params, loc);
++}
++
+ static bool intrinsic_ldexp(struct hlsl_ctx *ctx,
+         const struct parse_initializer *params, const struct vkd3d_shader_location *loc)
+ {
+@@ -5615,6 +5656,7 @@
+     {"frexp",                               2, true,  intrinsic_frexp},
+     {"fwidth",                              1, true,  intrinsic_fwidth},
+     {"isinf",                               1, true,  intrinsic_isinf},
++    {"isnan",                               1, true,  intrinsic_isnan},
+     {"ldexp",                               2, true,  intrinsic_ldexp},
+     {"length",                              1, true,  intrinsic_length},
+     {"lerp",                                3, true,  intrinsic_lerp},
+@@ -5674,9 +5716,67 @@
+     return strcmp(a, func->name);
+ }
+ 
++/* Inside a struct method, a bare identifier naming a field of that struct reads __this.<field>. */
++static struct hlsl_block *add_method_field_access(struct hlsl_ctx *ctx, const char *name,
++        const struct vkd3d_shader_location *loc)
++{
++    struct hlsl_ir_var *this_var;
++    struct hlsl_block *block;
++
++    if (!ctx->method_type || !get_struct_field(ctx->method_type->e.record.fields,
++            ctx->method_type->e.record.field_count, name))
++        return NULL;
++    if (!(this_var = hlsl_get_var(ctx->cur_scope, "__this")))
++        return NULL;
++    if (!(block = make_empty_block(ctx)))
++        return NULL;
++    hlsl_block_add_simple_load(ctx, block, this_var, loc);
++    add_record_access_recurse(ctx, block, name, loc);
++    return block;
++}
++
++static bool prepend_this_argument(struct hlsl_ctx *ctx, struct parse_initializer *args,
++        struct hlsl_ir_var *this_var, const struct vkd3d_shader_location *loc)
++{
++    struct hlsl_ir_node **new_args;
++
++    if (!(new_args = vkd3d_realloc(args->args, (args->args_count + 1) * sizeof(*new_args))))
++        return false;
++    args->args = new_args;
++    memmove(args->args + 1, args->args, args->args_count * sizeof(*args->args));
++    args->args[0] = hlsl_block_add_simple_load(ctx, args->instrs, this_var, loc);
++    ++args->args_count;
++    return true;
++}
++
++static struct hlsl_block *add_call_resolved(struct hlsl_ctx *ctx, const char *name,
++        struct parse_initializer *args, const struct vkd3d_shader_location *loc);
++
+ static struct hlsl_block *add_call(struct hlsl_ctx *ctx, const char *name,
+         struct parse_initializer *args, const struct vkd3d_shader_location *loc)
+ {
++    char *mangled;
++
++    /* Inside a struct method, a bare call names a method of the same struct first. */
++    if (ctx->method_type && (mangled = hlsl_method_name(ctx, ctx->method_type, name)))
++    {
++        struct hlsl_ir_var *this_var = hlsl_get_var(ctx->cur_scope, "__this");
++
++        if (rb_get(&ctx->functions, mangled) && this_var && prepend_this_argument(ctx, args, this_var, loc))
++        {
++            struct hlsl_block *block = add_call_resolved(ctx, mangled, args, loc);
++
++            vkd3d_free(mangled);
++            return block;
++        }
++        vkd3d_free(mangled);
++    }
++    return add_call_resolved(ctx, name, args, loc);
++}
++
++static struct hlsl_block *add_call_resolved(struct hlsl_ctx *ctx, const char *name,
++        struct parse_initializer *args, const struct vkd3d_shader_location *loc)
++{
+     const struct intrinsic_function *intrinsic;
+     struct hlsl_ir_function_decl *decl;
+ 
+@@ -5929,6 +6029,22 @@
+     return add_expr(ctx, block, HLSL_OP3_TERNARY, args, common_type, &first->loc);
+ }
+ 
++/* The gradient arguments of SampleGrad() have the texture's dimensionality; an array slice is not part of them. */
++static unsigned int hlsl_gradient_dim_count(enum hlsl_sampler_dim dim)
++{
++    switch (dim)
++    {
++        case HLSL_SAMPLER_DIM_1DARRAY:
++            return 1;
++        case HLSL_SAMPLER_DIM_2DARRAY:
++            return 2;
++        case HLSL_SAMPLER_DIM_CUBEARRAY:
++            return 3;
++        default:
++            return hlsl_sampler_dim_count(dim);
++    }
++}
++
+ static unsigned int hlsl_offset_dim_count(enum hlsl_sampler_dim dim)
+ {
+     switch (dim)
+@@ -6558,10 +6674,11 @@
+ {
+     const struct hlsl_type *object_type = object->data_type;
+     struct hlsl_resource_load_params load_params = { 0 };
+-    unsigned int sampler_dim, offset_dim;
++    unsigned int sampler_dim, gradient_dim, offset_dim;
+     const struct hlsl_type *sampler_type;
+ 
+     sampler_dim = hlsl_sampler_dim_count(object_type->sampler_dim);
++    gradient_dim = hlsl_gradient_dim_count(object_type->sampler_dim);
+     offset_dim = hlsl_offset_dim_count(object_type->sampler_dim);
+ 
+     load_params.type = HLSL_RESOURCE_SAMPLE_GRAD;
+@@ -6589,9 +6706,9 @@
+     load_params.coords = add_implicit_conversion(ctx, block, params->args[1],
+             hlsl_get_vector_type(ctx, HLSL_TYPE_FLOAT, sampler_dim), loc);
+     load_params.ddx = add_implicit_conversion(ctx, block, params->args[2],
+-            hlsl_get_vector_type(ctx, HLSL_TYPE_FLOAT, sampler_dim), loc);
++            hlsl_get_vector_type(ctx, HLSL_TYPE_FLOAT, gradient_dim), loc);
+     load_params.ddy = add_implicit_conversion(ctx, block, params->args[3],
+-            hlsl_get_vector_type(ctx, HLSL_TYPE_FLOAT, sampler_dim), loc);
++            hlsl_get_vector_type(ctx, HLSL_TYPE_FLOAT, gradient_dim), loc);
+ 
+     if (offset_dim && params->args_count > 4)
+         load_params.texel_offset = add_implicit_conversion(ctx, block, params->args[4],
+@@ -6749,6 +6866,49 @@
+     return strcmp(a, func->name);
+ }
+ 
++/* obj.Method(args) on a struct calls the method's free function with obj as the inout __this argument. */
++static bool add_struct_method_call(struct hlsl_ctx *ctx, struct hlsl_block *block, struct hlsl_ir_node *object,
++        const char *name, const struct parse_initializer *params, const struct vkd3d_shader_location *loc)
++{
++    struct parse_initializer args = {0};
++    struct hlsl_ir_function_decl *decl;
++    bool ret = false;
++    char *mangled;
++
++    if (!(mangled = hlsl_method_name(ctx, object->data_type, name)) || !rb_get(&ctx->functions, mangled))
++    {
++        struct vkd3d_string_buffer *string;
++
++        if ((string = hlsl_type_to_string(ctx, object->data_type)))
++            hlsl_error(ctx, loc, VKD3D_SHADER_ERROR_HLSL_NOT_DEFINED,
++                    "Method '%s' is not defined on type '%s'.", name, string->buffer);
++        hlsl_release_string_buffer(ctx, string);
++        vkd3d_free(mangled);
++        return false;
++    }
++
++    if (!(args.args = hlsl_alloc(ctx, (params->args_count + 1) * sizeof(*args.args))))
++    {
++        vkd3d_free(mangled);
++        return false;
++    }
++    args.args[0] = object;
++    memcpy(args.args + 1, params->args, params->args_count * sizeof(*args.args));
++    args.args_count = params->args_count + 1;
++    args.instrs = block;
++    args.loc = *loc;
++
++    if ((decl = find_function_call(ctx, mangled, &args, false, loc)))
++        ret = !!add_user_call(ctx, decl, &args, loc);
++    else
++        hlsl_error(ctx, loc, VKD3D_SHADER_ERROR_HLSL_NOT_DEFINED,
++                "No compatible %u parameter declaration for method \"%s\" found.", params->args_count, name);
++
++    vkd3d_free(args.args);
++    vkd3d_free(mangled);
++    return ret;
++}
++
+ static bool add_method_call(struct hlsl_ctx *ctx, struct hlsl_block *block, struct hlsl_ir_node *object,
+         const char *name, const struct parse_initializer *params, const struct vkd3d_shader_location *loc)
+ {
+@@ -6770,6 +6930,9 @@
+         }
+     }
+ 
++    if (object_type->class == HLSL_CLASS_STRUCT)
++        return add_struct_method_call(ctx, block, object, name, params, loc);
++
+     if (object_type->class == HLSL_CLASS_TEXTURE)
+     {
+         method = bsearch(name, texture_methods, ARRAY_SIZE(texture_methods), sizeof(*method),
+@@ -7220,6 +7383,7 @@
+ %token <name> VAR_IDENTIFIER
+ %token <name> NEW_IDENTIFIER
+ %token <name> STRING
++%token <name> METHOD_TEXT
+ %token <name> TYPE_IDENTIFIER
+ 
+ %type <scope> annotations_opt
+@@ -7562,12 +7726,33 @@
+                 hlsl_error(ctx, &@2, VKD3D_SHADER_ERROR_HLSL_REDEFINED, "Struct \"%s\" is already defined.", $2);
+                 YYABORT;
+             }
++
++            if ($5.method_count)
++            {
++                size_t i;
++
++                ret = hlsl_compile_struct_methods(ctx, $$, $5.methods, $5.method_count);
++                for (i = 0; i < $5.method_count; ++i)
++                    vkd3d_free($5.methods[i].text);
++                vkd3d_free($5.methods);
++                if (!ret)
++                    YYABORT;
++            }
+         }
+ 
+ unnamed_struct_spec:
+       KW_STRUCT '{' fields_list '}'
+         {
+             $$ = hlsl_new_struct_type(ctx, NULL, $3.fields, $3.count);
++            if ($3.method_count)
++            {
++                size_t i;
++
++                hlsl_fixme(ctx, &@1, "Methods of an unnamed struct.");
++                for (i = 0; i < $3.method_count; ++i)
++                    vkd3d_free($3.methods[i].text);
++                vkd3d_free($3.methods);
++            }
+         }
+ 
+ any_identifier:
+@@ -7599,6 +7784,19 @@
+             $$.fields = NULL;
+             $$.count = 0;
+             $$.capacity = 0;
++            $$.methods = NULL;
++            $$.method_count = 0;
++            $$.method_capacity = 0;
++        }
++    | fields_list METHOD_TEXT
++        {
++            if (!hlsl_array_reserve(ctx, (void **)&$1.methods, &$1.method_capacity,
++                    $1.method_count + 1, sizeof(*$1.methods)))
++                YYABORT;
++            $1.methods[$1.method_count].text = $2;
++            $1.methods[$1.method_count].loc = @2;
++            ++$1.method_count;
++            $$ = $1;
+         }
+     | fields_list field
+         {
+@@ -9582,6 +9780,7 @@
+     | VAR_IDENTIFIER
+         {
+             struct hlsl_ir_var *var;
++            struct hlsl_block *field;
+ 
+             if ((var = hlsl_get_var(ctx->cur_scope, $1)))
+             {
+@@ -9591,6 +9790,11 @@
+                     YYABORT;
+                 hlsl_block_add_simple_load(ctx, $$, var, &@1);
+             }
++            else if ((field = add_method_field_access(ctx, $1, &@1)))
++            {
++                vkd3d_free($1);
++                $$ = field;
++            }
+             else
+             {
+                 hlsl_error(ctx, &@1, VKD3D_SHADER_ERROR_HLSL_NOT_DEFINED, "Variable \"%s\" is not defined.", $1);
+@@ -9665,6 +9869,10 @@
+                 if (!($$ = make_block(ctx, constant)))
+                     YYABORT;
+             }
++            else if (($$ = add_method_field_access(ctx, $1, &@1)))
++            {
++                vkd3d_free($1);
++            }
+             else
+             {
+                 hlsl_error(ctx, &@1, VKD3D_SHADER_ERROR_HLSL_NOT_DEFINED, "Identifier \"%s\" is not declared.", $1);
+--- a/libs/vkd3d/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d/libs/vkd3d-shader/hlsl_codegen.c
+@@ -9214,28 +9214,105 @@
+     return false;
+ }
+ 
++/* One evaluation of "assume cond = cond_value" over an expression graph. The graph is a DAG, so
++ * every node is visited once and its result (NULL = unchanged) is remembered; walking it as a tree
++ * is exponential in the sharing depth. */
++struct conditional_eval
++{
++    const struct hlsl_ir_node *cond;
++    bool cond_value;
++    struct conditional_eval_entry
++    {
++        const struct hlsl_ir_node *key;
++        struct hlsl_ir_node *result;
++    } *entries;
++    size_t capacity, count;
++};
++
++static size_t conditional_eval_slot(const struct conditional_eval *eval, const struct hlsl_ir_node *key)
++{
++    size_t mask = eval->capacity - 1, i;
++
++    for (i = (((uintptr_t)key >> 4) * 2654435761u) & mask; eval->entries[i].key && eval->entries[i].key != key;
++            i = (i + 1) & mask);
++    return i;
++}
++
++static bool conditional_eval_lookup(const struct conditional_eval *eval,
++        const struct hlsl_ir_node *key, struct hlsl_ir_node **result)
++{
++    size_t i;
++
++    if (!eval->capacity)
++        return false;
++    i = conditional_eval_slot(eval, key);
++    if (!eval->entries[i].key)
++        return false;
++    *result = eval->entries[i].result;
++    return true;
++}
++
++static void conditional_eval_insert(struct hlsl_ctx *ctx, struct conditional_eval *eval,
++        const struct hlsl_ir_node *key, struct hlsl_ir_node *result)
++{
++    size_t i;
++
++    if ((eval->count + 1) * 2 > eval->capacity)
++    {
++        struct conditional_eval_entry *old_entries = eval->entries;
++        size_t old_capacity = eval->capacity;
++
++        eval->capacity = old_capacity ? old_capacity * 2 : 64;
++        if (!(eval->entries = hlsl_calloc(ctx, eval->capacity, sizeof(*eval->entries))))
++        {
++            eval->entries = old_entries;
++            eval->capacity = old_capacity;
++            return;
++        }
++        for (i = 0; i < old_capacity; ++i)
++        {
++            if (old_entries[i].key)
++                eval->entries[conditional_eval_slot(eval, old_entries[i].key)] = old_entries[i];
++        }
++        vkd3d_free(old_entries);
++    }
++    i = conditional_eval_slot(eval, key);
++    if (!eval->entries[i].key)
++        ++eval->count;
++    eval->entries[i].key = key;
++    eval->entries[i].result = result;
++}
++
++static void conditional_eval_cleanup(struct conditional_eval *eval)
++{
++    vkd3d_free(eval->entries);
++}
++
+ /* Replaces all conditionals in an expression chain of the form (cond ? x : y)
+  * with x or y, assuming cond = cond_value. */
+-static struct hlsl_ir_node *evaluate_conditionals_recurse(struct hlsl_ctx *ctx,
+-        struct hlsl_block *block, const struct hlsl_ir_node *cond, bool cond_value,
+-        struct hlsl_ir_node *instr, const struct vkd3d_shader_location *loc)
++static struct hlsl_ir_node *evaluate_conditionals_recurse(struct hlsl_ctx *ctx, struct hlsl_block *block,
++        struct conditional_eval *eval, struct hlsl_ir_node *instr, const struct vkd3d_shader_location *loc)
+ {
+     struct hlsl_ir_node *operands[HLSL_MAX_OPERANDS] = {0};
++    struct hlsl_ir_node *res = NULL;
+     struct hlsl_ir_expr *expr;
+-    struct hlsl_ir_node *res;
+     bool progress = false;
+     unsigned int i;
+ 
+     if (instr->type != HLSL_IR_EXPR)
+         return NULL;
++    if (conditional_eval_lookup(eval, instr, &res))
++        return res;
+     expr = hlsl_ir_expr(instr);
+ 
+-    if (expr->op == HLSL_OP3_TERNARY && nodes_are_equivalent(cond, expr->operands[0].node))
++    if (expr->op == HLSL_OP3_TERNARY && nodes_are_equivalent(eval->cond, expr->operands[0].node))
+     {
+-        struct hlsl_ir_node *x = cond_value ? expr->operands[1].node : expr->operands[2].node;
++        struct hlsl_ir_node *x = eval->cond_value ? expr->operands[1].node : expr->operands[2].node;
+ 
+-        res = evaluate_conditionals_recurse(ctx, block, cond, cond_value, x, loc);
+-        return res ? res : x;
++        res = evaluate_conditionals_recurse(ctx, block, eval, x, loc);
++        res = res ? res : x;
++        conditional_eval_insert(ctx, eval, instr, res);
++        return res;
+     }
+ 
+     for (i = 0; i < HLSL_MAX_OPERANDS; ++i)
+@@ -9243,7 +9320,7 @@
+         if (!expr->operands[i].node)
+             break;
+ 
+-        operands[i] = evaluate_conditionals_recurse(ctx, block, cond, cond_value, expr->operands[i].node, loc);
++        operands[i] = evaluate_conditionals_recurse(ctx, block, eval, expr->operands[i].node, loc);
+ 
+         if (operands[i])
+             progress = true;
+@@ -9252,9 +9329,21 @@
+     }
+ 
+     if (progress)
+-        return hlsl_block_add_expr(ctx, block, expr->op, operands, expr->node.data_type, loc);
++        res = hlsl_block_add_expr(ctx, block, expr->op, operands, expr->node.data_type, loc);
++    conditional_eval_insert(ctx, eval, instr, res);
++    return res;
++}
+ 
+-    return NULL;
++static struct hlsl_ir_node *evaluate_conditionals(struct hlsl_ctx *ctx, struct hlsl_block *block,
++        const struct hlsl_ir_node *cond, bool cond_value, struct hlsl_ir_node *instr,
++        const struct vkd3d_shader_location *loc)
++{
++    struct conditional_eval eval = {.cond = cond, .cond_value = cond_value};
++    struct hlsl_ir_node *res;
++
++    res = evaluate_conditionals_recurse(ctx, block, &eval, instr, loc);
++    conditional_eval_cleanup(&eval);
++    return res;
+ }
+ 
+ static struct hlsl_ir_node *fold_conditional_identities(struct hlsl_ctx *ctx,
+@@ -9283,6 +9372,13 @@
+     if (nodes_are_equivalent(x, y))
+         return x;
+ 
++    /* c ? k : k -> k, for two constants of the same value. */
++    if (x->type == HLSL_IR_CONSTANT && y->type == HLSL_IR_CONSTANT
++            && hlsl_types_are_equal(x->data_type, y->data_type)
++            && !memcmp(hlsl_ir_constant(x)->value.u, hlsl_ir_constant(y)->value.u,
++                    x->data_type->e.numeric.dimx * sizeof(hlsl_ir_constant(x)->value.u[0])))
++        return x;
++
+     if (c->type == HLSL_IR_CONSTANT)
+     {
+         /* false ? x : y -> y */
+@@ -9312,14 +9408,69 @@
+     if (ec && ec->op == HLSL_OP1_LOGIC_NOT)
+         return hlsl_add_conditional(ctx, block, ec->operands[0].node, y, x);
+ 
+-    res_x = evaluate_conditionals_recurse(ctx, block, c, true, x, &instr->loc);
+-    res_y = evaluate_conditionals_recurse(ctx, block, c, false, y, &instr->loc);
++    res_x = evaluate_conditionals(ctx, block, c, true, x, &instr->loc);
++    res_y = evaluate_conditionals(ctx, block, c, false, y, &instr->loc);
+     if (res_x || res_y)
+         return hlsl_add_conditional(ctx, block, c, res_x ? res_x : x, res_y ? res_y : y);
+ 
+     return NULL;
+ }
+ 
++/* OP(k, c ? a : b) -> c ? OP(k, a) : OP(k, b) when k, a and b are constants: the arms then fold,
++ * so a comparison against a bounded select becomes the condition itself or a constant. A loop
++ * bound such as "flag ? 4 : 2" can be unrolled that way. */
++static struct hlsl_ir_node *fold_binary_over_conditional(struct hlsl_ctx *ctx,
++        struct hlsl_ir_node *instr, struct hlsl_block *block)
++{
++    struct hlsl_ir_node *operands[HLSL_MAX_OPERANDS] = {0};
++    struct hlsl_ir_node *lhs, *rhs, *c, *x, *y, *res_x, *res_y;
++    struct hlsl_ir_expr *expr, *sel;
++    bool select_is_rhs;
++
++    if (instr->type != HLSL_IR_EXPR)
++        return NULL;
++
++    if (instr->data_type->class > HLSL_CLASS_VECTOR)
++        return NULL;
++
++    expr = hlsl_ir_expr(instr);
++    if (!expr->operands[1].node || expr->operands[2].node)
++        return NULL;
++
++    lhs = expr->operands[0].node;
++    rhs = expr->operands[1].node;
++    if (lhs->type == HLSL_IR_CONSTANT && rhs->type == HLSL_IR_EXPR)
++        select_is_rhs = true;
++    else if (rhs->type == HLSL_IR_CONSTANT && lhs->type == HLSL_IR_EXPR)
++        select_is_rhs = false;
++    else
++        return NULL;
++
++    sel = hlsl_ir_expr(select_is_rhs ? rhs : lhs);
++    if (sel->op != HLSL_OP3_TERNARY)
++        return NULL;
++
++    c = sel->operands[0].node;
++    x = sel->operands[1].node;
++    y = sel->operands[2].node;
++    if (x->type != HLSL_IR_CONSTANT || y->type != HLSL_IR_CONSTANT)
++        return NULL;
++    if (c->data_type->e.numeric.dimx != instr->data_type->e.numeric.dimx)
++        return NULL;
++
++    operands[0] = select_is_rhs ? lhs : x;
++    operands[1] = select_is_rhs ? x : rhs;
++    res_x = hlsl_block_add_expr(ctx, block, expr->op, operands, instr->data_type, &instr->loc);
++    operands[0] = select_is_rhs ? lhs : y;
++    operands[1] = select_is_rhs ? y : rhs;
++    res_y = hlsl_block_add_expr(ctx, block, expr->op, operands, instr->data_type, &instr->loc);
++
++    operands[0] = c;
++    operands[1] = res_x;
++    operands[2] = res_y;
++    return hlsl_block_add_expr(ctx, block, HLSL_OP3_TERNARY, operands, instr->data_type, &instr->loc);
++}
++
+ static bool simplify_exprs(struct hlsl_ctx *ctx, struct hlsl_block *block)
+ {
+     bool progress, any_progress = false;
+@@ -9330,6 +9481,7 @@
+         progress |= replace_ir(ctx, hlsl_fold_binary_exprs, block);
+         progress |= replace_ir(ctx, fold_unary_identities, block);
+         progress |= replace_ir(ctx, fold_conditional_identities, block);
++        progress |= replace_ir(ctx, fold_binary_over_conditional, block);
+         progress |= replace_ir(ctx, hlsl_fold_constant_identities, block);
+         progress |= replace_ir(ctx, hlsl_fold_constant_swizzles, block);
+ 
+@@ -11809,6 +11961,10 @@
+         write_mask = var->regs[HLSL_REGSET_NUMERIC].writemask;
+     }
+ 
++    /* The input coverage mask lives in its own register and is declared without an interpolation mode. */
++    if (type == VKD3DSPR_COVERAGE)
++        opcode = VSIR_OP_DCL_INPUT;
++
+     if (!(ins = generate_vsir_add_program_instruction(ctx, program, loc, opcode, 0, 0)))
+         return;
+ 
+@@ -11855,7 +12011,7 @@
+ 
+     dst->write_mask = write_mask;
+ 
+-    if (var->is_input_semantic && version->type == VKD3D_SHADER_TYPE_PIXEL)
++    if (var->is_input_semantic && version->type == VKD3D_SHADER_TYPE_PIXEL && type != VKD3DSPR_COVERAGE)
+         ins->flags = get_interpolation_mode(version, var->data_type, var->storage_modifiers);
+ }
+ 
+--- a/libs/vkd3d/libs/vkd3d-shader/preproc.l
++++ b/libs/vkd3d/libs/vkd3d-shader/preproc.l
+@@ -868,6 +868,33 @@
+     if (!(source_name = vkd3d_strdup(loc.source_name)))
+         goto fail;
+ 
++    /* The native compiler predefines HLSL_VERSION, and headers such as D3DX_DXGIFormatConvert.inl select
++     * their HLSL body on it ("#if HLSL_VERSION > 0"). Define it unless the caller's macros do. */
++    for (i = 0; i < ctx.preprocess_info->macro_count; ++i)
++    {
++        if (!strcmp(ctx.preprocess_info->macros[i].name, "HLSL_VERSION"))
++            break;
++    }
++    if (i == ctx.preprocess_info->macro_count)
++    {
++        struct vkd3d_string_buffer body;
++        char *name;
++
++        vkd3d_string_buffer_init(&body);
++        vkd3d_string_buffer_printf(&body, "1");
++        if (!(name = vkd3d_strdup("HLSL_VERSION")))
++        {
++            vkd3d_string_buffer_cleanup(&body);
++            goto fail;
++        }
++        if (!preproc_add_macro(&ctx, &loc, name, NULL, 0, &loc, &body))
++        {
++            vkd3d_free(name);
++            vkd3d_string_buffer_cleanup(&body);
++            goto fail;
++        }
++    }
++
+     for (i = 0; i < ctx.preprocess_info->macro_count; ++i)
+     {
+         struct vkd3d_string_buffer body;
+--- a/libs/vkd3d/libs/vkd3d-shader/tpf.c
++++ b/libs/vkd3d/libs/vkd3d-shader/tpf.c
+@@ -2991,6 +2991,7 @@
+         {"sv_depth",            true,  VKD3D_SHADER_TYPE_PIXEL,    VKD3DSPR_DEPTHOUT,      false},
+         {"sv_target",           true,  VKD3D_SHADER_TYPE_PIXEL,    VKD3DSPR_OUTPUT,        true},
+         {"sv_coverage",         true,  VKD3D_SHADER_TYPE_PIXEL,    VKD3DSPR_SAMPLEMASK,    false},
++        {"sv_coverage",         false, VKD3D_SHADER_TYPE_PIXEL,    VKD3DSPR_COVERAGE,      false},
+         {"sv_stencilref",       true,  VKD3D_SHADER_TYPE_PIXEL,    VKD3DSPR_OUTSTENCILREF, false},
+     };
+ 
+@@ -3123,6 +3124,7 @@
+ 
+         {"position",                    false, VKD3D_SHADER_TYPE_PIXEL,     VKD3D_SHADER_SV_POSITION},
+         {"sv_clipdistance",             false, VKD3D_SHADER_TYPE_PIXEL,     VKD3D_SHADER_SV_CLIP_DISTANCE},
++        {"sv_coverage",                 false, VKD3D_SHADER_TYPE_PIXEL,     ~0u},
+         {"sv_culldistance",             false, VKD3D_SHADER_TYPE_PIXEL,     VKD3D_SHADER_SV_CULL_DISTANCE},
+         {"sv_isfrontface",              false, VKD3D_SHADER_TYPE_PIXEL,     VKD3D_SHADER_SV_IS_FRONT_FACE},
+         {"sv_position",                 false, VKD3D_SHADER_TYPE_PIXEL,     VKD3D_SHADER_SV_POSITION},

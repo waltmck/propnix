@@ -72,12 +72,13 @@ mkApp {
   ];
 
   wine = {
-    # VRage compiles HLSL at runtime and its shaders branch on `HLSL_VERSION`, which only
-    # Microsoft's compiler predefines, not wine's vkd3d-shader (docs/research/wine-builtin-gaps.md).
-    # The depot ships Microsoft's beside the exe; "n,b" keeps the builtin as fallback.
+    # VRage compiles HLSL at runtime; its GPU-particle compute shaders use
+    # AppendStructuredBuffer/ConsumeStructuredBuffer (UAV counters), which wine's vkd3d-shader has no
+    # front end for (docs/research/wine-builtin-gaps.md). The depot ships Microsoft's compiler beside
+    # the exe; "n,b" keeps the builtin as fallback.
     dllOverrides.d3dcompiler_47 = {
       value = "n,b";
-      reason = "native: the depot ships Microsoft's d3dcompiler_47 beside the exe, and only it predefines HLSL_VERSION — wine's vkd3d-shader builtin does not, so D3DX_DXGIFormatConvert.inl takes its C++ branch and every runtime shader compile fails (measured).";
+      reason = "native: the depot ships Microsoft's d3dcompiler_47 beside the exe; wine's vkd3d-shader builtin has no AppendStructuredBuffer/ConsumeStructuredBuffer (UAV counters), which the GPU-particle compute shaders need.";
     };
   };
 

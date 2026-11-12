@@ -32,8 +32,17 @@
 #     none of the 16K jemalloc walls apply here — memory/loader are wine's responsibility, FEX/box64
 #     only JIT blocks. (A 16K-page runtime re-test of these DLLs happens at integration.)
 #
+#   * aarch64-unix/lib{arm64ec,wow64}fex.so — FEX's wine UNIXLIB, one per DLL (Source/Windows/UnixLib),
+#                          built natively for the host. The DLLs reach the kernel only through it: every
+#                          prctl they make (PR_SET_MEM_MODEL for hardware TSO, PR_ARM64_SET_UNALIGN_ATOMIC
+#                          for in-kernel unaligned-atomic handling), madvise/VMA naming, the disk cache's
+#                          file mapping. Without it each of those quietly reports "not supported" and FEX
+#                          falls back, most expensively to software TSO. Wine loads it by name from
+#                          `<dir>/aarch64-unix/` for each directory on WINEDLLPATH, which the launcher points
+#                          at this package (docs/research/fex-unixlib.md).
+#
 # Build/verify:
-#   nix build .#fexdlls   # -> $out/{libarm64ecfex.dll,libwow64fex.dll,wowbox64.dll}
+#   nix build .#fexdlls   # -> $out/{libarm64ecfex.dll,libwow64fex.dll,wowbox64.dll,aarch64-unix/*.so}
 #   llvm-readobj --file-headers $out/libarm64ecfex.dll | grep Machine   # ARM64EC (0xA641)
 #   llvm-readobj --file-headers $out/libwow64fex.dll   | grep Machine   # ARM64   (0xAA64)
 #   llvm-readobj --file-headers $out/wowbox64.dll      | grep Machine   # ARM64   (0xAA64)
@@ -221,6 +230,15 @@ stdenv.mkDerivation {
     cmake -S . -B build_wow64 $common -DMINGW_TRIPLE=aarch64-w64-mingw32
     echo "=== building wow64fex ==="
     ninja -C build_wow64 wow64fex
+    # The unixlib is an ordinary host ELF: the stdenv compiler, no mingw toolchain file. libstdc++ and
+    # libgcc are linked in statically because wine dlopen()s it into a process that also carries the
+    # graphics stack's own C++ runtime.
+    echo "=== configuring + building the unixlib (host ELF, lib{arm64ec,wow64}fex.so) ==="
+    cmake -S Source/Windows/UnixLib -B build_unixlib -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_CXX_COMPILER="${stdenv.cc}/bin/${stdenv.cc.targetPrefix}c++" \
+      -DCMAKE_SHARED_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+    ninja -C build_unixlib
 
     runHook postBuild
   '';
@@ -237,6 +255,17 @@ stdenv.mkDerivation {
 
     # wowbox64.dll (box64, separate derivation above) — copied in so $out ships all three emulators.
     install -m444 "${wowbox64}/wowbox64.dll" "$out/wowbox64.dll"
+    # The unixlib, where wine's load-by-name looks: `<WINEDLLPATH entry>/aarch64-unix/<name>.so`.
+    mkdir -p "$out/aarch64-unix"
+    for _u in libarm64ecfex.so libwow64fex.so; do
+      _f="$(find build_unixlib -name "$_u" -print -quit)"
+      [ -n "$_f" ] || { echo "ERROR: $_u not built"; exit 1; }
+      install -m555 "$_f" "$out/aarch64-unix/$_u"
+      # The DLL resolves its entry points through this table; a build without it loads and then fails
+      # every call.
+      nm -D --defined-only "$out/aarch64-unix/$_u" | grep -q ' __wine_unix_call_funcs$' \
+        || { echo "ERROR: $_u exports no __wine_unix_call_funcs"; exit 1; }
+    done
 
     # Sanity: assert the PE machine types (0xA641 / 0xAA64 / 0xAA64).
     echo "== machine types =="
@@ -251,6 +280,7 @@ stdenv.mkDerivation {
     amd64Emulator = "libarm64ecfex.dll"; # x86_64 guests (ARM64EC 0xA641)
     x86Emulator = "libwow64fex.dll"; # i386 guests, FEX (native ARM64 0xAA64)
     x86EmulatorBox64 = "wowbox64.dll"; # i386 guests, box64 default (native ARM64 0xAA64)
+    unixlibDir = "aarch64-unix"; # FEX's wine unixlibs, relative to $out (a WINEDLLPATH entry is $out)
     inherit rev revHash box64Rev;
     inherit wowbox64; # the box64 sub-derivation, exposed for debugging/reuse
   };

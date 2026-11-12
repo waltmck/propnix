@@ -23,6 +23,7 @@
   dxvk,
   vkd3d,
   prefixLower,
+  fexdlls ? null, # aarch64: FEX's DLLs + their wine unixlib (aarch64-unix/). x86_64: null (native wine).
   gnutar,
   mkStoreSkeleton,
   mkWineReg,
@@ -402,6 +403,12 @@ let
         # MangoHud package root — under PROPNIX_BENCH the launcher puts `<mangohud>/share` on the child's
         # XDG_DATA_DIRS to load MangoHud's Vulkan implicit layer (covers DXVK + vkd3d; no GL hook).
         mangohud = "${mangohud}";
+      }
+      // lib.optionalAttrs (fexdlls != null) {
+        # WINEDLLPATH entry for FEX's unixlib (`${fexdlls}/${fexdlls.unixlibDir}/lib{arm64ec,wow64}fex.so`):
+        # the FEX DLLs make every kernel call (hardware TSO, unaligned atomics, file mapping) through it,
+        # and wine finds it only by name under a WINEDLLPATH directory.
+        wineDllPath = "${fexdlls}";
       };
       defaults = {
         graphics = flat.graphics;

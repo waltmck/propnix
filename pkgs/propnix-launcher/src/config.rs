@@ -279,6 +279,11 @@ pub struct Emulators {
     /// Vulkan implicit layer by adding `<mangohud>/share` to the child's XDG_DATA_DIRS (+ MANGOHUD=1) — one
     /// overlay covering both DXVK and vkd3d. No GL hook, so it never touches the wined3d path.
     pub mangohud: String,
+    /// A directory for wine's WINEDLLPATH, baked on aarch64 only: FEX's package, whose `aarch64-unix/` holds
+    /// the unixlib (`lib{arm64ec,wow64}fex.so`) the FEX DLLs make every kernel call through. Wine loads a
+    /// unixlib by name only from `<WINEDLLPATH entry>/aarch64-unix/` (or its own install tree).
+    #[serde(rename = "wineDllPath", default)]
+    pub wine_dll_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

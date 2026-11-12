@@ -76,6 +76,12 @@ impl ChildEnv {
             .join(";");
         push("WINEDLLOVERRIDES", joined);
 
+        // FEX's unixlib directory (aarch64): without it the FEX DLLs cannot enable hardware TSO or the
+        // kernel's unaligned-atomic handling and fall back to emulating both.
+        if let Some(dir) = &cfg.emulators.wine_dll_path {
+            push("WINEDLLPATH", dir.clone());
+        }
+
         if cfg.backend == "winefex" {
             // FEX's disk cache of JIT'd guest blocks (the box64 DynaCache sibling, thin.rs): on by default,
             // under the app's cache dir rather than FEX's %LOCALAPPDATA% default so it lives beside the

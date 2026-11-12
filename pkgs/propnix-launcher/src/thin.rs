@@ -465,11 +465,11 @@ fn run_inner(cfg: &ThinConfig, settings: &Settings, paths: &Paths, passthrough: 
         cmd.env("BOX64_DYNACACHE", "1");
         cmd.env("BOX64_DYNACACHE_FOLDER", &dynacache);
     }
-    // FEX's equivalent (FEX only): the disk cache of JIT'd guest blocks, keyed by FEX's own version and the
-    // emulated image, pruned of stale FEX builds by FEX itself. Same placement and override rule as above.
+    // FEX's equivalent (FEX only): the disk cache of JIT'd guest blocks, in the same directory the wine path
+    // uses (`paths.fex_cache`, named by kernel TSO support). Same placement and override rule as above.
     if cfg.emulator.as_deref().map_or(false, |e| e.to_ascii_lowercase().contains("fex")) {
-        let diskcache = paths.cache.join("fex");
-        let _ = std::fs::create_dir_all(&diskcache);
+        let diskcache = &paths.fex_cache;
+        let _ = std::fs::create_dir_all(diskcache);
         cmd.env("FEX_DISKCACHE", "1");
         cmd.env("FEX_DISKCACHEPATH", format!("{}/", diskcache.to_string_lossy()));
     }

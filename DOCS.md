@@ -36,30 +36,31 @@ knobs, how it runs, and credentials.
   entirely, set `PROPNIX_WINE_D3D=wined3d` (wine's GL/GDI path). On Asahi, MangoHud's GPU stats are blank
   (driver unsupported) but fps/frametime/CPU render.
 
-- **A display: Wayland (with Xwayland), or X11.** The default wine display driver is **winewayland**
-  (`graphics=wayland`); `PROPNIX_WINE_GRAPHICS=x11` selects the X11 driver (native X or Xwayland). The GTK4
-  splash and the game window both need a display server.
+- **A Wayland compositor.** Every game runs inside **gamescope** (its Wayland backend), which is one
+  Wayland client of your compositor: a window whose app_id is the game's `.desktop` id
+  (`org.propnix.<appid>`, so it gets the game's icon and taskbar entry) and whose title is the game's name,
+  fullscreen at `PROPNIX_WIDTH×PROPNIX_HEIGHT` (default: the primary output's mode). The game itself draws
+  into gamescope's own Xwayland — wine through winex11 (`graphics=x11`), SDL through its x11 driver — so the
+  compositor needs no Xwayland, and every game presents the same way whatever API it uses. gamescope needs
+  the usual modern globals (`linux-dmabuf` v3+, `wp_viewporter`, `wp_presentation`, relative-pointer +
+  pointer-constraints, `wl_seat` v8+) and composites with Vulkan. HDR reaches an HDR output through
+  gamescope's color management when the compositor offers `wp_color_management_v1`; a title still opts in
+  with `env.DXVK_HDR`. The GTK4 splash stays a native window of the compositor.
 
-- **(Optional) a way to see and raise another client's window.** `focus.rs` wants this for three things,
-  and they do NOT need the same protocol — which is why no single compositor family is required:
+- **(Optional) `xdg_activation_v1`, for a duplicate launch focusing the running game.** No window is
+  raised from outside: the duplicate hands its activation token (`XDG_ACTIVATION_TOKEN`, which a desktop
+  sets for an entry with `StartupNotify=true` — every game's has it) to the running launcher over
+  `$XDG_RUNTIME_DIR/propnix/<appid>/activate`, and the window being shown presents it itself — the GTK
+  splash, or the game through gamescope (patch 0004, a root property on gamescope's X server). A shell
+  launch has no token: gamescope then requests one stamped with its own last input, and the compositor's
+  focus-stealing policy decides — Hyprland focuses with `misc:focus_on_activate = true` (otherwise it
+  marks the window urgent), GNOME and KDE show their attention hint. Every major compositor implements
+  the protocol, so no compositor-specific window management is involved.
 
-  *Seeing* the game's window (dismissing the splash for OpenGL titles that emit no first-frame marker, and
-  forcing teardown when you close the window, since some wine games hang on shutdown) takes any
-  toplevel LIST: `ext-foreign-toplevel-list-v1` first — portable, and present on Mutter 45+ as well as
-  wlroots — then `wlr-foreign-toplevel-management`, then KDE's `org_kde_plasma_window_management`. A pure
-  X11 session uses EWMH `_NET_CLIENT_LIST` instead. On a Wayland session the Wayland protocols are treated
-  as the only authority, because an Xwayland query would report a native-Wayland game window as absent and
-  trigger a false close-to-quit.
-
-  *Raising* it (a duplicate launch focusing the running game) needs an activate verb: EWMH
-  `_NET_ACTIVE_WINDOW` covers any Xwayland window under any compositor, `wlr-foreign-toplevel-management`
-  covers the wlroots family and COSMIC, and KDE is served by `org_kde_plasma_window_management` — KWin
-  implements neither of the first two, and reaching it additionally requires the installed
-  `X-KDE-Wayland-Interfaces` grant (see `pkgs/propnix-launcher/default.nix`), so an ungranted client never
-  even sees the global. GNOME Wayland is the one place with no activate verb for foreign clients: a
-  native-Wayland game window there cannot be raised, and the attempt is a silent no-op.
-
-  Everything degrades gracefully — the splash falls back to the first-present marker / timeout.
+  *Seeing* the game's window needs nothing from the compositor: the launcher reads gamescope's own nested
+  X server (the window gamescope is showing) to dismiss the splash for titles that emit no first-frame
+  marker and to tear down a game that hangs on shutdown after its window closes. Closing gamescope's window
+  shuts the game down directly.
 
 ## To build a game payload
 
@@ -481,9 +482,9 @@ session yields steamcommunity cookies, so treat it as full account access.
 **In:** the wine path (x86_64 + i386 Windows builds) and the box64/native thin path (x86_64 Linux builds),
 GOG + Steam fetchers, every game in the README's tables — hardware-tested on **aarch64-linux**; **x86_64-linux** is structured +
 evaluates (unbuilt/untested on real hardware). **Backlog:** building/testing the x86_64 target on real
-hardware; a mechanical x86-guest cache-hit gate in `flake.checks`; MS-Store; MangoHud on non-DXVK
-backends; a winewayland **xdg-activation** patch (would let the game open on the splash's
-monitor/workspace, and extend focus-on-duplicate to GNOME/KDE). The thin FEX backend SHIPS — it is what
+hardware; a mechanical x86-guest cache-hit gate in `flake.checks`; MS-Store; handing the splash's
+activation to gamescope when the game window first maps (would open the game on the splash's
+monitor/workspace and keep focus on GNOME). The thin FEX backend SHIPS — it is what
 runs the i386-linux platform (`pkgs/games/civilization-5`); what remains `meta.broken` is per-title, on
 the engines whose walls were measured (hollow-knight's Mono/SMC crash on 16K), and `allowBroken` is how
 such an entry gets retested (see `docs/DESIGN.md` D12).

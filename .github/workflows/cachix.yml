@@ -60,13 +60,13 @@ jobs:
         include:
           - system: aarch64-linux
             runner: ubuntu-24.04-arm
-            attrs: propnix-launcher propnix-cli box64 gbeFork
+            attrs: propnix-launcher propnix-cli gamescope box64 gbeFork
           # galaxyStub is here AND as an arm64ec leg below because it is a DIFFERENT derivation per host
           # (it builds its x86_64/i386 PEs with llvmMingw on aarch64, pkgsCross mingw here), and the
           # aarch64 leg therefore does not cover this one. One derivation, everything else substituted.
           - system: x86_64-linux
             runner: ubuntu-latest
-            attrs: propnix-launcher propnix-cli dxvk vkd3d gbeFork galaxyStub
+            attrs: propnix-launcher propnix-cli gamescope dxvk vkd3d gbeFork galaxyStub
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/build-and-push

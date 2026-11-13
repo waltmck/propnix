@@ -16,6 +16,7 @@
   mkAppIcon,
   extractUnityIcon,
   mkStoreSkeleton,
+  gamescope,
 }:
 {
   pname,
@@ -45,10 +46,14 @@
   # empty-but-present stub instead makes its dlopen throw → a black screen.)
   maskFiles ? [ ],
   exe, # the executable, RELATIVE to the game dir
-  wmClass ? null, # the game window's own class when it differs from the exe-derived guess (see launcher-package)
   exeArgs ? [ ],
   # Offline enforcement: false → the launcher unshares a netns for the game (see app-options `online`).
   online ? true,
+  # `{ filter; scaler; }` (app-options `gamescope`): how gamescope scales the game's image to its window.
+  gamescopeScaling ? {
+    filter = null;
+    scaler = null;
+  },
   workingDir ? null,
   # OUTER-phase per-game setup hook (the top-level `setupScript` option): a store-path executable run
   # before the view is assembled. Backend-independent by nature — see app-options.
@@ -90,7 +95,7 @@
   # The env-var namespaces scrubbed before the seal — single-sourced from sealing.defaultScrub (§7:
   # targeted scrub, never env_clear+allowlist).
   scrubPrefixes ? sealing.defaultScrub,
-  mangohud, # MangoHud package root (PROPNIX_BENCH shim preload; see thin.rs)
+  mangohud, # MangoHud package root (PROPNIX_BENCH: gamescope runs its `bin/mangoapp`; see gamescope.rs)
   # The baked GL/Vulkan fallback stack (builders/gl-fallback.nix — field contract and rationale there) —
   # activated by the launcher when `/run/opengl-driver` is absent (non-NixOS) or `forced` (the `mesa` knob).
   fallbackGl,
@@ -189,6 +194,7 @@ let
         # framework artifacts, not shipped game assets, and nothing a setup script should read a preset from.
         payloads = map (d: "${d}") payloads;
         online = online;
+        inherit (import ./gamescope-scaling.nix { inherit lib; } gamescopeScaling) gamescopeFilter gamescopeScaler;
         ldLibraryPath = ldLibraryPath;
         inherit scrubPrefixes;
         binds = map (b: {
@@ -202,6 +208,8 @@ let
         }) saveBinds;
         inherit splash singleInstance windowWatch;
         tar = "${gnutar}/bin/tar";
+        # The nested compositor the game runs inside (gamescope.rs).
+        gamescope = "${gamescope}";
         mangohud = mangohud;
         inherit fallbackGl;
         # gbe_fork present (informational — see the param above).
@@ -221,8 +229,6 @@ mkLauncherPackage {
     pname
     appid
     name
-    exe
-    wmClass
     configFile
     iconTree
     broken

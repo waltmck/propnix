@@ -1,0 +1,101 @@
+Subject: [PATCH] wayland: --app-id and --title for the host toplevel
+
+The Wayland backend's toplevel always carries app_id "gamescope" and the focused app's title, so every
+nested app shares one identity on the host: one taskbar group, one icon, and no way for a launcher to map
+the window to its own desktop entry.
+
+--app-id sets the toplevel's app_id (default "gamescope"), at creation and again when it is restored after
+a NULL-buffer unmap. --title fixes its title (default: follow the focused app's title, as before).
+diff --git a/src/Backends/WaylandBackend.cpp b/src/Backends/WaylandBackend.cpp
+index bc9293d..9b20a8d 100644
+--- a/src/Backends/WaylandBackend.cpp
++++ b/src/Backends/WaylandBackend.cpp
+@@ -1282,6 +1282,12 @@ namespace gamescope
+     }
+     void CWaylandConnector::SetTitle( std::shared_ptr<std::string> pAppTitle )
+     {
++        if ( g_sAppTitle )
++        {
++            libdecor_frame_set_title( m_Planes[0].GetFrame(), g_sAppTitle );
++            return;
++        }
++
+         std::string szTitle = pAppTitle ? *pAppTitle : "gamescope";
+         if ( g_bGrabbed )
+             szTitle += " (grabbed)";
+@@ -1445,8 +1451,8 @@ namespace gamescope
+         {
+ 			wl_proxy_set_tag( (wl_proxy *)m_pSurface, &GAMESCOPE_toplevel_tag );
+             m_pFrame = libdecor_decorate( m_pBackend->GetLibDecor(), m_pSurface, &s_LibDecorFrameInterface, this );
+-            libdecor_frame_set_title( m_pFrame, "Gamescope" );
+-            libdecor_frame_set_app_id( m_pFrame, "gamescope" );
++            libdecor_frame_set_title( m_pFrame, g_sAppTitle ? g_sAppTitle : "Gamescope" );
++            libdecor_frame_set_app_id( m_pFrame, g_sAppId );
+             libdecor_frame_map( m_pFrame );
+         }
+         else
+@@ -1675,7 +1681,7 @@ namespace gamescope
+         // Unmapping resets the toplevel, so restore it before the next initial commit.
+         if ( m_bToplevelStateReset )
+         {
+-            libdecor_frame_set_app_id( m_pFrame, "gamescope" );
++            libdecor_frame_set_app_id( m_pFrame, g_sAppId );
+             // libdecor skips a title it already sent.
+             xdg_toplevel_set_title( GetXdgToplevel(), libdecor_frame_get_title( m_pFrame ) );
+             m_bToplevelStateReset = false;
+diff --git a/src/main.cpp b/src/main.cpp
+index 6a0fdb1..7d41350 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -73,6 +73,8 @@ const struct option *gamescope_options = (struct option[]){
+ 	{ "rt", no_argument, nullptr, 0 },
+ 	{ "prefer-vk-device", required_argument, 0 },
+ 	{ "expose-wayland", no_argument, 0 },
++	{ "app-id", required_argument, nullptr, 0 },
++	{ "title", required_argument, nullptr, 0 },
+ 	{ "mouse-sensitivity", required_argument, nullptr, 's' },
+ 	{ "mangoapp", no_argument, nullptr, 0 },
+ 	{ "adaptive-sync", no_argument, nullptr, 0 },
+@@ -182,6 +184,9 @@ const char usage[] =
+ 	"                                     sgsr => Snapdragon™ Game Super Resolution 1 with RCAS\n"
+ 	"  --sharpness, --fsr-sharpness   upscaler sharpness from 0 (max) to 20 (min)\n"
+ 	"  --expose-wayland               support wayland clients using xdg-shell\n"
++	"  --app-id                       app_id of the window on the host compositor (wayland backend, default: gamescope)\n"
++	"  --title                        fixed title of the window on the host compositor (wayland backend,\n"
++	"                                     default: the focused app's title)\n"
+ 	"  -s, --mouse-sensitivity        multiply mouse movement by given decimal number\n"
+ 	"  --backend                      select rendering backend\n"
+ 	"                                     auto => autodetect (default)\n"
+@@ -700,6 +705,8 @@ static void UpdateCompatEnvVars()
+ int g_nPreferredOutputWidth = 0;
+ int g_nPreferredOutputHeight = 0;
+ bool g_bExposeWayland = false;
++const char *g_sAppId = "gamescope";
++const char *g_sAppTitle = nullptr;
+ const char *g_sOutputName = nullptr;
+ bool g_bDebugLayers = false;
+ bool g_bForceDisableColorMgmt = false;
+@@ -838,6 +845,10 @@ int main(int argc, char **argv)
+ 					cv_adaptive_sync = true;
+ 				} else if (strcmp(opt_name, "expose-wayland") == 0) {
+ 					g_bExposeWayland = true;
++				} else if (strcmp(opt_name, "app-id") == 0) {
++					g_sAppId = optarg;
++				} else if (strcmp(opt_name, "title") == 0) {
++					g_sAppTitle = optarg;
+ 				} else if (strcmp(opt_name, "backend") == 0) {
+ 					eCurrentBackend = parse_backend_name( optarg );
+ 				} else if (strcmp(opt_name, "cursor-scale-height") == 0) {
+diff --git a/src/main.hpp b/src/main.hpp
+index b2a169f..7df654d 100644
+--- a/src/main.hpp
++++ b/src/main.hpp
+@@ -134,6 +134,8 @@ extern int g_upscaleFilterSharpness;
+ extern bool g_bBorderlessOutputWindow;
+ 
+ extern bool g_bExposeWayland;
++extern const char *g_sAppId;
++extern const char *g_sAppTitle; // nullptr: follow the focused app's title
+ 
+ extern bool g_bRt;
+ 

@@ -17,18 +17,28 @@ pub struct ChildEnv {
 
 impl ChildEnv {
     pub fn build(cfg: &Config, settings: &Settings, paths: &Paths) -> ChildEnv {
-        // Which inherited vars to unset: every current-env name that starts with a scrub prefix.
+        // Which inherited vars to unset: every current-env name that starts with a scrub prefix. Plus
+        // DXVK_HDR unless the title sets it: gamescope (our parent) writes it from the host output's HDR
+        // state, but HDR stays a per-title opt-in (`env.DXVK_HDR`) — an engine that trusts DXGI's HDR report
+        // blindly can crash on it (docs/research/dxvk-hdr-under-winewayland.md).
         let unset: Vec<String> = if settings.unseal {
             Vec::new()
         } else {
             std::env::vars()
                 .map(|(k, _)| k)
-                .filter(|k| cfg.seal.scrub.iter().any(|p| k.starts_with(p)))
+                .filter(|k| {
+                    cfg.seal.scrub.iter().any(|p| k.starts_with(p))
+                        || (k == "DXVK_HDR" && !cfg.seal.set_env.contains_key("DXVK_HDR"))
+                })
                 .collect()
         };
 
         let mut set: Vec<(String, String)> = Vec::new();
         let mut push = |k: &str, v: String| set.push((k.to_string(), v));
+
+        // gamescope's WSI layer on the Vulkan loader's search path (gamescope.rs `xdg_data_dirs`). Before the
+        // baked per-game env, so a title can still override.
+        push("XDG_DATA_DIRS", crate::gamescope::xdg_data_dirs(&cfg.emulators.gamescope));
 
         // The GL/Vulkan fallback stack (glstack.rs): active only when the host has no `/run/opengl-driver`
         // (non-NixOS) or the game's `mesa` knob forced one. Feeds winevulkan/DXVK (VK_DRIVER_FILES) and
@@ -146,41 +156,8 @@ impl ChildEnv {
                 };
                 push("DXVK_CONFIG", combined);
             }
-
-            // PROPNIX_BENCH → on-screen overlay via MangoHud's Vulkan implicit layer. DXVK (d3d9/10/11) and
-            // vkd3d (d3d12) are BOTH Vulkan (host-Vulkan via winevulkan), so ONE layer covers the whole
-            // backend — unlike DXVK_HUD, which is DXVK-only and shows nothing for a vkd3d/D3D12 game. Enable
-            // it the SAFE way: MANGOHUD=1 + the layer manifest dir on XDG_DATA_DIRS — NOT the `mangohud`
-            // wrapper / its GL LD_PRELOAD, whose host-GL hook white-screens on this stack (MangoHud's glad
-            // loader is GLX-only, but wine 10.17+ defaults to EGL). The aarch64 manifest has an ABSOLUTE
-            // library_path, so the layer loads despite the seal scrubbing LD_*. On Asahi, GPU load/temp are
-            // blank (driver unsupported by MangoHud) but fps/frametime/CPU/versions render. Respect an
-            // inherited MANGOHUD_CONFIG. (wined3d has no Vulkan swapchain to hook — its bench fps prints to
-            // the console via wine's `+fps` channel; see settings.winedebug.)
-            if settings.bench {
-                push("MANGOHUD", "1".to_string());
-                let base = match std::env::var("XDG_DATA_DIRS") {
-                    Ok(v) if !v.is_empty() => v,
-                    _ => "/usr/share".to_string(),
-                };
-                push(
-                    "XDG_DATA_DIRS",
-                    format!("{}/share:{base}", cfg.emulators.mangohud),
-                );
-                if std::env::var_os("MANGOHUD_CONFIG").is_none() {
-                    push(
-                        "MANGOHUD_CONFIG",
-                        "fps,frame_timing,cpu_stats,gpu_stats,engine_version,wine".to_string(),
-                    );
-                }
-            }
         }
-        // NOTE: a wined3d / OpenGL wine title gets NO MangoHud overlay (only the console `+fps`, above). The
-        // MangoHud OpenGL SHIM loads into the wine process fine (libMangoHud_opengl.so maps, the GL context is
-        // detected), but it never measures a frame: wine's winewayland presents via dmabuf/gbm, not a
-        // hookable `eglSwapBuffers`, so there is no swap for MangoHud to count. (The box64 THIN path DOES get
-        // the shim overlay — an SDL/GL game calls a real `eglSwapBuffers` that box64's built-in shim
-        // special-case routes through MangoHud. See thin.rs.)
+        // (PROPNIX_BENCH's overlay is gamescope's mangoapp, which covers every graphics API — gamescope.rs.)
 
         ChildEnv { unset, set }
     }

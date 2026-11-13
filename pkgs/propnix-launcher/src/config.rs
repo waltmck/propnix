@@ -58,6 +58,12 @@ pub struct Config {
     /// game (loopback only), enforcing propnix's offline guarantee at the kernel rather than by trusting the
     /// app. Display and audio are unaffected (UNIX sockets live in the mount ns).
     pub online: bool,
+    /// The game's gamescope `-F` filter / `-S` scaler (app-options `gamescope`), or null for the defaults
+    /// (gamescope.rs `scaling`).
+    #[serde(rename = "gamescopeFilter", default)]
+    pub gamescope_filter: Option<String>,
+    #[serde(rename = "gamescopeScaler", default)]
+    pub gamescope_scaler: Option<String>,
     /// The launcher-dispatch tag ("prefix" — `ModeProbe` routes on it before this struct loads). Declared
     /// here as well so `deny_unknown_fields` accepts the baked field.
     pub mode: String,
@@ -275,9 +281,11 @@ pub struct Emulators {
     /// (it has no runtime deps of its own; the launcher supplies this baked store path). (propnix-mount and
     /// propnix-prefetch are no longer separate binaries — they're compiled into this launcher.)
     pub tar: String,
-    /// The MangoHud package root. Under PROPNIX_BENCH on the Vulkan backend, the launcher enables MangoHud's
-    /// Vulkan implicit layer by adding `<mangohud>/share` to the child's XDG_DATA_DIRS (+ MANGOHUD=1) — one
-    /// overlay covering both DXVK and vkd3d. No GL hook, so it never touches the wined3d path.
+    /// The gamescope package root (`bin/gamescope` + its WSI layer under `share`) — the nested compositor
+    /// the game runs inside (gamescope.rs).
+    pub gamescope: String,
+    /// The MangoHud package root. Under PROPNIX_BENCH gamescope runs its `bin/mangoapp` overlay
+    /// (gamescope.rs).
     pub mangohud: String,
     /// A directory for wine's WINEDLLPATH, baked on aarch64 only: FEX's package, whose `aarch64-unix/` holds
     /// the unixlib (`lib{arm64ec,wow64}fex.so`) the FEX DLLs make every kernel call through. Wine loads a
@@ -289,7 +297,8 @@ pub struct Emulators {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Defaults {
-    /// Wine display driver: "wayland" | "x11". Each PROPNIX_* env var overrides the matching default.
+    /// Wine display driver: "x11" (gamescope's Xwayland) | "wayland". Each PROPNIX_* env var overrides the
+    /// matching default.
     pub graphics: String,
     /// D3D→GPU backend: "dxvk" | "wined3d".
     pub d3d: String,
@@ -377,6 +386,12 @@ pub struct ThinConfig {
     /// game (loopback only), enforcing propnix's offline guarantee at the kernel rather than by trusting the
     /// app. Display and audio are unaffected (UNIX sockets live in the mount ns).
     pub online: bool,
+    /// The game's gamescope `-F` filter / `-S` scaler (app-options `gamescope`), or null for the defaults
+    /// (gamescope.rs `scaling`).
+    #[serde(rename = "gamescopeFilter", default)]
+    pub gamescope_filter: Option<String>,
+    #[serde(rename = "gamescopeScaler", default)]
+    pub gamescope_scaler: Option<String>,
     /// The launcher-dispatch tag ("thin"; see `ModeProbe`). Declared here as well so `deny_unknown_fields`
     /// accepts the baked field.
     pub mode: String,
@@ -465,11 +480,10 @@ pub struct ThinConfig {
     pub window_watch: bool,
     /// A `tar` binary path for propnix-mount's skeleton extraction (it has no runtime deps of its own).
     pub tar: String,
-    /// The NATIVE MangoHud package root for PROPNIX_BENCH. box64 renders through native Mesa (it wraps libGL),
-    /// and box64 has a built-in special-case for `libMangoHud_shim.so`'s `dlsym`, so the HUD is enabled the way
-    /// the `mangohud` wrapper does: LD_PRELOAD the SHIM (`<root>/lib/mangohud/libMangoHud_shim.so`), put that
-    /// dir on LD_LIBRARY_PATH (so the shim finds its opengl/dlsym siblings), and add `<root>/share` to
-    /// XDG_DATA_DIRS (the Vulkan implicit layer). See thin.rs.
+    /// The gamescope package root — the nested compositor the game runs inside (gamescope.rs).
+    pub gamescope: String,
+    /// The MangoHud package root. Under PROPNIX_BENCH gamescope runs its `bin/mangoapp` overlay
+    /// (gamescope.rs).
     #[serde(default)]
     pub mangohud: Option<String>,
     /// Whether this build carries the gbe_fork offline Steam-entitlement shim (steam.emu.enable).

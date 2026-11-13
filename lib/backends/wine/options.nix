@@ -34,7 +34,7 @@ in
     };
     graphics = lib.mkOption {
       type = k.knob;
-      description = "wine display-driver knob (wayland|x11).";
+      description = "wine display-driver knob: x11 only (the game draws into gamescope's Xwayland; winewayland cannot run on gamescope's nested Wayland server, which lacks wl_subcompositor).";
     };
 
     # WINEDLLOVERRIDES as a per-DLL map; each entry a whole knob (later layer's entry replaces the DLL's knob).

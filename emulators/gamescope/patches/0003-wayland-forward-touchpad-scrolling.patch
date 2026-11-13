@@ -1,0 +1,114 @@
+Subject: [PATCH] wayland: forward touchpad (finger / continuous) scrolling
+
+The Wayland backend takes scroll motion only from axis_value120, which a compositor sends for wheels,
+and drops every frame whose axis_source is not a wheel; its wl_pointer.axis handler is empty. A
+touchpad is a finger source with no detents, so the host sends it only as continuous wl_pointer.axis
+motion (plus axis_stop) — and touchpad scrolling did nothing in any nested app.
+
+Accumulate the continuous axis motion and the axis_stops per frame, and for a finger or continuous
+source forward them to the nested seat with that source and no discrete value (wlserver_mousescroll).
+The nested client then scrolls exactly as it would on the host: Xwayland turns continuous motion into
+smooth-scroll valuators and legacy button 4/5 clicks itself. Wheel frames keep the value120 path.
+diff --git a/src/Backends/WaylandBackend.cpp b/src/Backends/WaylandBackend.cpp
+index 9b20a8d..d117ff9 100644
+--- a/src/Backends/WaylandBackend.cpp
++++ b/src/Backends/WaylandBackend.cpp
+@@ -569,6 +569,9 @@ namespace gamescope
+         uint32_t m_uModMask[ GAMESCOPE_WAYLAND_MOD_COUNT ];
+ 
+         double m_flScrollAccum[2] = { 0.0, 0.0 };
++        // Continuous (finger/continuous-source) scroll in this frame, in surface units, and its axis_stops.
++        double m_flContinuousScroll[2] = { 0.0, 0.0 };
++        bool m_bScrollStop[2] = { false, false };
+         uint32_t m_uAxisSource = WL_POINTER_AXIS_SOURCE_WHEEL;
+ 
+ 		wl_surface *m_pCurrentCursorSurface = nullptr;
+@@ -3241,6 +3244,11 @@ namespace gamescope
+         // Ignore any pointer events for which the `enter` event surface didn't pass `IsGamescopeToplevel` (libdecor frame)
+         if ( !m_bMouseEntered )
+             return;
++
++        // A wheel's motion is taken from axis_value120; this is the only motion a finger/continuous source
++        // has. Which one this frame carries is known at the frame event (axis_source may come in any order).
++        // Vertical is first in the wl_pointer_axis enum, flip y,x -> x,y
++        m_flContinuousScroll[ !uAxis ] += wl_fixed_to_double( fValue );
+     }
+     void CWaylandInputThread::Wayland_Pointer_Axis_Source( wl_pointer *pPointer, uint32_t uAxisSource )
+     {
+@@ -3255,6 +3263,8 @@ namespace gamescope
+         // Ignore any pointer events for which the `enter` event surface didn't pass `IsGamescopeToplevel` (libdecor frame)
+         if ( !m_bMouseEntered )
+             return;
++
++        m_bScrollStop[ !uAxis ] = true;
+     }
+     void CWaylandInputThread::Wayland_Pointer_Axis_Discrete( wl_pointer *pPointer, uint32_t uAxis, int32_t nDiscrete )
+     {
+@@ -3282,10 +3292,29 @@ namespace gamescope
+         double flY = m_flScrollAccum[1];
+         m_flScrollAccum[0] = 0.0;
+         m_flScrollAccum[1] = 0.0;
++        double flContinuousX = m_flContinuousScroll[0];
++        double flContinuousY = m_flContinuousScroll[1];
++        bool bStopX = m_bScrollStop[0];
++        bool bStopY = m_bScrollStop[1];
++        m_flContinuousScroll[0] = m_flContinuousScroll[1] = 0.0;
++        m_bScrollStop[0] = m_bScrollStop[1] = false;
+ 
+         if ( !cv_wayland_mouse_warp_without_keyboard_focus && !m_bKeyboardEntered )
+             return;
+ 
++        // A touchpad (finger) or other continuous source: pass the motion through with its source, in surface
++        // units, and its axis_stops, so the nested client (Xwayland) scrolls exactly as it would on the host.
++        if ( m_uAxisSource == WL_POINTER_AXIS_SOURCE_FINGER || m_uAxisSource == WL_POINTER_AXIS_SOURCE_CONTINUOUS )
++        {
++            if ( flContinuousX == 0.0 && flContinuousY == 0.0 && !bStopX && !bStopY )
++                return;
++
++            wlserver_lock();
++            wlserver_mousescroll( flContinuousX, flContinuousY, bStopX, bStopY, m_uAxisSource, ++m_uFakeTimestamp );
++            wlserver_unlock();
++            return;
++        }
++
+         if ( m_uAxisSource != WL_POINTER_AXIS_SOURCE_WHEEL )
+             return;
+ 
+diff --git a/src/wlserver.cpp b/src/wlserver.cpp
+index 5852d73..0c88047 100644
+--- a/src/wlserver.cpp
++++ b/src/wlserver.cpp
+@@ -3263,6 +3263,20 @@ void wlserver_mousewheel( double flX, double flY, uint32_t time )
+ 	wlr_seat_pointer_notify_frame( wlserver.wlr.seat );
+ }
+ 
++void wlserver_mousescroll( double flX, double flY, bool bStopX, bool bStopY, uint32_t uSource, uint32_t time )
++{
++	assert( wlserver_is_lock_held() );
++	auto eSource = (enum wl_pointer_axis_source) uSource;
++
++	// No discrete value: the client sees continuous scrolling. A value of 0 is what wlroots sends as
++	// axis_stop, so an axis is notified only when it moved or stopped.
++	if ( flX != 0.0 || bStopX )
++		wlr_seat_pointer_notify_axis( wlserver.wlr.seat, time, WL_POINTER_AXIS_HORIZONTAL_SCROLL, flX, 0, eSource, WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL );
++	if ( flY != 0.0 || bStopY )
++		wlr_seat_pointer_notify_axis( wlserver.wlr.seat, time, WL_POINTER_AXIS_VERTICAL_SCROLL, flY, 0, eSource, WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL );
++	wlr_seat_pointer_notify_frame( wlserver.wlr.seat );
++}
++
+ void wlserver_send_frame_done( struct wlr_surface *surf, const struct timespec *when )
+ {
+ 	assert( wlserver_is_lock_held() );
+diff --git a/src/wlserver.hpp b/src/wlserver.hpp
+index 2817d97..66cdf7a 100644
+--- a/src/wlserver.hpp
++++ b/src/wlserver.hpp
+@@ -277,6 +277,8 @@ void wlserver_mousehide();
+ void wlserver_mousewarp( double x, double y, uint32_t time, bool bSynthetic );
+ void wlserver_mousebutton( int button, bool press, uint32_t time );
+ void wlserver_mousewheel( double x, double y, uint32_t time );
++// Continuous scroll (a touchpad): `x`/`y` in surface units; a stop flag ends that axis's scroll (axis_stop).
++void wlserver_mousescroll( double x, double y, bool bStopX, bool bStopY, uint32_t uSource, uint32_t time );
+ bool wlserver_input_held();
+ void wlserver_drag_anchor_move( struct wlr_surface *surface, int x, int y, int base_x, int base_y );
+ 

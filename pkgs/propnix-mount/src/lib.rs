@@ -355,6 +355,19 @@ unsafe fn loopback_up() -> Result<(), String> {
     if rc != 0 { Err(format!("ioctl(SIOCSIFFLAGS, lo): {err}")) } else { Ok(()) }
 }
 
+/// Bind `source` over `target` — a host path OUTSIDE the view, which `enter_and_mount`'s table never covers
+/// (its targets are all at/under the view root) — in the mount namespace `enter_and_mount` created. Call it
+/// after that returns, in the same pre_exec, so the bind is private to the game's process tree. Not
+/// recursive: the source is a plain directory the caller owns.
+pub fn bind_over(source: &str, target: &str) -> Result<(), String> {
+    let (src, tgt) = (CString::new(source).unwrap(), CString::new(target).unwrap());
+    let rc = unsafe { libc::mount(src.as_ptr(), tgt.as_ptr(), std::ptr::null(), libc::MS_BIND, std::ptr::null()) };
+    if rc != 0 {
+        return Err(format!("bind {source} -> {target}: {}", oserr()));
+    }
+    Ok(())
+}
+
 pub fn enter_and_mount(
     root: &str,
     entries: &[Entry],

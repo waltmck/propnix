@@ -134,7 +134,6 @@ lib.throwIfNot (lib.hasSuffix "-linux" cfg.emulatedPlatform)
       appid
       name
       exe
-      wmClass
       exeArgs
       online
       workingDir
@@ -143,6 +142,7 @@ lib.throwIfNot (lib.hasSuffix "-linux" cfg.emulatedPlatform)
       setupScript
       maintainers
       ;
+    gamescopeScaling = cfg.gamescope;
     # The last-wins save/state rows plus the composable framework/game rows (steam-emu's shim placements).
     saveBinds = cfg.saveBinds ++ cfg.extraBinds;
     # The GAME TREES, highest priority first: enabled DLC, then the payloads. DLC belongs in this list

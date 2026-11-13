@@ -25,6 +25,10 @@ mkApp {
   online = false;
   fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
   exe = "PapersPlease.exe";
+  # Art-led title: gamescope enlarges a smaller image by whole multiples only, so the art stays crisp.
+  gamescope.scaler = "integer";
+  # Pixel art: enlarge with hard pixel edges, not FSR's smoothing.
+  gamescope.filter = "nearest";
   # Full-color icon auto-extracted from the exe's PE resources (icon.auto default). Symbolic vendored (CC BY-SA 4.0).
   icon.symbolic = ./papers-please-symbolic.svg;
 

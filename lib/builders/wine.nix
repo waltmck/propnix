@@ -28,6 +28,7 @@
   mkStoreSkeleton,
   mkWineReg,
   mangohud,
+  gamescope,
   sealing, # supplies flattenTuning + mkSeal (the merge/resolve is done upstream in mkApp)
   mkLauncherPackage,
   extractPeIcon,
@@ -41,11 +42,15 @@
   # extra trees (co-base depots) union read-only above it exactly like DLC — never silently dropped.
   payloads,
   exe, # what wine STARTS, relative to the game dir, e.g. "Hollow Knight.exe"
-  wmClass ? null, # the game window's own class when it differs from wine's exe-basename convention
   # Launch arguments for the exe (the single, backend-shared source of exe args).
   exeArgs ? [ ],
   # Offline enforcement: false → the launcher unshares a netns for the game (see app-options `online`).
   online ? true,
+  # `{ filter; scaler; }` (app-options `gamescope`): how gamescope scales the game's image to its window.
+  gamescopeScaling ? {
+    filter = null;
+    scaler = null;
+  },
   # Optional launch working directory, RELATIVE to the game dir (C:\game). Null → the game dir itself.
   # For engines that resolve assets from the CWD rather than the exe path (Don't Starve: "bin").
   workingDir ? null,
@@ -381,6 +386,7 @@ let
       workingDir = workingDir;
       exeArgs = exeArgs;
       online = online;
+      inherit (import ./gamescope-scaling.nix { inherit lib; } gamescopeScaling) gamescopeFilter gamescopeScaler;
       icon = splashIcon; # largest extracted icon (for the splash), or null
       payload = "${payload}"; # the primary game tree; the launch cwd (store DLLs are stubbed/whited-out via mount rows)
       # EVERY game-content tree, in the order `drive_c/game` unions them (leftmost wins) — the setup hook's
@@ -400,8 +406,9 @@ let
         vkd3d = "${vkd3d}";
         # `tar` for the linked propnix_mount to extract overlay `skeleton` tars (sparse + xattr aware).
         tar = "${gnutar}/bin/tar";
-        # MangoHud package root — under PROPNIX_BENCH the launcher puts `<mangohud>/share` on the child's
-        # XDG_DATA_DIRS to load MangoHud's Vulkan implicit layer (covers DXVK + vkd3d; no GL hook).
+        # The nested compositor the game runs inside (gamescope.rs): `bin/gamescope` + its WSI layer's `share`.
+        gamescope = "${gamescope}";
+        # MangoHud package root — under PROPNIX_BENCH gamescope runs its `bin/mangoapp` overlay (gamescope.rs).
         mangohud = "${mangohud}";
       }
       // lib.optionalAttrs (fexdlls != null) {
@@ -411,7 +418,8 @@ let
         wineDllPath = "${fexdlls}";
       };
       defaults = {
-        graphics = flat.graphics;
+        # winex11 only: winewayland cannot run on gamescope's nested Wayland server (no wl_subcompositor).
+        graphics = assert lib.assertOneOf "wine.graphics" flat.graphics [ "x11" ]; flat.graphics;
         d3d = flat.d3d;
       };
       # Env vars the launcher unsets before anything else (per-game escape hatch from a user's global
@@ -445,8 +453,6 @@ mkLauncherPackage {
     pname
     appid
     name
-    exe
-    wmClass
     configFile
     iconTree
     broken

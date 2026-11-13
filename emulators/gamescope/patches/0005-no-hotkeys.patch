@@ -1,0 +1,93 @@
+Subject: [PATCH] --no-hotkeys: pass every key to the app in the nested backends
+
+The Wayland and SDL backends hard-code Super+key shortcuts (fullscreen, filters, sharpness, screenshot,
+grab): while gamescope has keyboard focus, those key presses are consumed and never reach the app, and no
+option turns them off. A launcher that runs every game in gamescope wants the game to see all of its
+keys, and leaves window management (fullscreen included) to the host compositor.
+
+--no-hotkeys disables them: every key is forwarded to the app.
+diff --git a/src/Backends/SDLBackend.cpp b/src/Backends/SDLBackend.cpp
+index d35e218..3f7b431 100644
+--- a/src/Backends/SDLBackend.cpp
++++ b/src/Backends/SDLBackend.cpp
+@@ -743,7 +743,7 @@ namespace gamescope
+ 				{
+ 					// If this keydown event is super + one of the shortcut keys, consume the keydown event, since the corresponding keyup
+ 					// event will be consumed by the next case statement when the user releases the key
+-					if ( event.key.keysym.mod & KMOD_LGUI )
++					if ( !g_bNoHotkeys && ( event.key.keysym.mod & KMOD_LGUI ) )
+ 					{
+ 						uint32_t key = SDLScancodeToLinuxKey( event.key.keysym.scancode );
+ 						const uint32_t shortcutKeys[] = {KEY_F, KEY_N, KEY_B, KEY_U, KEY_Y, KEY_I, KEY_O, KEY_S, KEY_G};
+@@ -759,7 +759,7 @@ namespace gamescope
+ 				{
+ 					uint32_t key = SDLScancodeToLinuxKey( event.key.keysym.scancode );
+ 
+-					if ( event.type == SDL_KEYUP && ( event.key.keysym.mod & KMOD_LGUI ) )
++					if ( !g_bNoHotkeys && event.type == SDL_KEYUP && ( event.key.keysym.mod & KMOD_LGUI ) )
+ 					{
+ 						bool handled = true;
+ 						switch ( key )
+diff --git a/src/Backends/WaylandBackend.cpp b/src/Backends/WaylandBackend.cpp
+index 58c35c1..8811a45 100644
+--- a/src/Backends/WaylandBackend.cpp
++++ b/src/Backends/WaylandBackend.cpp
+@@ -3082,7 +3082,7 @@ namespace gamescope
+         {
+             m_uScancodesHeld.insert( uKey );
+ 
+-            if ( ( m_uKeyModifiers & m_uModMask[ GAMESCOPE_WAYLAND_MOD_META ] ) && IsHotkey( uKey ) )
++            if ( !g_bNoHotkeys && ( m_uKeyModifiers & m_uModMask[ GAMESCOPE_WAYLAND_MOD_META ] ) && IsHotkey( uKey ) )
+             {
+                 m_uScancodesConsumed.insert( uKey );
+                 return;
+diff --git a/src/main.cpp b/src/main.cpp
+index 7d41350..773e799 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -77,6 +77,7 @@ const struct option *gamescope_options = (struct option[]){
+ 	{ "title", required_argument, nullptr, 0 },
+ 	{ "mouse-sensitivity", required_argument, nullptr, 's' },
+ 	{ "mangoapp", no_argument, nullptr, 0 },
++	{ "no-hotkeys", no_argument, nullptr, 0 },
+ 	{ "adaptive-sync", no_argument, nullptr, 0 },
+ 
+ 	{ "backend", required_argument, nullptr, 0 },
+@@ -286,7 +287,7 @@ const char usage[] =
+ 	"  --allow-deferred-backend       Allows initting the backend in a deferred way, if it doesn't work immediately. (Note: This has some very minor correctness compromises that you should consider wrt. your platform with modifiers, etc).\n"
+ 	"  --keep-alive                   Keep Gamescope alive even when the primary process has died.\n"
+ 	"\n"
+-	"Keyboard shortcuts:\n"
++	"Keyboard shortcuts (nested backends; none with --no-hotkeys, which passes every key to the app):\n"
+ 	"  Super + F                      toggle fullscreen\n"
+ 	"  Super + N                      toggle nearest neighbour filtering\n"
+ 	"  Super + U                      toggle FSR upscaling\n"
+@@ -705,6 +706,7 @@ static void UpdateCompatEnvVars()
+ int g_nPreferredOutputWidth = 0;
+ int g_nPreferredOutputHeight = 0;
+ bool g_bExposeWayland = false;
++bool g_bNoHotkeys = false;
+ const char *g_sAppId = "gamescope";
+ const char *g_sAppTitle = nullptr;
+ const char *g_sOutputName = nullptr;
+@@ -855,6 +857,8 @@ int main(int argc, char **argv)
+ 					g_nCursorScaleHeight = parse_integer(optarg, opt_name);
+ 				} else if (strcmp(opt_name, "mangoapp") == 0) {
+ 					g_bLaunchMangoapp = true;
++				} else if (strcmp(opt_name, "no-hotkeys") == 0) {
++					g_bNoHotkeys = true;
+ 				} else if (strcmp(opt_name, "allow-deferred-backend") == 0) {
+ 					g_bAllowDeferredBackend = true;
+ 				} else if (strcmp(opt_name, "keep-alive") == 0) {
+diff --git a/src/main.hpp b/src/main.hpp
+index 7df654d..1ca47d5 100644
+--- a/src/main.hpp
++++ b/src/main.hpp
+@@ -134,6 +134,7 @@ extern int g_upscaleFilterSharpness;
+ extern bool g_bBorderlessOutputWindow;
+ 
+ extern bool g_bExposeWayland;
++extern bool g_bNoHotkeys; // --no-hotkeys: the nested backends' Super+key shortcuts are off
+ extern const char *g_sAppId;
+ extern const char *g_sAppTitle; // nullptr: follow the focused app's title
+ 

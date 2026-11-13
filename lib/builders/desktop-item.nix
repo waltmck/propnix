@@ -4,8 +4,8 @@
 # id `org.propnix.<appid>`. The FULL-COLOR raster icon is installed separately as a freedesktop hicolor
 # theme (lib/icons/*, merged into the app by mkLauncherPackage); this builder just references it by name
 # via `Icon=` and, if given, installs the monochrome `-symbolic.svg` variant (for DE contexts that prefer
-# symbolic icons). `startupWMClass` ties the game window to this entry (wine sets the class to the exe
-# basename).
+# symbolic icons). Every game window is gamescope's, whose app_id is this entry's id (`--app-id`, see
+# propnix-launcher gamescope.rs), so StartupWMClass names the same id.
 {
   lib,
   makeDesktopItem,
@@ -16,7 +16,6 @@
   appid,
   name, # human-visible name (Name=)
   exec, # command to run (typically the app's bin/<pname>, resolved from PATH once installed)
-  startupWMClass, # wine's top-level window class (exe basename); ties the window to this entry
   hasIcon ? true, # whether an icon theme is installed for this id (→ set Icon=)
   iconSymbolic ? null, # a monochrome symbolic SVG (currentColor), or null
 }:
@@ -31,7 +30,7 @@ let
     # below). null → no Icon line.
     icon = if hasIcon then desktopId else null;
     categories = [ "Game" ];
-    inherit startupWMClass;
+    startupWMClass = desktopId;
     startupNotify = true;
   };
 

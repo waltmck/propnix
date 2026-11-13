@@ -1,8 +1,11 @@
 //! Compositor-derived runtime facts (§5). The launcher fills geometry `PROPNIX_*` env vars from the primary
-//! Wayland output's current mode when the user hasn't set them, so a game's `setupScript` gets a default that
-//! matches the actual display:
-//!   * `PROPNIX_WIDTH` / `PROPNIX_HEIGHT` — the output's current mode, in physical pixels.
-//! These are SAFE to auto-populate: they have no side effect beyond being read by a setupScript.
+//! Wayland output's current mode when the user hasn't set them, so the game's display and its `setupScript`
+//! get a default that matches the actual display:
+//!   * `PROPNIX_WIDTH` / `PROPNIX_HEIGHT` — the output's current mode, in physical pixels. They size
+//!     gamescope's window and the screen the game sees (gamescope.rs), and a setupScript reads them.
+//! These are SAFE to auto-populate: a user-set value wins, which is how a fullscreen area smaller than the
+//! mode (a compositor that keeps a notch out of fullscreen) is stated — it cannot be detected beforehand,
+//! since a compositor reports a window's fullscreen size only once the window is mapped.
 //!
 //! Refresh (`PROPNIX_FPS`) and DPI (`PROPNIX_DPI`) are deliberately NOT derived here: their consumers are
 //! heavy and one is PERSISTENT — `PROPNIX_FPS` drives the DXVK frame-cap/vsync policy (settings.rs `FpsMode`)

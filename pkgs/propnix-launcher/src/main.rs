@@ -1,7 +1,8 @@
 //! propnix-launcher — the per-app launcher. Two phases around the WINEPREFIX mount namespace:
 //!   * OUTER — load the baked config → layer PROPNIX_* overrides → single-instance guard → seed the
 //!     writable prefix upper + bind saves → resolve the mount table → run the game THROUGH propnix-mount
-//!     (which lays down the bind view and re-execs us `--inside-ns`) while a GTK splash covers cold start.
+//!     (which lays down the bind view) under gamescope (which re-execs us `--inside-ns` as its child) while
+//!     a GTK splash, native on the host compositor, covers cold start.
 //!   * INNER (`--inside-ns`, the prefix bind view live) — stamp the registry → spawn wine → tear down
 //!     prefix-scoped on exit.
 //! Nix computes the intended state (the config); this program enforces it via a bind-assembled prefix view.
@@ -10,6 +11,7 @@ mod config;
 mod display;
 mod env;
 mod focus;
+mod gamescope;
 mod glstack;
 mod graphics;
 mod mount;
@@ -30,6 +32,7 @@ struct Args {
     unseal: bool,    // --propnix-unseal: skip the env scrub (debug)
     inside_ns: bool, // --inside-ns: the propnix-mount re-exec — run the game inside the bind view
     view: Option<String>, // --view <path>: the mount-view root the OUTER minted, handed to the INNER
+    status: Option<String>, // --status <path>: where the INNER reports its exit code (run::report_exit)
     passthrough: Vec<String>, // extra args handed to the game exe
 }
 
@@ -39,6 +42,7 @@ fn parse_args(argv: &[String]) -> Args {
         unseal: false,
         inside_ns: false,
         view: None,
+        status: None,
         passthrough: Vec::new(),
     };
     let mut only_rest = false;
@@ -66,6 +70,12 @@ fn parse_args(argv: &[String]) -> Args {
                     a.view = Some(argv[i].clone());
                 }
             }
+            "--status" => {
+                i += 1;
+                if i < argv.len() {
+                    a.status = Some(argv[i].clone());
+                }
+            }
             _ if s.starts_with("--config=") => a.config = Some(s["--config=".len()..].to_string()),
             _ => a.passthrough.push(argv[i].clone()),
         }
@@ -77,12 +87,30 @@ fn parse_args(argv: &[String]) -> Args {
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let args = parse_args(&argv);
+    // INNER: the outer learns the game's exit code from the status file, because the process it waits on is
+    // gamescope, whose own exit code is always 0. Every way out of the inner reports — early failures and a
+    // panic included — so a failed launch can never read as a success.
+    let status = args.inside_ns.then(|| args.status.clone()).flatten();
+    if let Some(status) = status.clone() {
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            run::report_exit(Path::new(&status), 101);
+            hook(info);
+        }));
+    }
+    let code = launch(args);
+    if let Some(status) = &status {
+        run::report_exit(Path::new(status), code.into());
+    }
+    ExitCode::from(code)
+}
 
+fn launch(args: Args) -> u8 {
     let config_path = match &args.config {
         Some(p) => p.clone(),
         None => {
             eprintln!("propnix-launcher: --config <path> is required");
-            return ExitCode::from(2);
+            return 2;
         }
     };
 
@@ -103,7 +131,7 @@ fn main() -> ExitCode {
         Ok(_) => {}
         Err(e) => {
             eprintln!("propnix-launcher: {e}");
-            return ExitCode::FAILURE;
+            return 1;
         }
     }
 
@@ -111,7 +139,7 @@ fn main() -> ExitCode {
         Ok(c) => c,
         Err(e) => {
             eprintln!("propnix-launcher: {e}");
-            return ExitCode::FAILURE;
+            return 1;
         }
     };
 
@@ -133,7 +161,7 @@ fn main() -> ExitCode {
                 "propnix-launcher: PROPNIX_QUALITY='{q}' is invalid — expected one of: {}",
                 ALLOWED.join(", ")
             );
-            return ExitCode::from(2);
+            return 2;
         }
     }
 
@@ -150,6 +178,19 @@ fn main() -> ExitCode {
 
     let settings = settings::Settings::resolve(&cfg, args.unseal);
 
+    // The game draws into gamescope's own X server: winewayland cannot run there — gamescope's nested Wayland
+    // server offers no wl_subcompositor, which winewayland requires (and composites a nested client's main
+    // surface only, while winewayland draws through subsurfaces). Refuse rather than start a game that can
+    // open no window.
+    if settings.graphics != "x11" {
+        eprintln!(
+            "propnix-launcher: wine graphics driver '{}' cannot run inside gamescope (its nested Wayland server \
+             has no wl_subcompositor, which winewayland requires) — use x11",
+            settings.graphics
+        );
+        return 2;
+    }
+
     // Diagnostic only (the launcher is arch-transparent — it never branches on the backend): surface which
     // emulator set assembled this app when the user opts into PROPNIX_DEBUG.
     if !args.inside_ns && std::env::var("PROPNIX_DEBUG").is_ok() {
@@ -163,7 +204,7 @@ fn main() -> ExitCode {
             Some(v) => std::path::PathBuf::from(v),
             None => {
                 eprintln!("propnix-launcher: --inside-ns requires --view");
-                return ExitCode::from(2);
+                return 2;
             }
         }
     } else {
@@ -171,7 +212,7 @@ fn main() -> ExitCode {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("propnix-launcher: create mount view: {e}");
-                return ExitCode::FAILURE;
+                return 1;
             }
         }
     };
@@ -192,7 +233,7 @@ fn run_outer(
     paths: settings::Paths,
     args: Args,
     config_path: String,
-) -> ExitCode {
+) -> u8 {
     // The view root is cleaned up by RAII (mount::ViewGuard) on EVERY exit path below — declared first so
     // it drops last, after the worker join has reaped the mount child.
     let _view_guard = mount::ViewGuard(paths.view.clone());
@@ -206,7 +247,7 @@ fn run_outer(
              `sudo sysctl -w kernel.unprivileged_userns_clone=1` (persist under /etc/sysctl.d), or ensure \
              the kernel has CONFIG_USER_NS and `user.max_user_namespaces` > 0. NixOS enables them by default."
         );
-        return ExitCode::FAILURE;
+        return 1;
     }
 
     // The `view` already exists (mkdtemp made the mountpoint; propnix-mount tmpfs's onto it). Create the
@@ -214,7 +255,7 @@ fn run_outer(
     for d in [&paths.state, &paths.cache, &paths.runtime] {
         if let Err(e) = std::fs::create_dir_all(d) {
             eprintln!("propnix-launcher: mkdir {}: {e}", d.display());
-            return ExitCode::FAILURE;
+            return 1;
         }
     }
     if settings.is_dxvk() {
@@ -226,23 +267,24 @@ fn run_outer(
     }
 
     // Single-instance guard. The lock is held by this outer process (CLOEXEC → not inherited past here).
-    let wm_class = Path::new(&cfg.exe)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
+    // `app_id` is the game's desktop-entry id, carried by both the splash and gamescope's window; a duplicate
+    // launch hands its activation token to this one (focus.rs).
     let app_id = format!("org.propnix.{}", cfg.appid);
     let _lock = match focus::acquire(&paths.runtime) {
         Ok(focus::Lock::Acquired(f)) => f, // held until process exit
         Ok(focus::Lock::Busy) => {
             eprintln!("propnix: {} is already running", cfg.name);
-            focus::raise_running(&wm_class, &cfg.name, &app_id);
-            return ExitCode::SUCCESS;
+            focus::raise_running(&paths.runtime);
+            return 0;
         }
         Err(e) => {
             eprintln!("propnix-launcher: single-instance lock: {e}");
-            return ExitCode::FAILURE;
+            return 1;
         }
     };
+    let activations = focus::listen(&paths.runtime)
+        .map_err(|e| eprintln!("propnix-launcher: activation socket (a duplicate launch cannot focus this one): {e}"))
+        .ok();
 
     // The entire prefix (profile, drives, hives, saves, …) is the mount table — the launcher just resolves it
     // into a `Vec<Entry>` that the linked `propnix_mount` lays down (in the mount child's pre_exec). `user.reg`
@@ -252,7 +294,7 @@ fn run_outer(
         Ok(e) => e,
         Err(e) => {
             eprintln!("propnix-launcher: mount table: {e}");
-            return ExitCode::FAILURE;
+            return 1;
         }
     };
 
@@ -278,11 +320,11 @@ fn run_outer(
                     "propnix-launcher: setup script exited {} — aborting (packaging bug or corrupted prefix)",
                     run::code_of(s)
                 );
-                return ExitCode::FAILURE;
+                return 1;
             }
             Err(e) => {
                 eprintln!("propnix-launcher: cannot run setup script {script}: {e}");
-                return ExitCode::FAILURE;
+                return 1;
             }
         }
     }
@@ -291,10 +333,41 @@ fn run_outer(
         std::env::set_var("GSK_RENDERER", "cairo");
     }
 
+    // gamescope's per-launch host paths (its ready file + X socket dir), removed when this guard drops.
+    let session = match gamescope::Session::create(&paths.runtime) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("propnix-launcher: gamescope session: {e}");
+            return 1;
+        }
+    };
+    let scaling = match gamescope::scaling(cfg.gamescope_filter.as_deref(), cfg.gamescope_scaler.as_deref()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("propnix-launcher: {e}");
+            return 2;
+        }
+    };
+    let gamescope_cmd = gamescope::command(&gamescope::Options {
+        root: &cfg.emulators.gamescope,
+        app_id: &app_id,
+        title: &cfg.name,
+        bench: settings.bench,
+        fps: settings.fps,
+        expose_wayland: false, // winex11 only (see the graphics check above)
+        scaling: &scaling,
+        mangohud: Some(&cfg.emulators.mangohud),
+        fallback_gl: cfg.fallback_gl.as_ref(),
+        ready: &session.ready,
+    });
+
     // MUST be single-threaded here — spawn_mounted's pre_exec assembles the prefix post-fork. Spawn the
     // splash/worker threads only AFTER it returns. (The module prefetch is NOT started here: the assembled
     // prefix lives in the child's private mount namespace, invisible from this process — the INNER warms it.)
     let (child, reader) = match run::spawn_mounted(
+        gamescope_cmd,
+        &session.x11_dir,
+        &session.status,
         &cfg.emulators.tar,
         &config_path,
         &paths.view,
@@ -306,7 +379,7 @@ fn run_outer(
         Ok(pair) => pair,
         Err(e) => {
             eprintln!("propnix-launcher: launch failed: {e}");
-            return ExitCode::FAILURE;
+            return 1;
         }
     };
 
@@ -314,24 +387,30 @@ fn run_outer(
     let (tx, rx) = mpsc::channel::<run::Progress>();
     let name = cfg.name.clone();
     let icon = cfg.icon.clone();
-
-    // Compositor window watcher (run::watch_window): dismisses the splash when the game window MAPS (the
-    // only signal for marker-less backends, e.g. an OpenGL title) and force-tears-down when it is DESTROYED
-    // (a wine game can hang on shutdown after its window closes).
-    {
+    if let Some(listener) = activations {
         let tx = tx.clone();
-        let needle = wm_class.clone();
-        let title = cfg.name.clone();
-        let splash_app_id = app_id.clone();
-        std::thread::spawn(move || run::watch_window(tx, needle, title, splash_app_id));
+        focus::serve(listener, move |token| {
+            let _ = tx.send(run::Progress::Activate(token));
+        });
     }
 
+    // Game-window watcher (run::watch_window, through gamescope's nested X server): dismisses the splash
+    // when gamescope has a game window to show (the only signal for marker-less backends, e.g. an OpenGL
+    // title) and force-tears-down when the game's windows are gone for good (a wine game can hang on
+    // shutdown after its window closes).
+    {
+        let tx = tx.clone();
+        let (ready, x11_dir) = (session.ready.clone(), session.x11_dir.clone());
+        std::thread::spawn(move || run::watch_window(tx, ready, x11_dir));
+    }
+
+    let status = session.status.clone();
     let worker = std::thread::spawn(move || {
-        run::watch_child(child, reader, &settings, tx);
+        run::watch_child(child, reader, status, &settings, tx);
     });
-    let code = splash::run(app_id, name, icon, rx);
+    let code = splash::run(app_id, name, icon, rx, gamescope::activator(&session));
     let _ = worker.join();
-    ExitCode::from((code & 0xff) as u8)
+    (code & 0xff) as u8
 }
 
 /// INNER phase (`--inside-ns`): propnix-mount has set up the WINEPREFIX bind view. Build the sealed env,
@@ -341,8 +420,8 @@ fn run_inner(
     settings: &settings::Settings,
     paths: &settings::Paths,
     args: &Args,
-) -> ExitCode {
+) -> u8 {
     let child_env = env::ChildEnv::build(cfg, settings, paths);
     let code = run::run_inside_ns(cfg, settings, paths, &child_env, &args.passthrough);
-    ExitCode::from((code & 0xff) as u8)
+    (code & 0xff) as u8
 }

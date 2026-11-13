@@ -161,8 +161,8 @@ in
 
   # wine display driver.
   graphics = {
-    value = "wayland";
-    reason = "winewayland: native fractional scaling, single native window, no Xwayland. Per-title override to \"x11\" for titles needing a correct hardware cursor or that misrender on wayland (RESEARCH §12).";
+    value = "x11";
+    reason = "winex11: every game runs inside gamescope, whose own Xwayland is the game's only display (the host compositor's WAYLAND_DISPLAY is not passed in); gamescope's WSI layer hands a winex11 Vulkan swapchain to gamescope directly, HDR included.";
   };
 
   # WINEDLLOVERRIDES as a STRUCTURED DLL→load-order map (mergeable/overridable per-DLL, unlike a string;

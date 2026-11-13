@@ -43,6 +43,8 @@ mkApp (
     # because this game is single-player; the exe links no socket library at all and carries no matchmaking
     # symbols.
     online = false;
+    # Art-led title: gamescope enlarges a smaller image by whole multiples only, so the art stays crisp.
+    gamescope.scaler = "integer";
     icon.symbolic = ./hollow-knight-symbolic.svg;
 
     fetchInfo = (lib.importJSON ./versions.json).fetchInfo;

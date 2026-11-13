@@ -1,6 +1,7 @@
 //! THIN-mode run path — a native or box64-emulated Linux game (no wine prefix). The counterpart to the
 //! wine PREFIX path in main.rs/run.rs, sharing all the display-agnostic machinery: the user+mount namespace
-//! (propnix-mount), single-instance focus, the GTK splash, the compositor window-watcher, signals.
+//! (propnix-mount), gamescope (the game runs inside it, drawing through SDL's x11 driver), single-instance
+//! focus, the GTK splash, the window-watcher, signals.
 //!
 //! What DIVERGES from wine:
 //!   * There is no WINEPREFIX. The mount view root is instead a fresh per-launch tmpfs used as the game's
@@ -15,31 +16,37 @@
 //!     LD_LIBRARY_PATH (native bridging libs ∪ x86_64 guest libs). No registry, no wineserver: teardown is a
 //!     process-group kill.
 //!   * A native SDL/GL game emits none of wine's D3D first-present stderr markers, so the splash dismiss
-//!     relies on the window-watcher (game window MAPs → dismiss; window DESTROYED → force teardown).
+//!     relies on the window-watcher (gamescope has a game window → dismiss; gone for good → force teardown).
 
 use crate::config::{payload_search_path, ThinConfig, THIN_BINFIX_DIR, THIN_GAME_DIR};
 use crate::settings::{Paths, Settings};
-use crate::{focus, mount, run, settings, signals, splash, util};
+use crate::{display, focus, gamescope, mount, run, settings, signals, splash, util};
 use propnix_mount::Entry;
 use std::io;
 use std::os::unix::process::CommandExt; // process_group
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::Command;
 use std::sync::mpsc;
 use std::time::Duration;
 
 /// Entry point for a `mode = "thin"` config (main.rs dispatches here after the mode probe). Mirrors the
 /// two-phase structure of the wine path: the OUTER mints the view + assembles the mount ns and drives the
 /// splash; the INNER (re-exec'd `--inside-ns`) execs the game inside the assembled view.
-pub fn run(config_path: &str, unseal: bool, inside_ns: bool, view_arg: Option<&str>, passthrough: &[String]) -> ExitCode {
+pub fn run(config_path: &str, unseal: bool, inside_ns: bool, view_arg: Option<&str>, passthrough: &[String]) -> u8 {
     let cfg = match ThinConfig::load(config_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("propnix-launcher: {e}");
-            return ExitCode::FAILURE;
+            return 1;
         }
     };
     signals::install();
+
+    // PROPNIX_WIDTH/HEIGHT from the compositor when unset — gamescope's size (gamescope.rs) and a setup
+    // script's display facts. OUTER only, and here while still single-threaded: it mutates the process env.
+    if !inside_ns {
+        display::populate_facts();
+    }
 
     let settings = settings::Settings::resolve_thin(&cfg.app_id, unseal);
 
@@ -54,7 +61,7 @@ pub fn run(config_path: &str, unseal: bool, inside_ns: bool, view_arg: Option<&s
             Some(v) => PathBuf::from(v),
             None => {
                 eprintln!("propnix-launcher: --inside-ns requires --view");
-                return ExitCode::from(2);
+                return 2;
             }
         }
     } else {
@@ -62,7 +69,7 @@ pub fn run(config_path: &str, unseal: bool, inside_ns: bool, view_arg: Option<&s
             Ok(v) => v,
             Err(e) => {
                 eprintln!("propnix-launcher: create mount view: {e}");
-                return ExitCode::FAILURE;
+                return 1;
             }
         }
     };
@@ -84,7 +91,7 @@ fn run_outer(
     config_path: &str,
     passthrough: &[String],
     unseal: bool,
-) -> ExitCode {
+) -> u8 {
     // The view root is cleaned up by RAII (mount::ViewGuard) on EVERY exit path below — declared first so
     // it drops last, after the worker join has reaped the mount child.
     let _view_guard = mount::ViewGuard(paths.view.clone());
@@ -94,7 +101,7 @@ fn run_outer(
             "propnix: this host does not allow unprivileged user namespaces, which propnix needs to \
              assemble the game's private mount view.\n  Enable them and retry (NixOS enables them by default)."
         );
-        return ExitCode::FAILURE;
+        return 1;
     }
 
     // The persistent dirs: `state` (PROPNIX_STATE root), `cache`, and `runtime` (the single-instance lock).
@@ -102,43 +109,47 @@ fn run_outer(
     for d in [&paths.state, &paths.cache, &paths.runtime] {
         if let Err(e) = std::fs::create_dir_all(d) {
             eprintln!("propnix-launcher: mkdir {}: {e}", d.display());
-            return ExitCode::FAILURE;
+            return 1;
         }
     }
 
-    // Single-instance guard (shared with the wine path). The window needle is the appid slug — a native SDL
-    // game sets its Wayland app_id / X11 WM_CLASS to the exe basename, which matches the slug for our titles;
-    // `raise_running`/`game_window_probe` also match on the title and the `org.propnix.<appid>` splash id.
-    let needle = settings.appid.clone();
+    // Single-instance guard (shared with the wine path). `app_id` is the game's desktop-entry id, carried by
+    // both the splash and gamescope's window.
     let app_id = format!("org.propnix.{}", settings.appid);
-    let _lock = if cfg.single_instance {
+    let lock = if cfg.single_instance {
         match focus::acquire(&paths.runtime) {
             Ok(focus::Lock::Acquired(f)) => Some(f), // held until process exit
             Ok(focus::Lock::Busy) => {
                 eprintln!("propnix: {} is already running", cfg.name);
-                focus::raise_running(&needle, &cfg.name, &app_id);
-                return ExitCode::SUCCESS;
+                focus::raise_running(&paths.runtime);
+                return 0;
             }
             Err(e) => {
                 eprintln!("propnix-launcher: single-instance lock: {e}");
-                return ExitCode::FAILURE;
+                return 1;
             }
         }
     } else {
         None
     };
+    // A duplicate launch hands its activation token to this one (focus.rs) — single-instance games only.
+    let activations = lock.as_ref().and_then(|_| {
+        focus::listen(&paths.runtime)
+            .map_err(|e| eprintln!("propnix-launcher: activation socket (a duplicate launch cannot focus this one): {e}"))
+            .ok()
+    });
 
     // Set the runtime PROPNIX_* roots (PROPNIX_STATE/APPID + the normalized PROPNIX_SAVE_DIR) the bind
     // sources expand against — the same helper the wine table uses — then resolve the save binds.
     if let Err(e) = mount::set_mount_env(&settings, &paths) {
         eprintln!("propnix-launcher: {e}");
-        return ExitCode::FAILURE;
+        return 1;
     }
     let entries = match resolve_thin_table(&cfg, &paths.view) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("propnix-launcher: mount table: {e}");
-            return ExitCode::FAILURE;
+            return 1;
         }
     };
 
@@ -163,11 +174,11 @@ fn run_outer(
                     "propnix-launcher: setup script exited {} — aborting (packaging bug or corrupted config)",
                     run::code_of(s)
                 );
-                return ExitCode::FAILURE;
+                return 1;
             }
             Err(e) => {
                 eprintln!("propnix-launcher: cannot run setup script {script}: {e}");
-                return ExitCode::FAILURE;
+                return 1;
             }
         }
     }
@@ -177,10 +188,41 @@ fn run_outer(
         std::env::set_var("GSK_RENDERER", "cairo");
     }
 
+    // gamescope's per-launch host paths (its ready file + X socket dir), removed when this guard drops.
+    let session = match gamescope::Session::create(&paths.runtime) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("propnix-launcher: gamescope session: {e}");
+            return 1;
+        }
+    };
+    let scaling = match gamescope::scaling(cfg.gamescope_filter.as_deref(), cfg.gamescope_scaler.as_deref()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("propnix-launcher: {e}");
+            return 2;
+        }
+    };
+    let gamescope_cmd = gamescope::command(&gamescope::Options {
+        root: &cfg.gamescope,
+        app_id: &app_id,
+        title: &cfg.name,
+        bench: settings.bench,
+        fps: settings.fps,
+        expose_wayland: effective_sdl_driver(&cfg).contains("wayland"),
+        scaling: &scaling,
+        mangohud: cfg.mangohud.as_deref(),
+        fallback_gl: cfg.fallback_gl.as_ref(),
+        ready: &session.ready,
+    });
+
     // MUST be single-threaded here — spawn_mounted's pre_exec assembles the view post-fork. resolve_binds
     // leads the table with a source-less tmpfs at the view root (the game's $HOME), whose child-skeleton
     // creates each save bind's mountpoint; the save binds then land on it.
     let (child, reader) = match run::spawn_mounted(
+        gamescope_cmd,
+        &session.x11_dir,
+        &session.status,
         &cfg.tar,
         config_path,
         &paths.view,
@@ -192,43 +234,51 @@ fn run_outer(
         Ok(pair) => pair,
         Err(e) => {
             eprintln!("propnix-launcher: launch failed: {e}");
-            return ExitCode::FAILURE;
+            return 1;
         }
     };
 
     let (tx, rx) = mpsc::channel::<run::Progress>();
+    if let Some(listener) = activations {
+        let tx = tx.clone();
+        focus::serve(listener, move |token| {
+            let _ = tx.send(run::Progress::Activate(token));
+        });
+    }
 
-    // Compositor window-watcher (run::watch_window): for a native SDL/GL game there is NO first-present
-    // stderr marker for watch_child to scan, so the splash relies entirely on the window MAPping; and once
-    // it has appeared, its DESTRUCTION means the user closed the game → force teardown.
+    // Game-window watcher (run::watch_window, through gamescope's nested X server): for a native SDL/GL game
+    // there is NO first-present stderr marker for watch_child to scan, so the splash relies entirely on
+    // gamescope having a game window to show; and once it has, the game's windows going away for good means
+    // it is hung on shutdown → force teardown.
     if cfg.window_watch {
         let tx = tx.clone();
-        let needle = needle.clone();
-        let title = cfg.name.clone();
-        let splash_app_id = app_id.clone();
-        std::thread::spawn(move || run::watch_window(tx, needle, title, splash_app_id));
+        let (ready, x11_dir) = (session.ready.clone(), session.x11_dir.clone());
+        std::thread::spawn(move || run::watch_window(tx, ready, x11_dir));
     }
 
     // Move `settings` into the worker (watch_child borrows it for the run; nothing below needs it — the
     // splash/window ids were already cloned above).
-    let worker = std::thread::spawn(move || run::watch_child(child, reader, &settings, tx));
+    let status = session.status.clone();
+    let worker = std::thread::spawn(move || run::watch_child(child, reader, status, &settings, tx));
 
     let code = if cfg.splash {
-        splash::run(app_id, cfg.name.clone(), cfg.icon.clone(), rx)
+        splash::run(app_id, cfg.name.clone(), cfg.icon.clone(), rx, gamescope::activator(&session))
     } else {
-        headless_wait(rx)
+        headless_wait(rx, gamescope::activator(&session))
     };
     let _ = worker.join();
-    ExitCode::from((code & 0xff) as u8)
+    (code & 0xff) as u8
 }
 
 /// Splash-disabled wait: drain the worker's progress channel until the game exits, returning its code. The
-/// window-watcher's `Presented` events are ignored (nothing to dismiss); only `Exited` ends the wait.
-fn headless_wait(rx: mpsc::Receiver<run::Progress>) -> i32 {
+/// window-watcher's `Presented` events are ignored (nothing to dismiss); activation requests go straight to
+/// the game; only `Exited` ends the wait.
+fn headless_wait(rx: mpsc::Receiver<run::Progress>, activate_game: impl Fn(String)) -> i32 {
     loop {
         match rx.recv() {
             Ok(run::Progress::Exited(code)) => return code,
             Ok(run::Progress::Presented) => {}
+            Ok(run::Progress::Activate(token)) => activate_game(token),
             Err(_) => return 1, // worker dropped the sender without an Exited — treat as failure
         }
     }
@@ -375,7 +425,7 @@ fn resolve_thin_table(cfg: &ThinConfig, view: &Path) -> io::Result<Vec<Entry>> {
 /// INNER (`--inside-ns`): the view (the game's $HOME tmpfs + save binds) is live. Build the sealed env, exec
 /// the game in its own process group with inherited stdio (→ the outer's read pipe), wait, and tear down with
 /// a process-group kill on exit/cancel. Returns the game's exit code.
-fn run_inner(cfg: &ThinConfig, settings: &Settings, paths: &Paths, passthrough: &[String]) -> ExitCode {
+fn run_inner(cfg: &ThinConfig, settings: &Settings, paths: &Paths, passthrough: &[String]) -> u8 {
     // The game dir is the read-only overlay/bind propnix-mount laid at THIN_GAME_DIR under the view; the exe is
     // resolved as an ABSOLUTE path within it (Command::new resolves a relative program against OUR cwd, not the
     // child's current_dir — so never pass a bare `./exe`). cwd = the game dir, or its `workingDir` subdir for
@@ -479,54 +529,19 @@ fn run_inner(cfg: &ThinConfig, settings: &Settings, paths: &Paths, passthrough: 
         cmd.env(k, util::expand_env(v));
     }
 
-    // SDL video-driver default (unless the config pinned it): PROPNIX_SDL_VIDEODRIVER wins; else Wayland when
-    // a Wayland session is present, X11 otherwise. Harmless for a non-SDL game (it ignores the var).
+    // SDL video-driver default (unless the config pinned it): PROPNIX_SDL_VIDEODRIVER wins; else x11, the
+    // driver for gamescope's Xwayland. Set explicitly: gamescope unsets the var, and SDL3 would otherwise try
+    // Wayland, which with WAYLAND_DISPLAY unset means the host's `wayland-0`. A `wayland` choice gets
+    // gamescope's own Wayland display (`effective_sdl_driver`). Harmless for a non-SDL game.
     if !cfg.env.contains_key("SDL_VIDEODRIVER") {
         cmd.env("SDL_VIDEODRIVER", sdl_video_driver());
     }
 
-    // PROPNIX_BENCH: MangoHud's OpenGL overlay (box64/native games are SDL/GL, not the wine path's Vulkan).
-    // box64 renders through NATIVE Mesa (it wraps libGL) and ships a built-in special-case for
-    // `libMangoHud_shim.so`'s `dlsym` — so the HUD is enabled exactly as the `mangohud` wrapper does:
-    //   * LD_PRELOAD the SHIM (`<root>/lib/mangohud/libMangoHud_shim.so`) — box64's integration hooks it,
-    //     routing the guest's GL entry-point `dlsym`s through MangoHud (a plain `libMangoHud.so` preload does
-    //     NOT work under box64; that was the earlier mistake);
-    //   * put `<root>/lib/mangohud` on LD_LIBRARY_PATH so the shim finds its opengl/dlsym siblings;
-    //   * add `<root>/share` to XDG_DATA_DIRS for the Vulkan implicit layer (box64 Vulkan games).
-    // dlsym is enabled by default (the wrapper does not set MANGOHUD_DLSYM). The seal scrubbed LD_*, so these
-    // are set fresh, only under bench, layered over the LD_LIBRARY_PATH set above.
-    if settings.bench {
-        if let Some(mh) = &cfg.mangohud {
-            let mhlib = format!("{mh}/lib/mangohud");
-            cmd.env("MANGOHUD", "1");
-            if std::env::var_os("MANGOHUD_CONFIG").is_none() {
-                cmd.env(
-                    "MANGOHUD_CONFIG",
-                    "fps,frame_timing,cpu_stats,engine_version",
-                );
-            }
-            let ld = if ld_library_path.is_empty() {
-                mhlib.clone()
-            } else {
-                format!("{mhlib}:{ld_library_path}")
-            };
-            cmd.env("LD_LIBRARY_PATH", ld);
-            // Compose with a baked LD_PRELOAD (a game's own box64.guestPreload on the native face —
-            // rare, since steam-emu serves native by bind-over, not preload) instead of clobbering it:
-            // benching must not silently drop what a preload provides.
-            let preload = match cfg.env.get("LD_PRELOAD") {
-                Some(v) if !v.is_empty() => {
-                    format!("{mhlib}/libMangoHud_shim.so:{}", util::expand_env(v))
-                }
-                _ => format!("{mhlib}/libMangoHud_shim.so"),
-            };
-            cmd.env("LD_PRELOAD", preload);
-            let base = match std::env::var("XDG_DATA_DIRS") {
-                Ok(v) if !v.is_empty() => v,
-                _ => "/usr/share".to_string(),
-            };
-            cmd.env("XDG_DATA_DIRS", format!("{mh}/share:{base}"));
-        }
+    // gamescope's WSI layer on the Vulkan loader's search path (gamescope.rs `xdg_data_dirs`): box64 wraps the
+    // NATIVE libvulkan, so a Vulkan game's swapchain goes to gamescope directly. Unless the game pinned its
+    // own. (PROPNIX_BENCH's overlay is gamescope's mangoapp, which needs nothing in here.)
+    if !cfg.env.contains_key("XDG_DATA_DIRS") {
+        cmd.env("XDG_DATA_DIRS", gamescope::xdg_data_dirs(&cfg.gamescope));
     }
 
     cmd.process_group(0);
@@ -534,7 +549,7 @@ fn run_inner(cfg: &ThinConfig, settings: &Settings, paths: &Paths, passthrough: 
         Ok(c) => c,
         Err(e) => {
             eprintln!("propnix-launcher: failed to launch {}: {e}", exe_path.display());
-            return ExitCode::FAILURE;
+            return 1;
         }
     };
     let pgid = child.id() as i32;
@@ -553,7 +568,7 @@ fn run_inner(cfg: &ThinConfig, settings: &Settings, paths: &Paths, passthrough: 
         }
         std::thread::sleep(Duration::from_millis(120));
     };
-    ExitCode::from((code & 0xff) as u8)
+    (code & 0xff) as u8
 }
 
 /// Tear down the game's process group on cancel: SIGTERM first (a graceful chance to save + exit), then — if
@@ -578,17 +593,20 @@ fn reap_group(child: &mut std::process::Child, pgid: i32) -> i32 {
     130
 }
 
-/// The SDL video driver to request: an explicit `PROPNIX_SDL_VIDEODRIVER` verbatim, else `wayland` when a
-/// Wayland session is present (`WAYLAND_DISPLAY`), else `x11`. (Read from the launcher's own env — PROPNIX_*
-/// is never scrubbed.)
-fn sdl_video_driver() -> String {
-    if let Ok(v) = std::env::var("PROPNIX_SDL_VIDEODRIVER") {
-        if !v.is_empty() {
-            return v;
-        }
+/// The SDL video driver the game will run with: its own pinned `SDL_VIDEODRIVER`, else `sdl_video_driver()`.
+/// A `wayland` one makes gamescope serve its own Wayland display (gamescope.rs `expose_wayland`).
+fn effective_sdl_driver(cfg: &ThinConfig) -> String {
+    match cfg.env.get("SDL_VIDEODRIVER") {
+        Some(v) => util::expand_env(v),
+        None => sdl_video_driver(),
     }
-    match std::env::var("WAYLAND_DISPLAY") {
-        Ok(v) if !v.is_empty() => "wayland".to_string(),
+}
+
+/// The SDL video driver to request: an explicit `PROPNIX_SDL_VIDEODRIVER` verbatim, else `x11`. (Read from
+/// the launcher's own env — PROPNIX_* is never scrubbed.)
+fn sdl_video_driver() -> String {
+    match std::env::var("PROPNIX_SDL_VIDEODRIVER") {
+        Ok(v) if !v.is_empty() => v,
         _ => "x11".to_string(),
     }
 }

@@ -159,9 +159,9 @@ benefits of native kernel mounts. That design leans on several host capabilities
 | Unprivileged overlayfs + `userxattr` in a userns (Linux **5.11+**) | copy-on-write prefix/game/save overlays over the store | yes |
 | `user.*` xattrs + overlay-upper support on `$XDG_STATE_HOME` & saves fs (ext4/xfs/btrfs/tmpfs; ZFS **≥ 2.2**) | persisting the overlay *uppers* | yes |
 | A Vulkan ICD (e.g. Mesa on Asahi) | the default DXVK/vkd3d D3D backend | hard *unless* `PROPNIX_WINE_D3D=wined3d` |
-| Wayland (+ Xwayland) | the GTK4 splash + the game window | yes |
+| A Wayland compositor | the GTK4 splash + gamescope's window (the game itself draws into gamescope's own Xwayland, so the compositor needs no Xwayland) | yes |
 | `/dev/ntsync` (Linux **6.14+**) | fast wine synchronization | recommended |
-| A toplevel-list protocol — `ext-foreign-toplevel-list-v1` (Mutter 45+, wlroots), `wlr-foreign-toplevel-management`, or `org_kde_plasma_window_management` (KDE) — or an X11/Xwayland session | single-instance raise, splash dismiss, close-to-quit | optional (degrades gracefully; every desktop provides at least one, and the only gap is raising a *native-Wayland* window on GNOME) |
+| `xdg_activation_v1` (GNOME, KDE, wlroots, Hyprland, COSMIC) | a duplicate launch focusing the running game | optional (without it the duplicate launch is a no-op) |
 | GOG/Steam account owning the title + its token | **building** a game payload (FOD fetch) | yes (build-time) |
 | Nix's classic build users, i.e. `auto-allocate-uids = false` | reading that token inside the FOD sandbox — an auto-allocated build runs as a synthetic uid/gid in no host group, so a 0640 token is unreadable and only a world-readable one would work | yes (build-time) |
 
@@ -177,15 +177,12 @@ ABI requires: box64 for an x86_64 payload, FEX for a 32-bit x86 one (box64 emula
 nothing at all for an ARM64 payload. An x86_64 host runs every x86 Linux build directly. At launch the
 launcher:
 
-1. **single-instance** — an flock keyed on the appid; a duplicate launch focuses the running window and
-   exits. The raise tries three paths in order, matching the game's app_id — or, while the game is still
-   cold-starting, this game's startup splash: EWMH `_NET_ACTIVE_WINDOW`, which covers an Xwayland game
-   window under *any* compositor; then `wlr-foreign-toplevel-management` (the wlroots family —
-   Hyprland/sway/Wayfire/river — plus COSMIC); then KDE's `org_kde_plasma_window_management`, since KWin
-   implements neither of the first two and this is its only activate verb (it needs the
-   `X-KDE-Wayland-Interfaces` grant that every game's `.desktop` file carries). The single gap is a
-   *native-Wayland* window on GNOME, which exposes no activate verb to foreign clients at all — there it
-   degrades to a no-op.
+1. **single-instance** — an flock keyed on the appid; a duplicate launch focuses the running game and
+   exits. It does so through **xdg-activation**: the duplicate hands its activation token (a desktop
+   launch carries one in `XDG_ACTIVATION_TOKEN`) to the running launcher, which presents it from the
+   window it is showing — the splash (GTK), or the game (gamescope, patch 0004). A launch from a shell has
+   no token, so gamescope asks for one with its own last input; the compositor decides whether that
+   focuses (Hyprland: with `misc:focus_on_activate`) or only flags the window (GNOME's "is ready").
 2. **prefix** — assembles the `WINEPREFIX` from a **declarative mount table** (there is no symlink farm and
    no seeding step): `propnix-mount` unshares a private user+mount namespace and lays a fresh tmpfs at the
    view root, then binds the read-only system tree (`wine-prefix-lower`: `C:\Windows`, Program Files,
@@ -197,8 +194,10 @@ launcher:
    first launch, or the launch refuses if you pointed `PROPNIX_SAVE_DIR` somewhere missing).
 4. **seal** — a *targeted* env scrub (unset only `WINE*`/`FEX_*`/`BOX64_*`/`LD_*`, keep the rest of the
    session env) then sets the meant vars. Never `env_clear()`.
-5. **run** — spawns wine in its own process group; tears down **prefix-scoped** (`wineserver -k`) on exit —
-   never a global process-name kill.
+5. **run** — inside **gamescope** (Wayland backend), which the launcher starts in the prefix's namespace:
+   the host sees one window named after the game, fullscreen at `PROPNIX_WIDTH×PROPNIX_HEIGHT`, while the
+   game draws through winex11 / SDL x11 into gamescope's own Xwayland. Wine runs in its own process group
+   and tears down **prefix-scoped** (`wineserver -k`) on exit — never a global process-name kill.
 
 ### `PROPNIX_*` — global runtime knobs
 
@@ -208,9 +207,12 @@ steer **all** games:
 | var | effect |
 |---|---|
 | `PROPNIX_WINE_D3D` | `dxvk` (default) or `wined3d` |
-| `PROPNIX_WINE_GRAPHICS` | `wayland` (default for HK) or `x11` |
-| `PROPNIX_FPS` | frame cap (any positive int) → `DXVK_FRAME_RATE`, **and forces vsync off** (`dxgi.syncInterval=0`) so the cap paces via timer instead of FIFO vblank quantization. DXVK/vkd3d only (no-op on wined3d). Unset → the game's own vsync/cap are left untouched. |
-| `PROPNIX_BENCH` | on-screen **MangoHud** overlay on the Vulkan backend (DXVK + vkd3d) — fps/frametime/CPU/versions (GPU stats need a MangoHud-supported driver; blank on Asahi). On wined3d there is no overlay — fps prints to the console via wine's `+fps` channel. Also tees the game's output to the console. |
+| `PROPNIX_WINE_GRAPHICS` | `x11`, the only value: the game draws into gamescope's Xwayland. Anything else stops the launch — winewayland cannot run on gamescope's nested Wayland server (no `wl_subcompositor`). |
+| `PROPNIX_WIDTH` / `PROPNIX_HEIGHT` | the game's resolution: gamescope's window and the screen the game sees. Unset → the primary output's mode. Set the height when the compositor's fullscreen area is smaller than the mode (a notch kept out of fullscreen), or the picture is letterboxed into it. |
+| `PROPNIX_FPS` | frame cap (any positive int). Every game: gamescope's `--framerate-limit` — exact on a VRR output, rounded to a divisor of the refresh otherwise (60 Hz: 60/30/20/15). DXVK/vkd3d titles additionally get the exact `DXVK_FRAME_RATE` cap **with vsync forced off** (`dxgi.syncInterval=0`), so it paces via timer instead of FIFO vblank quantization. `0` = VRR: uncapped, vsync on, and gamescope `--adaptive-sync` (follows the output's VRR when the compositor runs it). Unset → the game's own vsync/cap are left untouched. |
+| `PROPNIX_GAMESCOPE_FILTER` | how gamescope scales the game's image to its window when they differ: `fsr` (default — AMD FSR 1, a portable shader that runs only while upscaling), `linear`, `nis`, `sgsr`, `nearest`, `pixel`. Overrides the game's own `gamescope.filter`. |
+| `PROPNIX_GAMESCOPE_SCALER` | how the image is fitted: `auto` (gamescope's default: fit, keeping aspect), `integer`, `fit`, `fill`, `stretch`. Overrides the game's own `gamescope.scaler`. |
+| `PROPNIX_BENCH` | on-screen performance overlay — gamescope's **mangoapp** (MangoHud), fed from gamescope's view of the game's frames, so it works for every graphics API (DXVK, vkd3d, wined3d/GL, native GL): fps/frametime/CPU (GPU stats need a MangoHud-supported driver; blank on Asahi). Also tees the game's output to the console. |
 | `PROPNIX_DEBUG` | tee the game's merged stdout+stderr to the launcher's stdout (no bench overlay) — for troubleshooting a launch |
 | `PROPNIX_SAVE_DIR` | global saves root, namespaced per app (`$PROPNIX_SAVE_DIR/<appid>`). Set-but-missing is a hard error; unset → `$XDG_DATA_HOME/propnix-saves`. |
 | `PROPNIX_WINEDEBUG` | override `WINEDEBUG` (default `-all`) |

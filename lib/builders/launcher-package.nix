@@ -17,8 +17,6 @@
   pname,
   appid,
   name,
-  exe, # startupWMClass fallback (wine's window class = exe basename, lowercased)
-  wmClass ? null, # the game's OWN measured window class, when the exe-derived guess is wrong
   configFile,
   iconTree ? null, # the hicolor theme + splash tree (built by the caller — icon SOURCE selection is per-builder)
   iconSymbolic ? null,
@@ -54,27 +52,10 @@ let
           --add-flags "--config ${configFile}"
       '';
 
-  # The launcher's KWin-authorization desktop entry (see propnix-launcher's postFixup: it is what grants
-  # the launcher binary KDE's window-management global for the raise + window-watcher paths), linked into
-  # the GAME package so installing a game installs the grant — a bare launcher package is never in a
-  # profile. Named by the launcher's store hash: two games pinning DIFFERENT launcher builds then install
-  # two entries (each authorizing its own binary) instead of colliding in the merged profile, while games
-  # sharing one build dedupe to identical links.
-  launcherHash = lib.substring 0 8 (lib.removePrefix "/nix/store/" "${propnix-launcher}");
-  kwinGrant = runCommandLocal "${pname}-kwin-grant" { } ''
-    mkdir -p "$out/share/applications"
-    ln -s ${propnix-launcher}/share/applications/org.propnix.launcher.desktop \
-      "$out/share/applications/org.propnix.launcher-${launcherHash}.desktop"
-  '';
-
   desktopItem = mkDesktopItem {
     inherit appid name iconSymbolic;
     exec = pname; # resolves from PATH once the package is installed
     hasIcon = iconTree != null; # set Icon=<id> only if the raster theme is actually installed
-    # The wine convention (class = exe basename) is only a DEFAULT: a native engine names its own
-    # window, and StartupWMClass must match what the window actually carries or the taskbar shows the
-    # generic icon for the game while the splash shows the right one.
-    startupWMClass = if wmClass != null then wmClass else lib.toLower (baseNameOf exe);
   };
 
   # What this host's verdict WOULD be, and what it actually is: `allowBroken` is the only thing that
@@ -95,7 +76,6 @@ lib.warnIf (knownBroken && (broken.allow or false))
     paths = [
       wrapper
       desktopItem
-      kwinGrant
     ]
     ++ lib.optional (iconTree != null) iconTree # the freedesktop hicolor raster theme
     ++ extraChecks; # empty dirs; here only so their assertions are forced by a build

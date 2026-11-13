@@ -20,6 +20,16 @@ pub enum FpsMode {
 }
 
 impl FpsMode {
+    /// `PROPNIX_FPS`, three-state. Unset and empty-string are IDENTICAL — both mean "not provided" →
+    /// Unmanaged (touch nothing; the game's own vsync/cap stand). A present, non-empty value is parsed: 0 →
+    /// Vrr (uncapped + vsync ON), N>0 → Fixed(N) (cap + vsync OFF); a non-numeric value is ignored →
+    /// Unmanaged. There is no baked fps default — a per-game way to steer this is deferred. It drives the
+    /// DXVK/vkd3d knobs (env.rs) and gamescope's limiter (gamescope.rs), independent of the game's own UI
+    /// options.
+    fn from_env() -> FpsMode {
+        FpsMode::from_raw(env_nonempty("PROPNIX_FPS").and_then(|v| v.parse::<u32>().ok()))
+    }
+
     /// Map the raw resolved integer (env-or-default) to a mode: absent → Unmanaged, 0 → Vrr, N>0 → Fixed(N).
     fn from_raw(raw: Option<u32>) -> FpsMode {
         match raw {
@@ -96,13 +106,7 @@ impl Settings {
         let graphics =
             env_nonempty("PROPNIX_WINE_GRAPHICS").unwrap_or_else(|| cfg.defaults.graphics.clone());
         let d3d = env_nonempty("PROPNIX_WINE_D3D").unwrap_or_else(|| cfg.defaults.d3d.clone());
-        // PROPNIX_FPS is three-state (the DXVK/vkd3d knobs it drives live in env.rs). Unset and empty-string
-        // are IDENTICAL — both mean "not provided" → Unmanaged (touch nothing; the game's own vsync/cap
-        // stand); `env_nonempty` collapses the two to `None`. A present, non-empty value is parsed: 0 → Vrr
-        // (uncapped + vsync ON), N>0 → Fixed(N) (cap + vsync OFF); a non-numeric value is ignored → Unmanaged.
-        // There is no baked fps default — a per-game way to steer this is deferred. The cap is applied at the
-        // DXVK/vkd3d layer, independent of the game's own UI options.
-        let fps = FpsMode::from_raw(env_nonempty("PROPNIX_FPS").and_then(|v| v.parse::<u32>().ok()));
+        let fps = FpsMode::from_env();
         // DPI is env-only and opt-in: a positive `PROPNIX_DPI` becomes the HKCU LogPixels stamp (via the
         // `LogPixels = $PROPNIX_DPI` userReg entry, exported in graphics.rs); 0 / non-numeric / unset → no
         // stamp (the game/wine default DPI stands). There is deliberately no baked per-game DPI default — its
@@ -147,18 +151,19 @@ impl Settings {
     }
 
     /// THIN-mode settings (box64 / native Linux): no wine defaults to resolve — the backend has no
-    /// graphics/d3d/fps/dpi knobs (those are wine's). We keep only the fields the shared OUTER machinery
-    /// reads: `appid` (state paths, single-instance, PROPNIX_APPID), `console` (forward the game's piped
-    /// stdout under PROPNIX_DEBUG/BENCH), `no_prefetch` (always true — the module prefetch is a wine-path-only
-    /// step, run from inside the assembled prefix; THIN has neither a prefix nor a wine loader),
-    /// and `unseal`. The wine-only fields get inert defaults so `paths()` / `watch_child` work unchanged.
+    /// graphics/d3d/dpi knobs (those are wine's). We keep only the fields the shared OUTER machinery
+    /// reads: `appid` (state paths, single-instance, PROPNIX_APPID), `fps` (gamescope's limiter),
+    /// `console` (forward the game's piped stdout under PROPNIX_DEBUG/BENCH), `no_prefetch` (always true —
+    /// the module prefetch is a wine-path-only step, run from inside the assembled prefix; THIN has neither a
+    /// prefix nor a wine loader), and `unseal`. The wine-only fields get inert defaults so `paths()` /
+    /// `watch_child` work unchanged.
     pub fn resolve_thin(appid: &str, unseal: bool) -> Settings {
         let appid = env_nonempty("PROPNIX_APPID").unwrap_or_else(|| appid.to_string());
         Settings {
             appid,
             graphics: String::new(),
             d3d: String::new(), // never "dxvk" → is_dxvk() is false, so the DXVK overlays/env never apply
-            fps: FpsMode::Unmanaged,
+            fps: FpsMode::from_env(),
             dpi: None,
             winedebug: String::new(),
             bench: env_set("PROPNIX_BENCH"),

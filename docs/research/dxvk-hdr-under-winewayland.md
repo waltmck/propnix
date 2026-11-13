@@ -20,7 +20,9 @@ On the wine backend with `d3d = "dxvk"`, propnix-launcher binds `d3d9`/`d3d10`/`
 DXVK and `d3d12`/`d3d12core` from vkd3d-proton into the prefix. A Vulkan-native title (No Man's Sky)
 gets DXVK's dxgi too, and still asks DXGI whether the display is HDR-capable.
 
-A title opts in with `env.DXVK_HDR = "1"`. The row is baked into the config's `seal.setEnv`; the
+A title opts in with `env.DXVK_HDR = "1"`. Games now present through gamescope's winex11 path
+rather than winewayland (docs/research/gamescope.md): gamescope writes `DXVK_HDR` from the host
+output's HDR state, and the launcher unsets it again for every title that has not opted in. The row is baked into the config's `seal.setEnv`; the
 launcher's environment scrub removes only `WINE*`/`FEX_*`/`BOX64_*`/`LD_*`, so the variable reaches
 the process. It is not a tree-wide default: careless titles trust the DXGI report alone (UE4 DX11
 games crash on it, which is what DXVK's own `isHDRDisallowed` guard exists for), so each title opts

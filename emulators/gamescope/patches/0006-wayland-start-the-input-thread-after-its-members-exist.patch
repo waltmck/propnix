@@ -1,0 +1,34 @@
+Subject: [PATCH] wayland: start the input thread after its members exist
+
+CWaylandInputThread's constructor starts m_Thread in its member initializer, and the thread immediately
+waits on m_bInitted, then reads m_Waiter and m_pBackend. Members are initialized in declaration order,
+and m_Thread was declared before m_bInitted (and everything after it): the new thread could read
+m_bInitted before it was initialized, skip the wait on a nonzero garbage value, and dereference an unset
+m_pBackend — an intermittent SIGSEGV in CWaylandInputThread::ThreadFunc at startup, depending on what
+the allocation held.
+
+Declare m_Thread last, so every member is initialized before the thread starts. The destructor already
+joins it before any member is destroyed.
+diff --git a/src/Backends/WaylandBackend.cpp b/src/Backends/WaylandBackend.cpp
+index 8811a45..5c1748c 100644
+--- a/src/Backends/WaylandBackend.cpp
++++ b/src/Backends/WaylandBackend.cpp
+@@ -549,7 +549,6 @@ namespace gamescope
+ 
+         CWaiter<4> m_Waiter;
+ 
+-        std::thread m_Thread;
+         std::atomic<bool> m_bInitted = { false };
+ 
+         uint32_t m_uPointerEnterSerial = 0;
+@@ -625,6 +624,10 @@ namespace gamescope
+         void Wayland_Touch_Motion( wl_touch *pTouch, uint32_t uTime, int32_t nId, wl_fixed_t fX, wl_fixed_t fY );
+         void Wayland_Touch_Cancel( wl_touch *pTouch );
+         static const wl_touch_listener s_TouchListener;
++
++        // LAST: members are initialized in declaration order, and the constructor starts this thread, which
++        // reads m_bInitted, m_Waiter and m_pBackend at once — every one of them must exist before it does.
++        std::thread m_Thread;
+     };
+     const wl_registry_listener CWaylandInputThread::s_RegistryListener =
+     {

@@ -1,0 +1,265 @@
+Subject: [PATCH] wayland: focus the window through xdg-activation on request
+
+Nothing outside gamescope can focus its host window except through compositor-specific window
+management (wlr-foreign-toplevel, KDE's plasma-window-management); GNOME offers a foreign client none
+at all. The portable mechanism is xdg-activation: whoever wants a window focused holds an activation
+token (a desktop launch carries one in XDG_ACTIVATION_TOKEN) and the window's own client presents it.
+
+Bind xdg_activation_v1 in the Wayland backend and add IBackendConnector::Activate(token). A client of
+the nested X server requests it through a root property, GAMESCOPE_XDG_ACTIVATION_TOKEN, whose value is
+the token: steamcompmgr reads and deletes it in one request and activates the current connector. An
+empty value asks gamescope to request a token itself, the way a browser does when another process asks
+it to show a page: stamped with the serial of the last input event (enter, button or key) on the
+backend's own wl_seat, named alongside it. The backend now records button and key serials on that seat
+for this; input is still handled on the input thread's seat. gamescope holds more than one wl_seat and
+each gets its own serials for the same event, and a host may validate against the first-bound seat only
+(Hyprland does), which is the backend's. Whether a token earns focus or only an urgency hint is the
+host's policy (Hyprland: urgency only when the serial is not a recent one of ours).
+diff --git a/protocol/meson.build b/protocol/meson.build
+index c9289f8..646bebe 100644
+--- a/protocol/meson.build
++++ b/protocol/meson.build
+@@ -22,6 +22,7 @@ protocols = [
+ 	wl_protocol_dir / 'unstable/relative-pointer/relative-pointer-unstable-v1.xml',
+ 	wl_protocol_dir / 'unstable/primary-selection/primary-selection-unstable-v1.xml',
+ 	wl_protocol_dir / 'staging/fractional-scale/fractional-scale-v1.xml',
++	wl_protocol_dir / 'staging/xdg-activation/xdg-activation-v1.xml',
+ 	wl_protocol_dir / 'staging/linux-drm-syncobj/linux-drm-syncobj-v1.xml',
+ 
+ 	'color-management-v1.xml',
+diff --git a/src/Backends/WaylandBackend.cpp b/src/Backends/WaylandBackend.cpp
+index d117ff9..58c35c1 100644
+--- a/src/Backends/WaylandBackend.cpp
++++ b/src/Backends/WaylandBackend.cpp
+@@ -35,6 +35,7 @@
+ #include <primary-selection-unstable-v1-client-protocol.h>
+ #include <fractional-scale-v1-client-protocol.h>
+ #include <xdg-toplevel-icon-v1-client-protocol.h>
++#include <xdg-activation-v1-client-protocol.h>
+ #include "wlr_end.hpp"
+ 
+ #include "drm_include.h"
+@@ -468,7 +469,11 @@ namespace gamescope
+         virtual void SetTitle( std::shared_ptr<std::string> szTitle ) override;
+         virtual void SetIcon( std::shared_ptr<std::vector<uint32_t>> uIconPixels ) override;
+         virtual void SetSelection( std::shared_ptr<std::string> szContents, GamescopeSelection eSelection ) override;
++
++        virtual void Activate( const std::string &sToken ) override;
+     private:
++        void XdgActivationToken_Done( xdg_activation_token_v1 *pToken, const char *pszToken );
++        static const xdg_activation_token_v1_listener s_XdgActivationTokenListener;
+ 
+         friend CWaylandPlane;
+ 
+@@ -744,6 +749,7 @@ namespace gamescope
+         wp_image_description_v1 *GetWPImageDescription( GamescopeAppTextureColorspace eColorspace ) const { return m_pWPImageDescriptions[ (uint32_t)eColorspace ]; }
+         wp_fractional_scale_manager_v1 *GetFractionalScaleManager() const { return m_pFractionalScaleManager; }
+         xdg_toplevel_icon_manager_v1 *GetToplevelIconManager() const { return m_pToplevelIconManager; }
++        xdg_activation_v1 *GetXdgActivation() const { return m_pXdgActivation; }
+         libdecor *GetLibDecor() const { return m_pLibDecor; }
+ 
+         void UpdateFullscreenState();
+@@ -786,10 +792,12 @@ namespace gamescope
+ 
+         void Wayland_Pointer_Enter( wl_pointer *pPointer, uint32_t uSerial, wl_surface *pSurface, wl_fixed_t fSurfaceX, wl_fixed_t fSurfaceY );
+         void Wayland_Pointer_Leave( wl_pointer *pPointer, uint32_t uSerial, wl_surface *pSurface );
++        void Wayland_Pointer_Button( wl_pointer *pPointer, uint32_t uSerial, uint32_t uTime, uint32_t uButton, uint32_t uState );
+         static const wl_pointer_listener s_PointerListener;
+ 
+         void Wayland_Keyboard_Enter( wl_keyboard *pKeyboard, uint32_t uSerial, wl_surface *pSurface, wl_array *pKeys );
+         void Wayland_Keyboard_Leave( wl_keyboard *pKeyboard, uint32_t uSerial, wl_surface *pSurface );
++        void Wayland_Keyboard_Key( wl_keyboard *pKeyboard, uint32_t uSerial, uint32_t uTime, uint32_t uKey, uint32_t uState );
+         static const wl_keyboard_listener s_KeyboardListener;
+ 
+ 		void Wayland_LockedPointer_Locked( zwp_locked_pointer_v1 *pLockedPointer );
+@@ -834,6 +842,7 @@ namespace gamescope
+         zwp_relative_pointer_manager_v1 *m_pRelativePointerManager = nullptr;
+         wp_fractional_scale_manager_v1 *m_pFractionalScaleManager = nullptr;
+         xdg_toplevel_icon_manager_v1 *m_pToplevelIconManager = nullptr;
++        xdg_activation_v1 *m_pXdgActivation = nullptr;
+ 
+         // TODO: Restructure and remove the need for this.
+         std::atomic<CWaylandConnector *> m_pFocusConnector;
+@@ -876,6 +885,9 @@ namespace gamescope
+         uint32_t m_uPointerEnterSerial = 0;
+         bool m_bMouseEntered = false;
+         uint32_t m_uKeyboardEnterSerial = 0;
++        // The serial of the last input event (enter, button, key) on THIS seat: what an xdg-activation token
++        // we request ourselves is stamped with, together with this seat.
++        uint32_t m_uLastInputSerial = 0;
+         bool m_bKeyboardEntered = false;
+ 
+         std::shared_ptr<INestedHints::CursorInfo> m_pCursorInfo;
+@@ -907,7 +919,7 @@ namespace gamescope
+         .enter         = WAYLAND_USERDATA_TO_THIS( CWaylandBackend, Wayland_Pointer_Enter ),
+         .leave         = WAYLAND_USERDATA_TO_THIS( CWaylandBackend, Wayland_Pointer_Leave ),
+         .motion        = WAYLAND_NULL(),
+-        .button        = WAYLAND_NULL(),
++        .button        = WAYLAND_USERDATA_TO_THIS( CWaylandBackend, Wayland_Pointer_Button ),
+         .axis          = WAYLAND_NULL(),
+         .frame         = WAYLAND_NULL(),
+         .axis_source   = WAYLAND_NULL(),
+@@ -920,7 +932,7 @@ namespace gamescope
+         .keymap        = WAYLAND_NULL(),
+         .enter         = WAYLAND_USERDATA_TO_THIS( CWaylandBackend, Wayland_Keyboard_Enter ),
+         .leave         = WAYLAND_USERDATA_TO_THIS( CWaylandBackend, Wayland_Keyboard_Leave ),
+-        .key           = WAYLAND_NULL(),
++        .key           = WAYLAND_USERDATA_TO_THIS( CWaylandBackend, Wayland_Keyboard_Key ),
+         .modifiers     = WAYLAND_NULL(),
+         .repeat_info   = WAYLAND_NULL(),
+     };
+@@ -1296,6 +1308,46 @@ namespace gamescope
+             szTitle += " (grabbed)";
+         libdecor_frame_set_title( m_Planes[0].GetFrame(), szTitle.c_str() );
+     }
++    const xdg_activation_token_v1_listener CWaylandConnector::s_XdgActivationTokenListener =
++    {
++        .done = WAYLAND_USERDATA_TO_THIS( CWaylandConnector, XdgActivationToken_Done ),
++    };
++    void CWaylandConnector::Activate( const std::string &sToken )
++    {
++        xdg_activation_v1 *pActivation = m_pBackend->GetXdgActivation();
++        if ( !pActivation )
++            return;
++
++        wl_surface *pSurface = m_Planes[0].GetSurface();
++        if ( !sToken.empty() )
++        {
++            xdg_activation_v1_activate( pActivation, sToken.c_str(), pSurface );
++        }
++        else
++        {
++            // Stamped with the serial of the last input event on the backend's own seat, named alongside it.
++            // We hold more than one wl_seat (the input thread binds its own, libdecor another), and each gets its
++            // own serials for the same event; a host may check the serial against our first-bound seat only
++            // (Hyprland does), which is this one.
++            xdg_activation_token_v1 *pToken = xdg_activation_v1_get_activation_token( pActivation );
++            xdg_activation_token_v1_add_listener( pToken, &s_XdgActivationTokenListener, this );
++            if ( m_pBackend->m_uLastInputSerial )
++                xdg_activation_token_v1_set_serial( pToken, m_pBackend->m_uLastInputSerial, m_pBackend->m_pSeat );
++            xdg_activation_token_v1_set_surface( pToken, pSurface );
++            xdg_activation_token_v1_set_app_id( pToken, g_sAppId );
++            xdg_activation_token_v1_commit( pToken );
++        }
++        wl_display_flush( m_pBackend->GetDisplay() );
++    }
++    void CWaylandConnector::XdgActivationToken_Done( xdg_activation_token_v1 *pToken, const char *pszToken )
++    {
++        // A host that refuses the request answers with an empty token; one that grants less (urgency only, for
++        // a serial it cannot match) decides that itself when we activate.
++        if ( pszToken && *pszToken )
++            xdg_activation_v1_activate( m_pBackend->GetXdgActivation(), pszToken, m_Planes[0].GetSurface() );
++        xdg_activation_token_v1_destroy( pToken );
++        wl_display_flush( m_pBackend->GetDisplay() );
++    }
+     void CWaylandConnector::SetIcon( std::shared_ptr<std::vector<uint32_t>> uIconPixels )
+     {
+         if ( !m_pBackend->GetToplevelIconManager() )
+@@ -2623,6 +2675,10 @@ namespace gamescope
+         {
+             m_pToplevelIconManager = (xdg_toplevel_icon_manager_v1 *)wl_registry_bind( pRegistry, uName, &xdg_toplevel_icon_manager_v1_interface, 1u );
+         }
++        else if ( !strcmp( pInterface, xdg_activation_v1_interface.name ) )
++        {
++            m_pXdgActivation = (xdg_activation_v1 *)wl_registry_bind( pRegistry, uName, &xdg_activation_v1_interface, 1u );
++        }
+         else if ( !strcmp( pInterface, wl_data_device_manager_interface.name ) )
+         {
+             m_pDataDeviceManager = (wl_data_device_manager *)wl_registry_bind( pRegistry, uName, &wl_data_device_manager_interface, 3u );
+@@ -2720,6 +2776,7 @@ namespace gamescope
+ 			return;
+ 
+         m_uPointerEnterSerial = uSerial;
++        m_uLastInputSerial = uSerial;
+         m_bMouseEntered = true;
+ 
+         UpdateCursor();
+@@ -2740,10 +2797,21 @@ namespace gamescope
+ 			return;
+ 
+         m_uKeyboardEnterSerial = uSerial;
++        m_uLastInputSerial = uSerial;
+         m_bKeyboardEntered = true;
+ 
+         UpdateCursor();
+     }
++    // Input itself is handled on the input thread's seat; on ours, a button or key only moves the serial an
++    // xdg-activation token request is stamped with (see m_uLastInputSerial).
++    void CWaylandBackend::Wayland_Pointer_Button( wl_pointer *pPointer, uint32_t uSerial, uint32_t uTime, uint32_t uButton, uint32_t uState )
++    {
++        m_uLastInputSerial = uSerial;
++    }
++    void CWaylandBackend::Wayland_Keyboard_Key( wl_keyboard *pKeyboard, uint32_t uSerial, uint32_t uTime, uint32_t uKey, uint32_t uState )
++    {
++        m_uLastInputSerial = uSerial;
++    }
+     void CWaylandBackend::Wayland_Keyboard_Leave( wl_keyboard *pKeyboard, uint32_t uSerial, wl_surface *pSurface )
+     {
+ 		if ( !IsGamescopeToplevel( pSurface ) )
+diff --git a/src/backend.h b/src/backend.h
+index a1546c1..fed06e8 100644
+--- a/src/backend.h
++++ b/src/backend.h
+@@ -210,6 +210,11 @@ namespace gamescope
+ 
+         virtual INestedHints *GetNestedHints() = 0;
+ 
++        // Ask the host to focus this connector's window (xdg-activation). `sToken` is an activation token from
++        // whoever wants it focused; empty → request one with our own last input serial, which the host may
++        // honour only as an attention request. A no-op on a backend with no host window.
++        virtual void Activate( const std::string &sToken ) {}
++
+         virtual void SetProperty( ConnectorProperty eProperty, std::any value ) = 0;
+     };
+ 
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+index 0c2a768..8af1be4 100644
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -7492,6 +7492,26 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
+ 			g_flHDRItmTargetNits = 10000.f;
+ 		hasRepaint = true;
+ 	}
++	if ( ev->atom == ctx->atoms.gamescopeXdgActivationToken )
++	{
++		// Someone (a second launch of the game) wants our window focused: the value is its xdg-activation
++		// token, empty when it has none. Read and delete in one request, so the PropertyDelete this causes
++		// finds nothing and every request is acted on exactly once.
++		Atom actualType = None;
++		int nActualFormat = 0;
++		unsigned long ulItems = 0, ulBytesAfter = 0;
++		unsigned char *pData = nullptr;
++		if ( XGetWindowProperty( ctx->dpy, ctx->root, ctx->atoms.gamescopeXdgActivationToken, 0, 1024, True,
++				AnyPropertyType, &actualType, &nActualFormat, &ulItems, &ulBytesAfter, &pData ) == Success &&
++			actualType != None )
++		{
++			std::string sToken = ( pData && nActualFormat == 8 ) ? std::string( (const char *)pData, ulItems ) : std::string();
++			if ( gamescope::IBackendConnector *pConnector = GetBackend()->GetCurrentConnector() )
++				pConnector->Activate( sToken );
++		}
++		if ( pData )
++			XFree( pData );
++	}
+ 	if ( ev->atom == ctx->atoms.gamescopeKeyboardLayout )
+ 	{
+ 		std::string sLayout = get_string_prop( ctx, ctx->root, ctx->atoms.gamescopeKeyboardLayout );
+@@ -9167,6 +9187,7 @@ void init_xwayland_ctx(uint32_t serverId, gamescope_xwayland_server_t *xwayland_
+ 	ctx->atoms.gamescopeSharpness = XInternAtom( ctx->dpy, "GAMESCOPE_SHARPNESS", false );
+ 
+ 	ctx->atoms.gamescopeXWaylandModeControl = XInternAtom( ctx->dpy, "GAMESCOPE_XWAYLAND_MODE_CONTROL", false );
++	ctx->atoms.gamescopeXdgActivationToken = XInternAtom( ctx->dpy, "GAMESCOPE_XDG_ACTIVATION_TOKEN", false );
+ 	ctx->atoms.gamescopeFPSLimit = XInternAtom( ctx->dpy, "GAMESCOPE_FPS_LIMIT", false );
+ 	ctx->atoms.gamescopeKeyboardLayout = XInternAtom( ctx->dpy, "GAMESCOPE_KEYBOARD_LAYOUT", false );
+ 	ctx->atoms.gamescopeLimiterFeedback = XInternAtom( ctx->dpy, "GAMESCOPE_LIMITER_FEEDBACK", false );
+diff --git a/src/xwayland_ctx.hpp b/src/xwayland_ctx.hpp
+index 2bb4531..7e39cf8 100644
+--- a/src/xwayland_ctx.hpp
++++ b/src/xwayland_ctx.hpp
+@@ -174,6 +174,7 @@ struct xwayland_ctx_t final : public gamescope::IWaitable
+ 		Atom gamescopeSharpness;
+ 
+ 		Atom gamescopeXWaylandModeControl;
++		Atom gamescopeXdgActivationToken;
+ 
+ 		Atom gamescopeFPSLimit;
+ 		Atom gamescopeKeyboardLayout;

@@ -30,6 +30,8 @@ mkApp {
   online = false;
   fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
   exe = "Hollow Knight Silksong.exe";
+  # Art-led title: gamescope enlarges a smaller image by whole multiples only, so the art stays crisp.
+  gamescope.scaler = "integer";
   # Full-color icon auto-extracted from the exe's PE resources (icon.auto default). Symbolic vendored (CC BY-SA 4.0).
   icon.symbolic = ./hollow-knight-silksong-symbolic.svg;
 

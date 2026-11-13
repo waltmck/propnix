@@ -109,6 +109,10 @@ pkgs.lib.makeScope pkgs.newScope (
         callPackage ../emulators/vkd3d-proton-arm64ec.nix { }
       else
         callPackage ../emulators/vkd3d-proton-x86_64.nix { };
+    # The nested compositor every game runs inside (both arches, native), with its WSI layer in the same
+    # output. Pass nixpkgs' gamescope explicitly (else callPackage resolves `gamescope` from this scope →
+    # itself → infinite recursion).
+    gamescope = callPackage ../emulators/gamescope { gamescope = pkgs.gamescope; };
 
     # ── propnix tools (Rust; arch-agnostic — built for the host arch from the same source) ──
     # The launcher LINKS the mount + prefetch helpers as library crates (path deps), so it's the single

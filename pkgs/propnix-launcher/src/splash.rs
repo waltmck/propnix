@@ -1,9 +1,10 @@
 //! The GTK4 startup splash. Shown while the game cold-starts; dismissed on the first-present marker of
-//! whichever backend is active (DXVK, vkd3d, or wined3d) OR when the game window first maps (the compositor
+//! whichever backend is active (DXVK, vkd3d, or wined3d) OR when gamescope first shows a game window (the
 //! window-watcher, for backends/titles that emit no marker) — or a timeout / game exit. Closing it before
 //! first-present cancels startup. The launcher process outlives
 //! the game (it holds the single-instance lock + drives teardown), so the GTK loop stays alive after the
-//! splash is hidden and quits only when the worker reports the game exited.
+//! splash is hidden and quits only when the worker reports the game exited. A duplicate launch's activation
+//! request (focus.rs) focuses the splash while it is up, and is handed to `activate_game` once it is not.
 
 use crate::run::Progress;
 use gtk4 as gtk;
@@ -24,7 +25,13 @@ const SPLASH_WIDTH: i32 = 300;
 /// forces the wrap. Kept conservative so the title's natural width can never exceed the window.
 const SPLASH_WRAP_CHARS: i32 = 16;
 
-pub fn run(app_id: String, name: String, icon: Option<String>, rx: Receiver<Progress>) -> i32 {
+pub fn run(
+    app_id: String,
+    name: String,
+    icon: Option<String>,
+    rx: Receiver<Progress>,
+    activate_game: impl Fn(String) + 'static,
+) -> i32 {
     let app = Application::builder()
         // The game's `org.propnix.<appid>` id (also the game's `.desktop` basename): GTK sets it as the
         // Wayland toplevel app_id, so the compositor maps the splash to the SAME desktop entry — and thus
@@ -36,11 +43,12 @@ pub fn run(app_id: String, name: String, icon: Option<String>, rx: Receiver<Prog
 
     let exit_code = Rc::new(Cell::new(0i32));
     let rx_holder = Rc::new(RefCell::new(Some(rx)));
+    let activate_game: Rc<dyn Fn(String)> = Rc::new(activate_game);
 
     {
         let exit_code = exit_code.clone();
         app.connect_activate(move |app| {
-            build_splash(app, &name, &icon, &rx_holder, &exit_code);
+            build_splash(app, &name, &icon, &rx_holder, &exit_code, &activate_game);
         });
     }
 
@@ -54,6 +62,7 @@ fn build_splash(
     icon: &Option<String>,
     rx_holder: &Rc<RefCell<Option<Receiver<Progress>>>>,
     exit_code: &Rc<Cell<i32>>,
+    activate_game: &Rc<dyn Fn(String)>,
 ) {
     // Force a black splash (#000000 bg, light foreground) regardless of the system light/dark theme.
     let css = gtk::CssProvider::new();
@@ -164,10 +173,22 @@ fn build_splash(
     let app = app.clone();
     let window = window.clone();
     let exit_code = exit_code.clone();
+    let activate_game = activate_game.clone();
     glib::timeout_add_local(Duration::from_millis(100), move || {
         loop {
             match rx.try_recv() {
                 Ok(Progress::Presented) => window.set_visible(false),
+                // GTK presents a realized window WITH a startup id as an xdg-activation of it.
+                Ok(Progress::Activate(token)) if window.is_visible() => {
+                    if std::env::var_os("PROPNIX_DEBUG").is_some() {
+                        eprintln!("propnix: focus request handed to the splash");
+                    }
+                    match token.as_str() {
+                        "" => window.present(),
+                        t => window.set_startup_id(t),
+                    }
+                }
+                Ok(Progress::Activate(token)) => activate_game(token),
                 Ok(Progress::Exited(code)) => {
                     exit_code.set(code);
                     app.quit();

@@ -43,7 +43,6 @@
         pname
         appid
         name
-        wmClass
         exeArgs
         online
         workingDir
@@ -54,6 +53,7 @@
         extraLowers
         setupScript
         ;
+      gamescopeScaling = cfg.gamescope;
       # x87 PRECISION, in both emulators' spellings. Unlike the thin backends, a wine prefix does not know
       # in advance WHICH x86 emulator will be loaded: an x86_64 guest runs on FEX's ARM64EC DLLs and an
       # i386 one on box64's wowbox64 (Hangover loads it by that hardcoded name — see

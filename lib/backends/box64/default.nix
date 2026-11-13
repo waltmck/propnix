@@ -62,9 +62,7 @@
           (bridgingLibs pkgs) ++ (bridgingLibs pkgsX86) ++ (guestLibs pkgsX86);
       # `guestPreload` in the loader's own spelling: box64's guest loader ignores LD_PRELOAD (and prepends
       # the exe's directory to its search list — nothing weaker interposes), so an emulated payload speaks
-      # BOX64_LD_PRELOAD; a native one runs under the real ld.so, so plain LD_PRELOAD. The launcher's
-      # PROPNIX_BENCH branch prepends MangoHud's shim to a baked LD_PRELOAD rather than clobbering it
-      # (thin.rs), so benching keeps the preload live.
+      # BOX64_LD_PRELOAD; a native one runs under the real ld.so, so plain LD_PRELOAD.
       preloadEnv = lib.optionalAttrs (guestPreload != [ ]) {
         ${if isNative then "LD_PRELOAD" else "BOX64_LD_PRELOAD"} = lib.concatStringsSep ":" guestPreload;
       };

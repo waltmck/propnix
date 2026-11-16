@@ -6,19 +6,21 @@
           "pname": "victoria-3-529341",
           "appId": 529340,
           "depotId": 529341,
-          "manifestId": "4498977168532327663",
-          "version": "1.13.11",
-          "outputHash": "sha256-6orjFSgrlsEy1vOSRhadB2DwqxLnHK26b6ZYUsedUFo=",
+          "manifestId": "5537848810174326853",
+          "version": "26591675",
+          "outputHash": "sha256-LlzEMXT4swOotV+y88G7dFRfl7WKnJRfHCeCowLzOyk=",
           "title": "Victoria 3 (windows, Steam)",
-          "steamApiInterfaces": []
+          "steamApiInterfaces": [],
+          "depotKeySha256": "503c46346ecbbc4b54bc092f38a5624e26cba02e66fb4a3a7b6db38132375e10",
+          "manifestSha256": "ec089b818e2c0eac6da48a40221db5bb459e5cc458265cad905224ae0f57a1c7"
         },
         {
           "pname": "victoria-3-529342",
           "appId": 529340,
           "depotId": 529342,
-          "manifestId": "4691919316655930977",
-          "version": "1.13.11",
-          "outputHash": "sha256-phvBKcYMLAvFhCj2Z1gLY/wcTMEYK5teIbOqKWaPMZE=",
+          "manifestId": "5319172107090943242",
+          "version": "26591675",
+          "outputHash": "sha256-Z2og1HqzWgaN2tac8Dpl/M0vWGZ4xKHhWRYWAgZQHck=",
           "title": "Victoria 3 (windows, Steam)",
           "steamApiInterfaces": [
             "STEAMAPPLIST_INTERFACE_VERSION001",
@@ -52,17 +54,21 @@
             "SteamParties002",
             "SteamUser021",
             "SteamUtils010"
-          ]
+          ],
+          "depotKeySha256": "956336793748c610c2bab44948f456232a28995a9b783aeb51aebe48ae7e781a",
+          "manifestSha256": "d247a137746c9c1d16ffaf7066efaa07f6a5f71c320f73e6a5f91850d3654dff"
         },
         {
           "pname": "victoria-3-529345",
           "appId": 529340,
           "depotId": 529345,
-          "manifestId": "7414932565382460817",
-          "version": "1.13.11",
-          "outputHash": "sha256-K+0krwUhnEHVybauF8MVTjYdsEVYxfpgs909O7k0puI=",
+          "manifestId": "6651447587836323983",
+          "version": "26591675",
+          "outputHash": "sha256-xtBe28uLUz+NU5TeXNNjBRAHHLfuMHWfnsantilLIOU=",
           "title": "Victoria 3 (windows, Steam)",
-          "steamApiInterfaces": []
+          "steamApiInterfaces": [],
+          "depotKeySha256": "172c1de5ade4a3feb75ffb65439e25ab86946c3b5ef52501116b8233208b25fd",
+          "manifestSha256": "0ac506c3e8085dabba655c0746de1080d5d14d367f25d57cf20ce3d199bbdbb2"
         }
       ]
     }
@@ -92,11 +98,13 @@
       "pname": "victoria-3-dlc-2591240-2591240",
       "appId": 529340,
       "depotId": 2591240,
-      "manifestId": "5896939596283282705",
-      "version": "1.13.11",
-      "outputHash": "sha256-BWJ8EE4E0L+A3hL3Nbl1FQPmo+yL9XYe1juvw6jOGxo=",
+      "manifestId": "2871898673326127446",
+      "version": "26591675",
+      "outputHash": "sha256-hhqBx7Mh1L6CPHV4ZVDBdjKNC8ZBg7Ylf4JOqZAmG4U=",
       "title": "Victoria 3: Colossus of the South (Steam)",
-      "steamApiInterfaces": []
+      "steamApiInterfaces": [],
+      "depotKeySha256": "784190122b0cb983ce62c71450943648ab2c3e4bbb5705f24310982a99c994a7",
+      "manifestSha256": "1246d4c16f0c7fcb212320fef39db68214ff33db92611fc266ae5ccbc2f1953d"
     },
     "charters-of-commerce": {
       "pname": "victoria-3-dlc-3450170-3450170",

@@ -6,11 +6,11 @@
           "pname": "civilization-6-289072",
           "appId": 289070,
           "depotId": 289072,
-          "manifestId": "6099197820122050814",
-          "version": "15296837",
-          "outputHash": "sha256-IM/m4Vf9G0vxx91RwRQv7mVLPAsByZFeyQe5cVxcH14=",
+          "manifestId": "220858694222505430",
+          "version": "26407122",
+          "outputHash": "sha256-JjMeV2o/75CLRA0ZN85EZ+WwNJnjA7RBWIhjwotThdw=",
           "depotKeySha256": "cc4f1f41c71595c349914abfaefeaa77c2a268a7538ac6dbdd8407f4623136fc",
-          "manifestSha256": "def2b420df2c3e95f76cf660aeefac96c961cd304efba571dc8d5f08b5169c25",
+          "manifestSha256": "7bb024dd5a766448783a2fdc0b842c648e6a35d98e341e709cbea2022d61b1cb",
           "title": "Sid Meier's Civilization VI (windows binaries, Steam)",
           "steamApiInterfaces": [
             "SteamClient017",
@@ -26,11 +26,11 @@
           "pname": "civilization-6-289071",
           "appId": 289070,
           "depotId": 289071,
-          "manifestId": "8544233926751202622",
-          "version": "15296837",
-          "outputHash": "sha256-77qhrhAFzpKtH79mroxzWwY3aFWxMWKik/mWyclHNWE=",
+          "manifestId": "8999976640040178864",
+          "version": "26407122",
+          "outputHash": "sha256-BG1ClueRVFXOFFXK/pTQejVPUu7FO2u7TCAL2XBECgg=",
           "depotKeySha256": "0a758f8b4b5e0e3a7b4ccd115fa2de31d86a7788a197b39fa5dcc0c4ba38f6b1",
-          "manifestSha256": "d69517e4e2aae53be3f3abbbd39f19ee4e39541bab98c603e1d1eaa962c067d8",
+          "manifestSha256": "2fd598fe6f14c409ceb6332273dd83ee7ff9c3c4e695e9a3f2780cfd0804548a",
           "title": "Sid Meier's Civilization VI (windows content, Steam)",
           "steamApiInterfaces": []
         },
@@ -38,11 +38,11 @@
           "pname": "civilization-6-289085",
           "appId": 289070,
           "depotId": 289085,
-          "manifestId": "3736787343973544061",
-          "version": "15296837",
-          "outputHash": "sha256-I/1L0MXFvOQSz2S0Xxg8ecY+AlfRqdfsW/Y+7DFiv0c=",
+          "manifestId": "252464376328913036",
+          "version": "26407122",
+          "outputHash": "sha256-XCmIaWwDx4DIqHLjxXpZC62GA+a8k+6N6e77YfQtcZg=",
           "depotKeySha256": "1cc13076bc3327747baa42b320bb6dcba05a5aeaf67876cc4bb837fe8db92d1b",
-          "manifestSha256": "93a527fd4c916d9c3955a7f0c9b8f9ce4dbd28bfbcfdd55799df0f153ea911c0",
+          "manifestSha256": "b82bd5abf6b603e7468bcab190498f12b60eed3bccf520b4586cf61721331515",
           "title": "Sid Meier's Civilization VI (windows expansions, Steam)",
           "steamApiInterfaces": []
         },
@@ -127,11 +127,13 @@
       "pname": "civilization-6-dlc-645400-645400",
       "appId": 289070,
       "depotId": 645400,
-      "manifestId": "6669591788022875766",
-      "version": "15296837",
-      "outputHash": "sha256-4ejHW3uKt/ipTyHasSVQTOIBqOOJELKdntbVVywg2+c=",
+      "manifestId": "6657567071284240385",
+      "version": "26407122",
+      "outputHash": "sha256-FuSpUsx8x99XOrabuVQb2N0DleItflY5/vVfHsTIBwo=",
       "title": "Civilization VI: Nubia Civilization & Scenario Pack (Steam)",
-      "steamApiInterfaces": []
+      "steamApiInterfaces": [],
+      "depotKeySha256": "cb5d650be711ee81e639375540cfa462ef6c15fc54a654542fee7f07505dcf14",
+      "manifestSha256": "fcc7f80133f3f6efc1892202ffbd6f1eb1c8d4db17d789ae62af44a8e8f397e1"
     },
     "persia-macedon": {
       "pname": "civilization-6-dlc-512035-512035",
@@ -157,11 +159,13 @@
       "pname": "civilization-6-dlc-512032-512032",
       "appId": 289070,
       "depotId": 512032,
-      "manifestId": "289731471744368186",
-      "version": "15296837",
-      "outputHash": "sha256-Jd7jO2Dcmyk8tAbXSYc7RIGOUqfSBa+/wHoIIzqE0GQ=",
+      "manifestId": "6541879816496163136",
+      "version": "26407122",
+      "outputHash": "sha256-eOToYhEcBvNtZRgKg0je47275nrKDk8DNTBGgmXvSNY=",
       "title": "Civilization VI: Vikings Scenario Pack (Steam)",
-      "steamApiInterfaces": []
+      "steamApiInterfaces": [],
+      "depotKeySha256": "094f9d85926926b61e8631d17b37ceb7b978f41d2d9b7f4c1899e5d7d213d6d5",
+      "manifestSha256": "c430e8e0a7d1cfee3a90222c38944a2828ab5b5807385f30077292720407dc05"
     }
   }
 }

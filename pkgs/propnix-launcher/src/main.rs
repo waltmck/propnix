@@ -197,8 +197,8 @@ fn launch(args: Args) -> u8 {
         eprintln!("propnix: backend={}", cfg.backend);
     }
 
-    // The WINEPREFIX mount-view root: the OUTER mints a fresh random /tmp dir; the INNER is handed that same
-    // path back via `--view` (propnix-mount has already assembled the bind view there).
+    // The WINEPREFIX mount-view root (mount::view_root); the INNER is handed that same path back via `--view`
+    // (propnix-mount has already assembled the bind view there).
     let view = if args.inside_ns {
         match &args.view {
             Some(v) => std::path::PathBuf::from(v),
@@ -208,13 +208,7 @@ fn launch(args: Args) -> u8 {
             }
         }
     } else {
-        match mount::make_view(&settings.appid) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("propnix-launcher: create mount view: {e}");
-                return 1;
-            }
-        }
+        mount::view_root(&settings.appid)
     };
     let paths = settings.paths(view);
 
@@ -234,10 +228,6 @@ fn run_outer(
     args: Args,
     config_path: String,
 ) -> u8 {
-    // The view root is cleaned up by RAII (mount::ViewGuard) on EVERY exit path below — declared first so
-    // it drops last, after the worker join has reaped the mount child.
-    let _view_guard = mount::ViewGuard(paths.view.clone());
-
     // propnix-mount assembles the prefix inside a private user+mount namespace; without unprivileged userns
     // support there is no way to lay the binds, so fail fast with an actionable error.
     if !mount::userns_supported() {
@@ -250,8 +240,8 @@ fn run_outer(
         return 1;
     }
 
-    // The `view` already exists (mkdtemp made the mountpoint; propnix-mount tmpfs's onto it). Create the
-    // persistent dirs (state holds the overlay uppers + user.reg; cache the shader caches).
+    // The persistent dirs (state holds the overlay uppers + user.reg; cache the shader caches). The view
+    // itself exists only in the namespace, where propnix-mount creates it.
     for d in [&paths.state, &paths.cache, &paths.runtime] {
         if let Err(e) = std::fs::create_dir_all(d) {
             eprintln!("propnix-launcher: mkdir {}: {e}", d.display());
@@ -353,6 +343,7 @@ fn run_outer(
         app_id: &app_id,
         title: &cfg.name,
         bench: settings.bench,
+        fex_stats: cfg.backend == "winefex",
         fps: settings.fps,
         expose_wayland: false, // winex11 only (see the graphics check above)
         scaling: &scaling,
@@ -375,6 +366,7 @@ fn run_outer(
         args.unseal,
         &args.passthrough,
         cfg.online,
+        crate::mount::private_dirs(&paths.runtime),
     ) {
         Ok(pair) => pair,
         Err(e) => {

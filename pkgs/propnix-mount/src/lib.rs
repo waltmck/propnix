@@ -368,11 +368,64 @@ pub fn bind_over(source: &str, target: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Host directories the namespace replaces with its own empty tmpfs, and the host paths beneath them it
+/// keeps: each kept path is bound back at its own path, so it reads exactly as on the host while everything
+/// else created there stays inside the namespace.
+pub struct Private {
+    /// `(directory, mode)` — each gets a fresh tmpfs of that mode.
+    pub tmpfs: Vec<(String, u32)>,
+    /// Absolute host paths under those directories to keep; one absent on this host is skipped.
+    pub keep: Vec<String>,
+}
+
+/// Lay `p`: open every kept path (O_PATH) while the host's copy is still visible, mount the tmpfs
+/// (parents first), then bind each kept path back through its `/proc/self/fd` link onto a placeholder of
+/// the same kind (a directory, or an empty file for a socket).
+unsafe fn privatize(p: &Private) -> Result<(), String> {
+    let mut kept = Vec::new();
+    for path in &p.keep {
+        let Ok(meta) = std::fs::metadata(path) else { continue };
+        let c = CString::new(path.as_str()).unwrap();
+        let fd = libc::open(c.as_ptr(), libc::O_PATH | libc::O_CLOEXEC);
+        if fd < 0 {
+            return Err(format!("open {path}: {}", oserr()));
+        }
+        kept.push((path, fd, meta.is_dir()));
+    }
+    let mut dirs: Vec<&(String, u32)> = p.tmpfs.iter().collect();
+    dirs.sort_by_key(|(d, _)| d.len());
+    let ty = CString::new("tmpfs").unwrap();
+    for (dir, mode) in dirs {
+        std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {dir}: {e}"))?;
+        let (target, opts) = (CString::new(dir.as_str()).unwrap(), CString::new(format!("mode={mode:o}")).unwrap());
+        let flags = libc::MS_NOSUID | libc::MS_NODEV;
+        if libc::mount(ty.as_ptr(), target.as_ptr(), ty.as_ptr(), flags, opts.as_ptr().cast()) != 0 {
+            return Err(format!("tmpfs at {dir}: {}", oserr()));
+        }
+    }
+    for (path, fd, is_dir) in kept {
+        let target = Path::new(path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        }
+        let made = if is_dir { std::fs::create_dir_all(target) } else { std::fs::File::create(target).map(drop) };
+        made.map_err(|e| format!("placeholder {path}: {e}"))?;
+        let (src, tgt) = (CString::new(format!("/proc/self/fd/{fd}")).unwrap(), CString::new(path.as_str()).unwrap());
+        let rc = libc::mount(src.as_ptr(), tgt.as_ptr(), std::ptr::null(), libc::MS_BIND | libc::MS_REC, std::ptr::null());
+        libc::close(fd);
+        if rc != 0 {
+            return Err(format!("keep {path}: {}", oserr()));
+        }
+    }
+    Ok(())
+}
+
 pub fn enter_and_mount(
     root: &str,
     entries: &[Entry],
     tar_bin: &str,
     isolate_network: bool,
+    private: &Private,
 ) -> Result<(), String> {
     unsafe {
         let (uid, gid) = (libc::getuid(), libc::getgid());
@@ -415,6 +468,11 @@ pub fn enter_and_mount(
             libc::MS_REC | libc::MS_PRIVATE,
             std::ptr::null(),
         );
+        // The namespace's own /tmp, /dev/shm and runtime dir, before anything is laid: the view root and
+        // the mount skeletons below live under /tmp, so they are created in the private one. The host's
+        // view root is an empty directory that only reserves the name.
+        privatize(private)?;
+        std::fs::create_dir_all(root).map_err(|e| format!("mkdir {root}: {e}"))?;
         // The mount table is a FOREST (by target-path nesting): each entry mounts ONTO its nearest mount
         // ancestor, which must expose it as a mountpoint. So every mount gets a CHILD SKELETON of the
         // mountpoints its own content lacks (below); applied parent-first (the launcher sorted the table so),

@@ -113,6 +113,13 @@ pkgs.lib.makeScope pkgs.newScope (
     # output. Pass nixpkgs' gamescope explicitly (else callPackage resolves `gamescope` from this scope →
     # itself → infinite recursion).
     gamescope = callPackage ../emulators/gamescope { gamescope = pkgs.gamescope; };
+    # gamescope's PROPNIX_BENCH overlay (`mangoapp`), with FEX's stats on aarch64. nixpkgs' passed explicitly
+    # for the same reason as gamescope's.
+    mangohud =
+      if isAarch64 then
+        callPackage ../emulators/mangohud.nix { mangohud = pkgs.mangohud; }
+      else
+        pkgs.mangohud;
 
     # ── propnix tools (Rust; arch-agnostic — built for the host arch from the same source) ──
     # The launcher LINKS the mount + prefetch helpers as library crates (path deps), so it's the single

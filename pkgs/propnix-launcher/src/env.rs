@@ -96,12 +96,18 @@ impl ChildEnv {
             // FEX's disk cache of JIT'd guest blocks (the box64 DynaCache sibling, thin.rs): on by default,
             // under the app's cache dir rather than FEX's %LOCALAPPDATA% default so it lives beside the
             // shader caches. The guest sees the host dir through the prefix's `Z:` drive; FEX accepts the
-            // forward slashes. A game's own `env` is applied after this, so `FEX_DISKCACHE=0` still wins.
-            push("FEX_DISKCACHE", "1".to_string());
-            push(
-                "FEX_DISKCACHEPATH",
-                format!("Z:{}/", paths.fex_cache.to_string_lossy()),
-            );
+            // forward slashes. Then FEX's diagnostics (no telemetry: the Windows DLLs keep none). A game's
+            // own `env` wins for each of these names, so `FEX_DISKCACHE=0` still turns the cache off.
+            let mut fex = vec![
+                ("FEX_DISKCACHE", "1".to_string()),
+                ("FEX_DISKCACHEPATH", format!("Z:{}/", paths.fex_cache.to_string_lossy())),
+            ];
+            fex.extend(settings.fex_diagnostics(None));
+            for (k, v) in fex {
+                if !cfg.seal.set_env.contains_key(k) {
+                    push(k, v);
+                }
+            }
         }
 
         if settings.is_dxvk() {

@@ -10,52 +10,16 @@ use crate::settings::{Paths, Settings};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
-/// Mint a fresh, RANDOM per-launch WINEPREFIX mount root under `$TMPDIR` (`.../propnix-<appid>-XXXXXX`, 0700
-/// via mkdtemp; falls back to /tmp when TMPDIR is unset). The view is throwaway per launch — a clean split
-/// between the WINEPREFIX and persistent state (which lives under `$PROPNIX_STATE/wine/`: the prefix root is
-/// a persistent mount of `.../wine/prefix`, the profile overlays' uppers alongside). The kernel-ns binds
-/// self-clean, so a prior unclean exit leaves at most an empty dir, never a stale mount.
+/// The per-launch view root: `/tmp/propnix-<appid>` in the namespace's own `/tmp` (`private_dirs`), where
+/// propnix-mount creates it — the WINEPREFIX on the wine path, the game's `$HOME` on THIN. Nothing is created
+/// on the host, and each launch's namespace has its own `/tmp`, so a fixed name never meets another launch's.
+/// It is throwaway — persistent state lives under `$PROPNIX_STATE` (the prefix root is a persistent mount of
+/// `.../wine/prefix`, the profile overlays' uppers alongside) — and goes with the namespace.
 /// `appid` is a safe kebab-case slug, no sanitizing.
-pub fn make_view(appid: &str) -> io::Result<PathBuf> {
-    let tmp = std::env::var_os("TMPDIR")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    let mut buf = tmp
-        .join(format!("propnix-{appid}-XXXXXX"))
-        .into_os_string()
-        .into_vec();
-    buf.push(0); // NUL terminator for mkdtemp (which rewrites the trailing XXXXXX in place)
-    let ret = unsafe { libc::mkdtemp(buf.as_mut_ptr() as *mut libc::c_char) };
-    if ret.is_null() {
-        return Err(io::Error::last_os_error());
-    }
-    buf.pop(); // drop the NUL
-    Ok(PathBuf::from(std::ffi::OsString::from_vec(buf)))
-}
-
-/// RAII cleanup of the per-launch view root (`make_view`'s dir): best-effort `remove_dir` on Drop, so EVERY
-/// outer exit path — including early error returns — removes the dir. Held by the OUTER for the whole run,
-/// declared before anything else so it drops last (after the worker join has reaped the mount child).
-/// Non-recursive and errors-ignored by design: the ns-private binds never appear in the outer's namespace,
-/// so the dir is empty here — and while the child's ns still pins it as a mount root, rmdir just fails
-/// EBUSY (harmless; an unclean exit leaves at most an empty dir, and the next launch mints a fresh random
-/// root anyway).
-pub struct ViewGuard(pub PathBuf);
-
-impl Drop for ViewGuard {
-    fn drop(&mut self) {
-        // Skip removal during a PANIC unwind: between spawn_mounted and the worker join the game child may
-        // still be running, and rmdir of a dir that is a mountpoint only in the child's namespace can
-        // lazily detach it there (leak-on-panic is the safe pre-existing behavior; every normal return —
-        // including the early error paths — still cleans up).
-        if !std::thread::panicking() {
-            let _ = std::fs::remove_dir(&self.0);
-        }
-    }
+pub fn view_root(appid: &str) -> PathBuf {
+    PathBuf::from(format!("/tmp/propnix-{appid}"))
 }
 
 // A resolved table entry (LITERAL paths only). This is `propnix_mount::Entry` — the SAME type the linked
@@ -64,6 +28,37 @@ impl Drop for ViewGuard {
 // `upper = None` means EPHEMERAL (a fresh per-launch tmpfs for the upper+work); a set `upper` is persistent;
 // `readOnly` overrides both — a lowerdir-only union (no upper at all), used to merge a base game with DLC.
 use propnix_mount::Entry;
+
+/// What the game's namespace keeps to itself (`propnix_mount::Private`): its own empty `/tmp`, `/dev/shm`
+/// and `$XDG_RUNTIME_DIR`. The sockets, lock files and shared memory that gamescope, Xwayland, wine and FEX
+/// create there — gamescope's Wayland and input-emulation sockets, the X lock, wineserver's directory,
+/// FEXServer's socket, FEX's profile stats — stay inside the namespace and leave nothing on the host, which
+/// sees one Wayland client. Kept from the host's runtime dir is what a Wayland client uses: the compositor
+/// socket, PipeWire, PulseAudio and the session bus. Kept too is the app's propnix runtime dir (`runtime`),
+/// through which the outer launcher and gamescope exchange the ready and status files and the nested X socket.
+pub fn private_dirs(runtime: &Path) -> propnix_mount::Private {
+    let mut tmpfs = vec![("/tmp".to_string(), 0o1777), ("/dev/shm".to_string(), 0o1777)];
+    let mut keep = vec![runtime.to_path_buf()];
+    let xdg = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()).map(PathBuf::from);
+    if let Some(dir) = xdg.filter(|d| d.is_absolute() && d.is_dir()) {
+        let display = std::env::var_os("WAYLAND_DISPLAY").filter(|v| !v.is_empty());
+        keep.push(dir.join(display.as_deref().unwrap_or("wayland-0".as_ref())));
+        keep.push(dir.join("pipewire-0"));
+        keep.push(dir.join("pulse/native"));
+        let bus = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok().and_then(|a| {
+            a.split(';').find_map(|t| t.strip_prefix("unix:path=").map(|p| PathBuf::from(p.split(',').next().unwrap_or(p))))
+        });
+        keep.push(bus.unwrap_or_else(|| dir.join("bus")));
+        tmpfs.push((dir.to_string_lossy().into_owned(), 0o700));
+    }
+    // Only paths under a replaced directory need laying back; anything else is the host's already.
+    let keep = keep
+        .into_iter()
+        .filter(|p| tmpfs.iter().any(|(d, _)| p.starts_with(d)))
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    propnix_mount::Private { tmpfs, keep }
+}
 
 /// Probe in a throwaway child (unshare mutates the caller): can we create a user namespace at all?
 /// propnix-mount needs one to assemble the prefix; the outer refuses to launch (with an actionable error)

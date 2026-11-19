@@ -54,8 +54,8 @@ pub fn run(config_path: &str, unseal: bool, inside_ns: bool, view_arg: Option<&s
         eprintln!("propnix: mode=thin appid={}", settings.appid);
     }
 
-    // The mount-view root: the OUTER mints a fresh random /tmp dir (the game's $HOME); the INNER is handed
-    // that same path back via `--view` (propnix-mount already laid the tmpfs + save binds there).
+    // The mount-view root (the game's $HOME, mount::view_root); the INNER is handed that same path back via
+    // `--view` (propnix-mount already laid the tmpfs + save binds there).
     let view = if inside_ns {
         match view_arg {
             Some(v) => PathBuf::from(v),
@@ -65,13 +65,7 @@ pub fn run(config_path: &str, unseal: bool, inside_ns: bool, view_arg: Option<&s
             }
         }
     } else {
-        match mount::make_view(&settings.appid) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("propnix-launcher: create mount view: {e}");
-                return 1;
-            }
-        }
+        mount::view_root(&settings.appid)
     };
     let paths = settings.paths(view);
 
@@ -92,10 +86,6 @@ fn run_outer(
     passthrough: &[String],
     unseal: bool,
 ) -> u8 {
-    // The view root is cleaned up by RAII (mount::ViewGuard) on EVERY exit path below — declared first so
-    // it drops last, after the worker join has reaped the mount child.
-    let _view_guard = mount::ViewGuard(paths.view.clone());
-
     if !mount::userns_supported() {
         eprintln!(
             "propnix: this host does not allow unprivileged user namespaces, which propnix needs to \
@@ -208,6 +198,7 @@ fn run_outer(
         app_id: &app_id,
         title: &cfg.name,
         bench: settings.bench,
+        fex_stats: uses_fex(&cfg),
         fps: settings.fps,
         expose_wayland: effective_sdl_driver(&cfg).contains("wayland"),
         scaling: &scaling,
@@ -230,6 +221,7 @@ fn run_outer(
         unseal,
         passthrough,
         cfg.online,
+        crate::mount::private_dirs(&paths.runtime),
     ) {
         Ok(pair) => pair,
         Err(e) => {
@@ -516,12 +508,19 @@ fn run_inner(cfg: &ThinConfig, settings: &Settings, paths: &Paths, passthrough: 
         cmd.env("BOX64_DYNACACHE_FOLDER", &dynacache);
     }
     // FEX's equivalent (FEX only): the disk cache of JIT'd guest blocks, in the same directory the wine path
-    // uses (`paths.fex_cache`, named by kernel TSO support). Same placement and override rule as above.
-    if cfg.emulator.as_deref().map_or(false, |e| e.to_ascii_lowercase().contains("fex")) {
+    // uses (`paths.fex_cache`, named by kernel TSO support), then FEX's diagnostics. Same placement and
+    // override rule as above. FEX's other files stay inside the namespace on their own: its config and data
+    // dirs follow HOME and the XDG roots into the throwaway view, and its FEXServer socket lands in the
+    // namespace's private runtime dir (mount::private_dirs; emulators/fex-linux patch 0005 drops the
+    // abstract socket that would reach past it).
+    if uses_fex(cfg) {
         let diskcache = &paths.fex_cache;
         let _ = std::fs::create_dir_all(diskcache);
         cmd.env("FEX_DISKCACHE", "1");
         cmd.env("FEX_DISKCACHEPATH", format!("{}/", diskcache.to_string_lossy()));
+        for (k, v) in settings.fex_diagnostics(Some(&paths.fex_telemetry)) {
+            cmd.env(k, v);
+        }
     }
 
     // The baked "meant" env (BOX64_NORCFILES/PREFER_WRAPPED, etc.), each value $VAR-expanded.
@@ -591,6 +590,11 @@ fn reap_group(child: &mut std::process::Child, pgid: i32) -> i32 {
     }
     let _ = child.wait();
     130
+}
+
+/// The game runs under FEX (the fex backend), not box64 or natively.
+fn uses_fex(cfg: &ThinConfig) -> bool {
+    cfg.emulator.as_deref().map_or(false, |e| e.to_ascii_lowercase().contains("fex"))
 }
 
 /// The SDL video driver the game will run with: its own pinned `SDL_VIDEODRIVER`, else `sdl_video_driver()`.

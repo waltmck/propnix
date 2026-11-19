@@ -60,9 +60,9 @@ pub struct Paths {
     /// backend-agnostic data (saves) lives outside, under `$PROPNIX_SAVE_DIR`.
     pub wine_state: PathBuf,
     pub cache: PathBuf, // $XDG_CACHE_HOME/propnix/<appid>
-    /// The WINEPREFIX the game sees: a per-launch mountpoint (a random /tmp dir) onto which propnix-mount
-    /// mounts a fresh ns-private tmpfs, then lays the whole prefix. Ephemeral — nothing persists in the tmpfs
-    /// itself (persistent state is the overlay uppers under `state`); an unclean exit leaves an empty dir.
+    /// The WINEPREFIX the game sees (`mount::view_root`): created by propnix-mount in the namespace's own
+    /// /tmp, where it lays the whole prefix. Ephemeral — nothing persists in it (persistent state is the
+    /// overlay uppers under `state`), and nothing of it exists on the host.
     pub view: PathBuf,
     pub runtime: PathBuf, // $XDG_RUNTIME_DIR/propnix/<appid> (the single-instance lock lives here)
     pub dxvk_cache: PathBuf, // cache/dxvk (DXVK_STATE_CACHE_PATH — the shader cache; NOT a log dir)
@@ -74,6 +74,11 @@ pub struct Paths {
     /// ordering barriers. Code built with hardware TSO is unsafe without it, and code built without it
     /// keeps its barriers once TSO is available, so the directory name carries that fact (`fex_cache_dir`).
     pub fex_cache: PathBuf,
+    /// `runtime/fex-telemetry` — where FEX's Linux loader writes its exit-time telemetry under PROPNIX_DEBUG /
+    /// PROPNIX_BENCH (`Settings::fex_diagnostics`). It describes the run that just ended and nothing later
+    /// needs it, so it lives in the runtime dir, which the namespace keeps visible (mount::private_dirs) and
+    /// which does not outlive the session.
+    pub fex_telemetry: PathBuf,
 }
 
 /// The FEX disk-cache directory name: `fex-tso` when the kernel offers the arm64 memory-model control
@@ -177,8 +182,40 @@ impl Settings {
         self.d3d == "dxvk"
     }
 
-    /// `view` is the per-launch WINEPREFIX mount root: the OUTER mints a fresh random /tmp dir
-    /// (`mount::make_view`); the INNER receives that exact path back via `--view`.
+    /// FEX's own diagnostics, for both FEX paths (env.rs on wine, thin.rs on THIN). Quiet unless
+    /// PROPNIX_DEBUG or PROPNIX_BENCH is set: then FEX logs to the game's stderr, which the launcher
+    /// forwards to the terminal under either. PROPNIX_BENCH also turns on FEX's profile stats, the
+    /// per-process counters mangoapp's `fex_stats` reads (gamescope.rs).
+    ///
+    /// `telemetry` is where FEX keeps its exit-time telemetry (`<program>.telem`: whether the guest hit
+    /// split locks, tearing CAS, 32-bit segments or non-canonical addresses), or None where FEX writes none:
+    /// only FEX's Linux loader does, not its Windows DLLs. Off unless diagnosing; when on, it goes to the
+    /// app's propnix runtime dir, since FEX's default is under XDG_DATA_HOME — inside the throwaway view on
+    /// THIN.
+    pub fn fex_diagnostics(&self, telemetry: Option<&std::path::Path>) -> Vec<(&'static str, String)> {
+        let verbose = env_set("PROPNIX_DEBUG") || self.bench;
+        let mut vars = vec![("FEX_SILENTLOG", if verbose { "0" } else { "1" }.to_string())];
+        if verbose {
+            // FEX's Linux loader otherwise sends its log to FEXServer; the Windows DLLs always write
+            // through wine's debug output (stderr) and ignore this.
+            vars.push(("FEX_OUTPUTLOG", "stderr".to_string()));
+        }
+        if let Some(dir) = telemetry {
+            if verbose {
+                vars.push(("FEX_DISABLETELEMETRY", "0".to_string()));
+                vars.push(("FEX_TELEMETRYDIRECTORY", dir.to_string_lossy().into_owned()));
+            } else {
+                vars.push(("FEX_DISABLETELEMETRY", "1".to_string()));
+            }
+        }
+        if self.bench {
+            vars.push(("FEX_PROFILESTATS", "1".to_string()));
+        }
+        vars
+    }
+
+    /// `view` is the per-launch mount-view root (`mount::view_root`); the INNER receives that exact path back
+    /// via `--view`.
     pub fn paths(&self, view: PathBuf) -> Paths {
         let state = util::state_home().join("propnix").join(&self.appid);
         let wine_state = state.join("wine");
@@ -187,6 +224,7 @@ impl Settings {
         let dxvk_cache = cache.join("dxvk");
         let vkd3d_cache = cache.join("vkd3d");
         let fex_cache = cache.join(fex_cache_dir());
+        let fex_telemetry = runtime.join("fex-telemetry");
         Paths {
             state,
             wine_state,
@@ -196,6 +234,7 @@ impl Settings {
             dxvk_cache,
             vkd3d_cache,
             fex_cache,
+            fex_telemetry,
         }
     }
 }

@@ -41,11 +41,13 @@
 //!     WSI layer and gamescope's server offer HDR to X11 swapchains only). Wine never asks for it: winewayland
 //!     cannot run on gamescope's server (no wl_subcompositor), so the wine path refuses `graphics = "wayland"`.
 //!   * `--mangoapp` under PROPNIX_BENCH — gamescope's performance overlay, fed from gamescope's own view of
-//!     the game's frames, so it covers every graphics API alike (DXVK, vkd3d, wined3d/GL, native GL).
+//!     the game's frames, so it covers every graphics API alike (DXVK, vkd3d, wined3d/GL, native GL). A
+//!     FEX game's overlay also shows FEX's own stats (`mangohud_config_with_fex_stats`).
 //!
 //! gamescope's own environment is the session's (it is a host client), plus the GL/Vulkan fallback stack
-//! when the host has none (it composites with Vulkan; mangoapp draws with GL) and `<mangohud>/bin` on PATH
-//! under bench (gamescope finds `mangoapp` there).
+//! when the host has none (it composites with Vulkan; mangoapp draws with GL), and under bench
+//! `<mangohud>/bin` on PATH (gamescope finds `mangoapp` there) and, for a FEX game, the MANGOHUD_CONFIG
+//! that mangoapp inherits.
 
 use crate::config::FallbackGl;
 use crate::settings::FpsMode;
@@ -63,6 +65,8 @@ pub struct Options<'a> {
     pub title: &'a str,
     /// PROPNIX_BENCH: run the mangoapp overlay.
     pub bench: bool,
+    /// The game runs under FEX: the bench overlay adds FEX's own stats (`mangohud_config_with_fex_stats`).
+    pub fex_stats: bool,
     /// PROPNIX_FPS.
     pub fps: FpsMode,
     /// The game draws through Wayland: serve it gamescope's own Wayland display.
@@ -109,6 +113,9 @@ pub fn command(o: &Options) -> Command {
             let path = std::env::var("PATH").unwrap_or_default();
             cmd.env("PATH", format!("{mh}/bin:{path}"));
         }
+        if o.fex_stats {
+            cmd.env("MANGOHUD_CONFIG", mangohud_config_with_fex_stats(std::env::var("MANGOHUD_CONFIG").ok()));
+        }
     }
 
     // gamescope composites with Vulkan and mangoapp draws with GL, so on a host without its own stack they
@@ -128,6 +135,22 @@ pub fn command(o: &Options) -> Command {
         }
     }
     cmd
+}
+
+/// mangoapp's MANGOHUD_CONFIG for a FEX game: `inherited` (the session's MANGOHUD_CONFIG) plus FEX's stats —
+/// JIT load, hot threads, SIGBUS, self-modifying-code and softfloat-fallback counts — which FEX publishes
+/// per process in `/dev/shm/fex-<pid>-stats` under PROPNIX_BENCH (settings.rs `fex_diagnostics`) and
+/// mangoapp reads for the process gamescope reports as focused. An inherited config already naming
+/// `fex_stats` is kept as it is. Without one, `read_cfg` keeps the user's MangoHud.conf in force, which a
+/// set MANGOHUD_CONFIG otherwise replaces. The stats are named explicitly: a bare `fex_stats` parses as the
+/// value `1`, which turns every one of them off.
+fn mangohud_config_with_fex_stats(inherited: Option<String>) -> String {
+    const FEX_STATS: &str = "fex_stats=status+apptype+hotthreads+jitload+sigbus+smc+softfloat";
+    match inherited {
+        Some(base) if base.contains("fex_stats") => base,
+        Some(base) if !base.is_empty() => format!("{base},{FEX_STATS}"),
+        _ => format!("read_cfg,{FEX_STATS}"),
+    }
 }
 
 /// gamescope's scaling of the game's image to its window: `-F` filter (always) and `-S` scaler (gamescope's
@@ -184,12 +207,10 @@ fn dimension(var: &str) -> Option<u32> {
 /// The per-launch host paths gamescope works through, in the launcher's runtime dir and keyed by the outer's
 /// pid (so two instances of a multi-instance THIN game never share them); removed when the guard drops.
 ///   * `ready` — gamescope's `-R` target. gamescope opens it O_WRONLY without O_CREAT, so it is created here.
-///   * `x11_dir` — bound over `/tmp/.X11-unix` inside the game's namespace (run::spawn_mounted), so
-///     gamescope's Xwayland creates its sockets in a directory we own. Inside the user namespace the host's
-///     root-owned `/tmp/.X11-unix` reads as owned by nobody (only our uid is mapped), and the Xwayland
-///     socket code refuses such a directory. The bind also leaves the game no route to the host's X server,
-///     and gives the window watcher a socket PATH, reachable even when an offline title's network namespace
-///     hides the abstract socket. Mode 0700: no other user may touch our sockets.
+///   * `x11_dir` — bound over `/tmp/.X11-unix` inside the game's namespace (run::spawn_mounted), whose
+///     `/tmp` is its own (mount::private_dirs), so gamescope's Xwayland creates its socket here. That gives
+///     the outer launcher, on the host, a socket PATH to gamescope's X server for the window watcher and
+///     focus requests. Mode 0700: no other user may touch our sockets.
 ///   * `status` — where the inner reports its exit code (run::report_exit), which gamescope's own exit status
 ///     does not carry.
 pub struct Session {
@@ -222,16 +243,12 @@ impl Drop for Session {
 }
 
 /// The nested X server's socket, once gamescope has written its DISPLAY (`":N gamescope-N\n"`) to `ready`:
-/// `<x11_dir>/X<N>`, or the host's `/tmp/.X11-unix/X<N>` when that directory did not exist to be bound over
-/// (gamescope then created it itself).
+/// `<x11_dir>/X<N>`.
 pub fn nested_socket(ready: &Path, x11_dir: &Path) -> Option<PathBuf> {
     let s = std::fs::read_to_string(ready).ok()?;
     let display = s.split_whitespace().next()?.strip_prefix(':')?;
     let n: u32 = display.split('.').next()?.parse().ok()?;
-    [x11_dir, Path::new(X11_SOCKET_DIR)]
-        .iter()
-        .map(|d| d.join(format!("X{n}")))
-        .find(|p| p.exists())
+    Some(x11_dir.join(format!("X{n}"))).filter(|p| p.exists())
 }
 
 /// Where X clients look for a display's socket.
@@ -303,6 +320,7 @@ mod tests {
             app_id: "org.propnix.test",
             title: "Test",
             bench: false,
+            fex_stats: false,
             fps,
             expose_wayland: false,
             mangohud: None,
@@ -336,5 +354,14 @@ mod tests {
 
         let unmanaged = args(FpsMode::Unmanaged);
         assert!(!unmanaged.iter().any(|a| a == "--adaptive-sync" || a == "--framerate-limit"));
+    }
+
+    #[test]
+    fn fex_stats_extend_the_mangohud_config() {
+        let all = "fex_stats=status+apptype+hotthreads+jitload+sigbus+smc+softfloat";
+        assert_eq!(mangohud_config_with_fex_stats(None), format!("read_cfg,{all}"));
+        assert_eq!(mangohud_config_with_fex_stats(Some(String::new())), format!("read_cfg,{all}"));
+        assert_eq!(mangohud_config_with_fex_stats(Some("fps_only".into())), format!("fps_only,{all}"));
+        assert_eq!(mangohud_config_with_fex_stats(Some("fex_stats=smc".into())), "fex_stats=smc");
     }
 }

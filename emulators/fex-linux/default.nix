@@ -29,6 +29,10 @@
 # on a 16K host); that is what keeps the thin FEX backend broken for Unity/Mono titles. It does not affect
 # a native C++ guest, which is what this was added for.
 #
+# One patch is not about pages: patches/0005 keeps FEXServer on its path socket only. Upstream also listens
+# on an abstract socket, which belongs to the network namespace and so reaches past the game's private
+# runtime dir to every sandbox sharing the host's network, and to any local user.
+#
 # Expressed as `pkgs.fex.overrideAttrs` with OUR source pin, rather than vendoring the tree: nixpkgs'
 # build machinery (cmake flags, the x86_32/x86_64 guest thunk toolchains, FEXServer, its thunk-path
 # substitutions) is reused unchanged, and the fork stays a reviewable set of patches cut against the

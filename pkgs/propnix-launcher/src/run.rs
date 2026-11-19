@@ -32,8 +32,8 @@ pub enum Progress {
 /// own cold start (fire-and-forget; dies with the process).
 ///
 /// INNER-ONLY, and hence WINE-ONLY: the prefix view exists solely inside the mount namespace propnix-mount
-/// unshares in the mount child, so from the OUTER (which is not in that namespace) `paths.view` is an empty
-/// directory — warming it there would find nothing. Running here, after the mount, covers the WHOLE prefix
+/// unshares in the mount child, so from the OUTER (which is not in that namespace) `paths.view` does not
+/// exist — there is nothing to warm. Running here, after the mount, covers the WHOLE prefix
 /// in one walk: system32's wine builtins + FEX emulator DLLs + the DXVK/vkd3d and `extraSystem32` binds,
 /// syswow64's i386 symlinks, AND the game's own bundled modules under `drive_c/game`. (THIN has no prefix
 /// and no wine loader, so it never reaches this path.)
@@ -91,8 +91,9 @@ fn reported_exit(status: &std::path::Path) -> Option<i32> {
 /// gamescope, the inner and the game all run inside the assembled prefix. The inner reports its exit code
 /// to `status` (`report_exit`). stdout+stderr merge into a PIPE
 /// we read (gamescope closes every other fd for its children, but passes 0/1/2 through); own process group,
-/// which gamescope's reaper and the inner share, so a cancel signals the whole tree at once. `x11_dir` is
-/// bound over `/tmp/.X11-unix` in the same namespace (gamescope::Session says why).
+/// which gamescope's reaper and the inner share, so a cancel signals the whole tree at once. The namespace
+/// gets its own `/tmp`, `/dev/shm` and runtime dir (`private`, from mount::private_dirs), and `x11_dir` is
+/// bound over its `/tmp/.X11-unix` (gamescope::Session says why).
 ///
 /// `online = false` (the app declares itself offline) additionally unshares a NETWORK namespace in that
 /// same child, so the game gets loopback and nothing else. Display/audio are unaffected — they are UNIX
@@ -112,6 +113,7 @@ pub fn spawn_mounted(
     unseal: bool,
     passthrough: &[String],
     online: bool,
+    private: propnix_mount::Private,
 ) -> std::io::Result<(Child, std::io::PipeReader)> {
     let me = std::env::current_exe()?;
     let mut cmd = gamescope;
@@ -135,16 +137,13 @@ pub fn spawn_mounted(
     let root = view.to_string_lossy().into_owned();
     let tar = tar.to_string();
     let x11_dir = x11_dir.to_string_lossy().into_owned();
-    // A host without the directory has no X server to hide; gamescope then creates it, owned by us.
-    let bind_x11 = std::path::Path::new(crate::gamescope::X11_SOCKET_DIR).is_dir();
     unsafe {
         cmd.pre_exec(move || {
-            propnix_mount::enter_and_mount(&root, &entries, &tar, !online)
+            propnix_mount::enter_and_mount(&root, &entries, &tar, !online, &private)
                 .map_err(|e| std::io::Error::other(format!("prefix assembly: {e}")))?;
-            if bind_x11 {
-                propnix_mount::bind_over(&x11_dir, crate::gamescope::X11_SOCKET_DIR)
-                    .map_err(|e| std::io::Error::other(format!("X socket dir: {e}")))?;
-            }
+            std::fs::create_dir_all(crate::gamescope::X11_SOCKET_DIR)?;
+            propnix_mount::bind_over(&x11_dir, crate::gamescope::X11_SOCKET_DIR)
+                .map_err(|e| std::io::Error::other(format!("X socket dir: {e}")))?;
             Ok(())
         });
     }

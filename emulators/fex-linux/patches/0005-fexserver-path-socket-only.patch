@@ -1,0 +1,70 @@
+FEXServer: listen and connect on the path socket only, never an abstract one.
+
+FEXServer listens on two sockets: an abstract one (`\0<uid>.FEXServer.Socket`) and a path one
+(`$XDG_RUNTIME_DIR/<uid>.FEXServer.Socket`), and every FEX process tries the abstract one first. An abstract
+socket belongs to the NETWORK namespace and carries no permissions. Every sandbox that shares the host's
+network namespace (an online title) therefore finds whichever server another sandbox started, and any local
+user can connect to it. The path socket follows the mount namespace instead: under propnix's namespace-private
+runtime directory it is reachable from inside the game's own sandbox and nowhere else.
+
+Upstream already builds this mode: `FEX_STEAM_SUPPORT` drops the abstract socket on both sides ("Steam
+doesn't get to connect to global sockets"). This applies the same rule unconditionally, leaving the rest of
+the Steam-only behaviour (its data paths and lock folder) untouched.
+
+diff --git a/Source/Common/FEXServerClient.cpp b/Source/Common/FEXServerClient.cpp
+--- a/Source/Common/FEXServerClient.cpp
++++ b/Source/Common/FEXServerClient.cpp
+@@ -188,31 +188,8 @@
+     return -1;
+   }
+ 
+-  // Steam doesn't get to connect to global sockets.
+-#ifndef FEX_STEAM_SUPPORT
+-  auto ServerSocketName = GetServerSocketName();
+-
+-  // AF_UNIX has a special feature for named socket paths.
+-  // If the name of the socket begins with `\0` then it is an "abstract" socket address.
+-  // The entirety of the name is used as a path to a socket that doesn't have any filesystem backing.
+-  addr.sun_family = AF_UNIX;
+-  SizeOfSocketString = std::min(ServerSocketName.size() + 1, sizeof(addr.sun_path) - 1);
+-  addr.sun_path[0] = 0; // Abstract AF_UNIX sockets start with \0
+-  strncpy(addr.sun_path + 1, ServerSocketName.data(), SizeOfSocketString);
+-  // Include final null character.
+-  SizeOfAddr = sizeof(addr.sun_family) + SizeOfSocketString;
+-
+-  if (connect(SocketFD, reinterpret_cast<struct sockaddr*>(&addr), SizeOfAddr) == -1) {
+-    if (ConnectionOption == ConnectionOption::Default || errno != ECONNREFUSED) {
+-      LogMan::Msg::EFmt("Couldn't connect to FEXServer socket {} {}", ServerSocketName, errno);
+-    }
+-  } else {
+-    return SocketFD;
+-  }
+-#endif
+-
+-  // Try again with a path-based socket, since abstract sockets will fail if we have been
+-  // placed in a new netns as part of a sandbox.
++  // Path-based socket only: an abstract socket belongs to the network namespace, so it would be shared
++  // with every sandbox in the host's network namespace and reachable by any local user.
+   auto ServerSocketPath = GetServerSocketPath(false);
+   if (ServerSocketPath.size() > sizeof(sockaddr_un::sun_path) - 1) {
+     LogMan::Msg::EFmt("Socket path '{}' too large for Unix domain sockets. Moving to tmp", ServerSocketPath);
+diff --git a/Source/Tools/FEXServer/Main.cpp b/Source/Tools/FEXServer/Main.cpp
+--- a/Source/Tools/FEXServer/Main.cpp
++++ b/Source/Tools/FEXServer/Main.cpp
+@@ -181,15 +181,7 @@
+     return -1;
+   }
+ 
+-  // Steam doesn't get to connect to global sockets.
+-#ifndef FEX_STEAM_SUPPORT
+-  if (!ProcessPipe::InitializeServerSocket(true)) {
+-    // Couldn't create server socket for some reason
+-    PipeScanner::ClosePipes();
+-    return -1;
+-  }
+-#endif
+-
++  // Path-based socket only (no abstract socket), as FEXServerClient::ConnectToServer expects.
+   if (!ProcessPipe::InitializeServerSocket(false)) {
+     // Couldn't create server socket for some reason
+     PipeScanner::ClosePipes();

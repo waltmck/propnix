@@ -40,6 +40,11 @@
   size, # OBSERVED byte count of the installer — a pre-hash sanity gate (see DETERMINISM above)
   title ? "this GOG title", # human text for the not-credentialed / not-owned error (be specific — PoC §3.3)
   buyUrl ? "https://www.gog.com",
+  # The Unity facts a row may carry (pin/unity.rs; see fetchGogGalaxyBuild). Accepted so a row recorded
+  # with them evaluates; surfaced through passthru, never the derivation env.
+  unityVersion ? null,
+  unityChangeset ? null,
+  unityScripting ? null,
 }:
 runCommand (lib.strings.sanitizeDerivationName pname)
   {
@@ -49,6 +54,9 @@ runCommand (lib.strings.sanitizeDerivationName pname)
       license = lib.licenses.unfree;
       sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
     };
+
+    # Eval-only identity for consumers (passthru never enters the derivation env).
+    passthru = { inherit unityVersion unityChangeset unityScripting; };
 
     outputHashMode = "flat";
 

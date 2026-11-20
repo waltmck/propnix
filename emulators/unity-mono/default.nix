@@ -24,8 +24,9 @@
 # an emulator that polls inside every x64 loop: emulators/fex/patches/0003. The collector's register scan
 # reads the ARM64 register set out of the aliased ARM64EC context (patches/bdwgc).
 #
-# Only the DLL is produced: the game's class libraries, etc/ and Managed/ stay as shipped (the runtime
-# implements the same ABI), and the module unions the DLL over the payload at the runtime's path.
+# The runtime DLL and its MonoPosixHelper companion are produced: the game's class libraries, etc/ and
+# Managed/ stay as shipped (the runtime implements the same ABI), and the module unions the DLL over the
+# payload at the runtime's path.
 {
   lib,
   stdenv,
@@ -39,16 +40,22 @@
   which,
   file,
   gettext,
-  # This tree's llvm-mingw (emulators/llvm-mingw): `arm64ec-w64-mingw32-clang` and friends.
-  llvmMingw,
+  # The target's lib/win-toolchain.nix record (the scope injects it; llvm-mingw only): ARM64EC for the
+  # hybrid wine+FEX stack, plain ARM64 for a native player process (lib/modules/unity-player.nix).
+  toolchain,
+  target,
 }:
 let
   # The pins. `branch` is where Unity publishes the stream (Unity-Technologies/mono); the revision is the
   # branch head the patch family was made against, and `bdwgc` is that revision's `external/bdwgc`
-  # gitlink (Unity-Technologies/bdwgc).
+  # gitlink (Unity-Technologies/bdwgc). `targets` lists the PE targets the stream is built for: every
+  # stream has the ARM64EC runtime (the x64 player under wine+FEX), and a stream has the plain-ARM64 one
+  # only where a native ARM64 Windows player exists to load it — Unity added that player in 2023.1, so
+  # 2022.3 has no consumer for it and is not built.
   streams = {
     "2022.3" = {
       branch = "unity-2022.3-mbe";
+      targets = [ "aarch64ec-windows" ];
       mono = {
         rev = "b8eb56fab45dd52845fabba7b7ddc9a80b2b0498";
         hash = "sha256-QRpU0Wck/OEdWQuOeDdzxPeC69Y5LGMzGnI/4coJ+Gs=";
@@ -60,6 +67,10 @@ let
     };
     "6000.0" = {
       branch = "unity-6000.0-mbe";
+      targets = [
+        "aarch64-windows"
+        "aarch64ec-windows"
+      ];
       mono = {
         rev = "e3f5e86f047452d5ae757c195490df0059418621";
         hash = "sha256-94Ku7xkvm0nobDRQD777K8+gy8dF+e+ifVZh1sJydEs=";
@@ -81,7 +92,7 @@ let
     hash = "sha256-MAUkuga0t7vFD2xCGpT/+ptUGLqiXpMlr6vRr13ZTz8=";
   };
 
-  triple = "arm64ec-w64-mingw32";
+  triple = toolchain.triple;
 
   # Only ./patches keys a stream's build (like emulators/wine-mono): unrelated repo edits never perturb it.
   patchesFor =
@@ -98,7 +109,7 @@ let
   mkRuntime =
     stream: pin:
     stdenv.mkDerivation {
-      pname = "unity-mono-arm64ec-${stream}";
+      pname = "unity-mono-${target}-${stream}";
       version = "${stream}-${builtins.substring 0 8 pin.mono.rev}";
 
       src = fetchFromGitHub {
@@ -114,8 +125,7 @@ let
       inherit libatomicOps bdwgcPatches;
       streamPatches = patchesFor stream;
 
-      nativeBuildInputs = [
-        llvmMingw
+      nativeBuildInputs = toolchain.nativeBuildInputs ++ [
         autoconf
         automake
         libtool
@@ -231,13 +241,18 @@ let
         done
         make -C mono/mini version.h cpu-arm64.h WINEPREFIX=/dev/null
         make -j$NIX_BUILD_CORES -C mono/mini libmonoboehm-2.0.la WINEPREFIX=/dev/null
+        # MonoPosixHelper (support/): the runtime's companion library the class libraries P/Invoke for
+        # compression streams and POSIX-shaped I/O, against the bundled zlib built above. Unity ships it
+        # beside the runtime for x64 and not at all for ARM64; a swapped runtime ships its own so no
+        # title has to find out which of its assemblies reaches for it.
+        make -j$NIX_BUILD_CORES -C support WINEPREFIX=/dev/null
         runHook postBuild
       '';
 
       # The product, under the name the player loads, plus its export list (`exports`, one name per line)
-      # for the module's build-time check against the player. The image must be ARM64EC: wine's x64
-      # personality loads a plain ARM64 PE in no process, and a plain x64 PE would silently be the
-      # emulated runtime this package exists to replace.
+      # for the module's build-time check against the player. The image must be the TARGET's: a plain x64
+      # PE would silently be the emulated runtime this package exists to replace, an ARM64EC one loads in
+      # no native ARM64 process and a plain ARM64 one in no x64 process (lib/pe-check.py).
       installPhase = ''
         runHook preInstall
         dll=mono/mini/.libs/libmonoboehm-2.0.dll
@@ -245,14 +260,11 @@ let
         install -Dm644 "$dll" "$out/mono-2.0-bdwgc.dll"
         ${triple}-strip "$out/mono-2.0-bdwgc.dll"
         chmod 444 "$out/mono-2.0-bdwgc.dll"
-        # Each report into a variable first: `readobj | grep -q` lets grep close the pipe on the first
-        # match, readobj dies of SIGPIPE, and under pipefail a PASSING check reads as failed.
-        hdr=$(llvm-readobj --file-headers "$out/mono-2.0-bdwgc.dll")
-        grep -q "IMAGE_FILE_MACHINE_ARM64EC" <<<"$hdr" \
-          || { echo "propnix: the runtime is not an ARM64EC PE"; grep Machine <<<"$hdr"; exit 1; }
-        cfg=$(llvm-readobj --coff-load-config "$out/mono-2.0-bdwgc.dll")
-        grep -qi "CHPEMetadata" <<<"$cfg" \
-          || { echo "propnix: the runtime has no CHPE metadata — a plain x64 PE, not ARM64EC"; exit 1; }
+        helper=$(find support/.libs -maxdepth 1 -name '*.dll' | head -1)
+        [ -n "$helper" ] || { echo "no MonoPosixHelper DLL was produced under support/.libs"; exit 1; }
+        install -m444 "$helper" "$out/MonoPosixHelper.dll"
+        ${triple}-strip "$out/MonoPosixHelper.dll"
+        ${toolchain.checkPe} "$out/mono-2.0-bdwgc.dll" "$out/MonoPosixHelper.dll"
         llvm-readobj --coff-exports "$out/mono-2.0-bdwgc.dll" | awk '/^ *Name:/ { print $2 }' | sort -u > "$out/exports"
         [ "$(wc -l < "$out/exports")" -ge 1000 ] \
           || { echo "propnix: the runtime exports $(wc -l < "$out/exports") names — the export table is wrong"; exit 1; }
@@ -268,28 +280,30 @@ let
       };
 
       meta = {
-        description = "Unity ${stream} Mono runtime (mono-2.0-bdwgc.dll) as an ARM64EC PE";
+        description = "Unity ${stream} Mono runtime (mono-2.0-bdwgc.dll) as a ${target} PE";
         homepage = "https://github.com/Unity-Technologies/mono";
         license = lib.licenses.mit;
         platforms = [ "aarch64-linux" ];
       };
     };
 
-  runtimes = lib.mapAttrs mkRuntime streams;
+  runtimes = lib.mapAttrs mkRuntime (lib.filterAttrs (_: pin: lib.elem target pin.targets) streams);
 in
 # One attribute for the whole set (`.#unityMono`: the cachix job builds every stream through it), with the
-# streams reachable by name for the module (`unityMono.streams."6000.0"`).
-runCommand "unity-mono-arm64ec"
+# streams reachable by name for the module (`unityMono.streams."6000.0"`). A stream the target does not
+# build is simply absent from `streams`, which is how the modules tell "unpackaged" from "packaged".
+runCommand "unity-mono-${target}"
   {
     passthru = {
       streams = runtimes;
+      inherit target;
     };
     meta = {
-      description = "Unity Mono runtimes as ARM64EC PEs, one per Unity stream (${lib.concatStringsSep ", " (lib.attrNames streams)})";
+      description = "Unity Mono runtimes as ${target} PEs, one per Unity stream (${lib.concatStringsSep ", " (lib.attrNames runtimes)})";
       platforms = [ "aarch64-linux" ];
     };
   }
   ''
     mkdir -p "$out"
-    ${lib.concatMapStringsSep "\n" (s: ''ln -s ${runtimes.${s}} "$out/${s}"'') (lib.attrNames streams)}
+    ${lib.concatMapStringsSep "\n" (s: ''ln -s ${runtimes.${s}} "$out/${s}"'') (lib.attrNames runtimes)}
   ''

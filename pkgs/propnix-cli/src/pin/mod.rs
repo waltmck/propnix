@@ -20,6 +20,7 @@ pub mod nar;
 pub mod retry;
 pub mod steam;
 pub mod steamcache;
+pub mod unity;
 pub mod versions;
 
 use std::collections::BTreeMap;
@@ -547,6 +548,9 @@ pub fn emit(opts: &Opts) -> Result<String, Box<dyn std::error::Error>> {
         if let Some(fp) = &hashed.steam_api_interfaces {
             fields.push(("steamApiInterfaces".to_string(), serde_json::to_string(fp)?));
         }
+        // The Unity facts travel with the hash too (insert-allowlisted strings): a row that moves gets
+        // the facts of what it moved to, so a Unity upgrade in a game update is recorded by the pin.
+        fields.extend(unity_fields(&hashed.unity, &hashed.unity_scripting));
         staged.push((c.loc.clone(), fields));
     }
 
@@ -588,6 +592,31 @@ struct Hashed {
     /// revision its shipped steam_api libraries name, recorded as `steamApiInterfaces` so a pure
     /// check can hold it against the pinned gbe_fork. None for the GOG stores.
     steam_api_interfaces: Option<Vec<String>>,
+    /// The Unity player's version and changeset, read off the hash stream (`pin::unity`), recorded as
+    /// `unityVersion`/`unityChangeset` so the Nix side can derive the Mono stream and select the native
+    /// player by exact version. None for a payload that ships no Unity player.
+    unity: Option<unity::Facts>,
+    /// The scripting backend the file list implies (`unityScripting`: mono | il2cpp). None off Unity.
+    unity_scripting: Option<unity::Scripting>,
+}
+
+/// The `unity*` fields a row records for a hashed or fingerprinted payload — one place, so `pin`,
+/// `pin --new` and `pin --fingerprint` cannot disagree about the spelling.
+fn unity_fields(
+    unity: &Option<unity::Facts>,
+    scripting: &Option<unity::Scripting>,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Some(u) = unity {
+        out.push(("unityVersion".to_string(), u.version.clone()));
+        if let Some(c) = &u.changeset {
+            out.push(("unityChangeset".to_string(), c.clone()));
+        }
+    }
+    if let Some(s) = scripting {
+        out.push(("unityScripting".to_string(), s.as_str().to_string()));
+    }
+    out
 }
 
 /// Identity of the CONTENT a pin resolves to — everything `hash_pin` would feed the hasher, and nothing
@@ -645,11 +674,13 @@ fn hash_pin(
                 Some(&gog::DepsPin::UseCurrent),
                 hopts,
             ) {
-                Ok((sri, _, plan)) => Ok(Hashed {
-                    sri,
-                    deps_build_id: plan.deps_build_id,
+                Ok(h) => Ok(Hashed {
+                    sri: h.sri,
+                    deps_build_id: h.plan.deps_build_id,
                     anchors: None,
                     steam_api_interfaces: None,
+                    unity: h.unity,
+                    unity_scripting: h.scripting,
                 }),
                 Err(e) => Err(classify(e, pin, game, dlc.is_some())),
             }
@@ -663,23 +694,26 @@ fn hash_pin(
             let branch = steam_branch(opts, pin);
             let previous = previous_manifest(opts.mode, pin);
             match steam::hash_depot_any(app, depot, manifest, previous, &branch, hopts) {
-                Ok((sri, _, _, anchors)) => {
+                Ok(h) => {
                     // The fingerprint rides on the hash's freshly-written cache anchors, so it costs
-                    // no second login — only the steam_api libraries' chunks.
+                    // no second login — only the steam_api libraries' chunks (the Unity facts were read
+                    // off the hash stream itself; the fingerprint's copy is the fallback).
                     let fp = steam::fingerprint_depot_any(
                         app,
                         depot,
                         manifest,
                         &branch,
-                        Some((&anchors.depot_key_sha256, &anchors.manifest_sha256)),
+                        Some((&h.anchors.depot_key_sha256, &h.anchors.manifest_sha256)),
                         hopts,
                     )
                     .map_err(|e| classify(e, pin, game, pin.is_dlc()))?;
                     Ok(Hashed {
-                        sri,
+                        sri: h.sri,
                         deps_build_id: None,
-                        anchors: Some((anchors.depot_key_sha256, anchors.manifest_sha256)),
-                        steam_api_interfaces: Some(fp),
+                        anchors: Some((h.anchors.depot_key_sha256, h.anchors.manifest_sha256)),
+                        steam_api_interfaces: Some(fp.interfaces),
+                        unity: h.unity.or(fp.unity),
+                        unity_scripting: h.scripting.or(fp.scripting),
                     })
                 }
                 Err(e) => Err(classify(e, pin, game, pin.is_dlc())),
@@ -822,45 +856,78 @@ fn classify_fingerprint(e: Box<dyn std::error::Error>, pin: &Pin, game: &str) ->
     }
 }
 
-/// `propnix pin <game> --fingerprint`: record `steamApiInterfaces` on every Steam row WITHOUT moving
-/// any pin — the backfill for rows pinned before the field existed, and the way to re-derive a
-/// fingerprint from real bytes on demand. Fetches only each depot's steam_api libraries, login-free
-/// wherever the row's cache anchors are warm. Rows the stored accounts cannot fetch are collected as
-/// `blocked` and left untouched while every other row is written (the pin-refresh convention); the
-/// caller turns a non-empty `blocked` into the exit-4 "a human must act" class.
+/// `propnix pin <game> --fingerprint`: record the facts read off a payload's own bytes WITHOUT moving
+/// any pin — `steamApiInterfaces` on every Steam row, `unityVersion`/`unityChangeset`/`unityScripting`
+/// on every row (either store) whose payload is a Unity build — the backfill for rows pinned before a
+/// field existed, and the way to re-derive one from real bytes on demand. Fetches only the files it
+/// reads (a depot's steam_api libraries and the Unity player binary), login-free on Steam wherever the
+/// row's cache anchors are warm; GOG's file LIST is anonymous and only the player's chunks need a token.
+/// A GOG DLC row is skipped — its depots carry no player. Rows the stored accounts cannot fetch are
+/// collected as `blocked` and left untouched while every other row is written (the pin-refresh
+/// convention); the caller turns a non-empty `blocked` into the exit-4 "a human must act" class.
 pub fn fingerprint(opts: &Opts) -> Result<(String, Vec<String>), Box<dyn std::error::Error>> {
     let mut file = VersionsFile::load(&versions_path(&opts.repo, &opts.game))?;
     let pins = file.pins()?;
     let hopts = opts.hash_opts(false);
     let mut edits: Vec<(PinLoc, String, String)> = Vec::new();
     let mut blocked: Vec<String> = Vec::new();
-    for pin in pins.iter().filter(|p| matches!(p.store, Store::Steam)) {
-        let app = pin.u64_field("appId")? as u32;
-        let depot = pin.u64_field("depotId")? as u32;
-        let manifest: u64 = pin
-            .str_field("manifestId")?
-            .parse()
-            .map_err(|_| format!("{}: manifestId is not a number", pin.loc))?;
-        let branch = steam_branch(opts, pin);
-        let anchors = match (pin.opt_str("depotKeySha256"), pin.opt_str("manifestSha256")) {
-            (Some(k), Some(m)) => Some((k, m)),
-            _ => None,
-        };
-        eprintln!("  {}: app {app} depot {depot} manifest {manifest}", pin.loc);
-        match steam::fingerprint_depot_any(app, depot, manifest, &branch, anchors, &hopts) {
-            Ok(fp) => edits.push((
-                pin.loc.clone(),
-                "steamApiInterfaces".to_string(),
-                serde_json::to_string(&fp)?,
-            )),
-            Err(e) => {
-                let e = classify_fingerprint(e, pin, &opts.game);
-                if is_human_actionable(e.as_ref()) {
-                    eprintln!("      blocked: {e}");
-                    blocked.push(e.to_string());
-                } else {
-                    return Err(e);
+    let push_unity = |edits: &mut Vec<(PinLoc, String, String)>,
+                          loc: &PinLoc,
+                          unity: &Option<unity::Facts>,
+                          scripting: &Option<unity::Scripting>| {
+        for (k, v) in unity_fields(unity, scripting) {
+            edits.push((loc.clone(), k, v));
+        }
+    };
+    for pin in &pins {
+        let result: Result<(), Box<dyn std::error::Error>> = match pin.store {
+            Store::Steam => {
+                let app = pin.u64_field("appId")? as u32;
+                let depot = pin.u64_field("depotId")? as u32;
+                let manifest: u64 = pin
+                    .str_field("manifestId")?
+                    .parse()
+                    .map_err(|_| format!("{}: manifestId is not a number", pin.loc))?;
+                let branch = steam_branch(opts, pin);
+                let anchors = match (pin.opt_str("depotKeySha256"), pin.opt_str("manifestSha256")) {
+                    (Some(k), Some(m)) => Some((k, m)),
+                    _ => None,
+                };
+                eprintln!("  {}: app {app} depot {depot} manifest {manifest}", pin.loc);
+                steam::fingerprint_depot_any(app, depot, manifest, &branch, anchors, &hopts).map(
+                    |fp| {
+                        edits.push((
+                            pin.loc.clone(),
+                            "steamApiInterfaces".to_string(),
+                            serde_json::to_string(&fp.interfaces).expect("strings serialize"),
+                        ));
+                        push_unity(&mut edits, &pin.loc, &fp.unity, &fp.scripting);
+                    },
+                )
+            }
+            Store::GogGalaxy => {
+                if pin.is_dlc() {
+                    continue;
                 }
+                let product = pin.str_field("productId")?;
+                let build = pin.str_field("buildId")?;
+                let os = pin.opt_str("os").unwrap_or("windows");
+                let lang = pin.opt_str("lang").unwrap_or("en");
+                eprintln!("  {}: product {product} build {build} ({os}, {lang})", pin.loc);
+                gog::fingerprint_build(product, build, os, lang, &hopts).map(|(unity, scripting)| {
+                    push_unity(&mut edits, &pin.loc, &unity, &scripting);
+                })
+            }
+            // No version pin, and no file list to read: nothing a fingerprint could record.
+            Store::GogInstaller => continue,
+        };
+        if let Err(e) = result {
+            let e = classify_fingerprint(e, pin, &opts.game);
+            if is_human_actionable(e.as_ref()) {
+                eprintln!("      blocked: {e}");
+                blocked.push(e.to_string());
+            } else {
+                return Err(e);
             }
         }
     }
@@ -948,8 +1015,18 @@ pub fn scaffold(opts: &Opts, spec: &NewSpec) -> Result<String, Box<dyn std::erro
                 row
             };
 
+            // The Unity facts, when the build is a Unity title (a scaffold row carries what a re-pin would).
+            let with_unity = |mut row: serde_json::Value, h: &gog::HashedBuild| {
+                if let serde_json::Value::Object(m) = &mut row {
+                    for (k, v) in unity_fields(&h.unity, &h.scripting) {
+                        m.insert(k, serde_json::Value::String(v));
+                    }
+                }
+                row
+            };
+
             let mut rows = Vec::new();
-            let (sri, _, plan) = gog::hash_build(
+            let h = gog::hash_build(
                 product_id,
                 &b.build_id,
                 os,
@@ -958,18 +1035,21 @@ pub fn scaffold(opts: &Opts, spec: &NewSpec) -> Result<String, Box<dyn std::erro
                 Some(&gog::DepsPin::UseCurrent),
                 &hopts,
             )?;
-            rows.push(with_deps(
-                gog_row(
-                    &format!("{}-{}", opts.game, short_os(os)),
-                    product_id,
-                    &b.build_id,
-                    &b.version_name,
-                    &sri,
-                    os,
-                    lang,
-                    "game",
+            rows.push(with_unity(
+                with_deps(
+                    gog_row(
+                        &format!("{}-{}", opts.game, short_os(os)),
+                        product_id,
+                        &b.build_id,
+                        &b.version_name,
+                        &h.sri,
+                        os,
+                        lang,
+                        "game",
+                    ),
+                    &h.plan.deps_build_id,
                 ),
-                &plan.deps_build_id,
+                &h,
             ));
             fetch_info.insert(
                 "gog".into(),
@@ -979,7 +1059,7 @@ pub fn scaffold(opts: &Opts, spec: &NewSpec) -> Result<String, Box<dyn std::erro
             if !dlc.is_empty() {
                 let mut dlc_map = serde_json::Map::new();
                 for (name, id) in dlc {
-                    let (sri, _, dplan) = gog::hash_build(
+                    let dh = gog::hash_build(
                         product_id,
                         &b.build_id,
                         os,
@@ -988,6 +1068,7 @@ pub fn scaffold(opts: &Opts, spec: &NewSpec) -> Result<String, Box<dyn std::erro
                         Some(&gog::DepsPin::UseCurrent),
                         &hopts,
                     )?;
+                    let (sri, dplan) = (dh.sri, dh.plan);
                     let mut row = gog_row(
                         &format!("{}-{}-{}", opts.game, name, short_os(os)),
                         product_id,
@@ -1026,8 +1107,8 @@ pub fn scaffold(opts: &Opts, spec: &NewSpec) -> Result<String, Box<dyn std::erro
                     .clone()
                     .unwrap_or_else(|| default_platform(d.oslist.as_deref().unwrap_or("windows")));
                 eprintln!("  app {app} depot {depot} manifest {} ({plat})", d.gid);
-                let (sri, _, _, anchors) =
-                    steam::hash_depot_any(*app, *depot, manifest, None, &branch, &hopts)?;
+                let h = steam::hash_depot_any(*app, *depot, manifest, None, &branch, &hopts)?;
+                let (sri, anchors) = (h.sri, h.anchors);
                 let fp = steam::fingerprint_depot_any(
                     *app,
                     *depot,
@@ -1036,6 +1117,8 @@ pub fn scaffold(opts: &Opts, spec: &NewSpec) -> Result<String, Box<dyn std::erro
                     Some((&anchors.depot_key_sha256, &anchors.manifest_sha256)),
                     &hopts,
                 )?;
+                let unity = unity_fields(&h.unity.or(fp.unity), &h.scripting.or(fp.scripting));
+                let fp = fp.interfaces;
                 let mut row = serde_json::json!({
                     "pname": format!("{}-{}", opts.game, depot),
                     "appId": app,
@@ -1057,9 +1140,12 @@ pub fn scaffold(opts: &Opts, spec: &NewSpec) -> Result<String, Box<dyn std::erro
                 });
                 // A public pin carries no `branch` key at all — absent IS public, and every existing
                 // row must stay byte-identical.
-                if branch != "public" {
-                    if let serde_json::Value::Object(m) = &mut row {
+                if let serde_json::Value::Object(m) = &mut row {
+                    if branch != "public" {
                         m.insert("branch".into(), serde_json::Value::String(branch.clone()));
+                    }
+                    for (k, v) in unity {
+                        m.insert(k, serde_json::Value::String(v));
                     }
                 }
                 by_platform.entry(plat).or_default().push(row);

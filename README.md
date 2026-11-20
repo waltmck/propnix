@@ -79,7 +79,7 @@ that work there. The bolded `emulatedPlatform` is the default one.
 | `dont-starve` | **i386-windows** | **i386-windows** |
 | `factorio` | **aarch64-linux**, x86_64-linux, x86_64-windows | **x86_64-linux**, x86_64-windows |
 | `fallout-nv` | **i386-windows** | **i386-windows** |
-| `hollow-knight` | **x86_64-linux**, x86_64-windows | **x86_64-linux**, x86_64-windows |
+| `hollow-knight` | **aarch64-windows**, x86_64-linux, x86_64-windows | **x86_64-linux**, x86_64-windows |
 | `hollow-knight-silksong` | **x86_64-windows** | **x86_64-windows** |
 | `homeworld-rm` | **i386-windows** | **i386-windows** |
 | `iron-lung` | **x86_64-windows** | **x86_64-windows** |
@@ -119,7 +119,7 @@ game with entries under only one column can only be built by someone who owns it
 | `dont-starve` | i386-windows | — |
 | `factorio` | x86_64-windows | aarch64-linux, x86_64-linux, x86_64-windows |
 | `fallout-nv` | i386-windows | — |
-| `hollow-knight` | x86_64-windows | x86_64-linux, x86_64-windows |
+| `hollow-knight` | aarch64-windows, x86_64-windows | aarch64-windows, x86_64-linux, x86_64-windows |
 | `hollow-knight-silksong` | x86_64-windows | — |
 | `homeworld-rm` | i386-windows | — |
 | `iron-lung` | x86_64-windows | — |

@@ -12,7 +12,10 @@
           "os": "windows",
           "lang": "en",
           "kind": "game",
-          "generation": 2
+          "generation": 2,
+          "unityVersion": "6000.0.50f1-uum-100966-branch1",
+          "unityChangeset": "16f07294548e",
+          "unityScripting": "mono"
         }
       ]
     }

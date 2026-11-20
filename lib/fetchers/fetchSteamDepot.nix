@@ -69,6 +69,14 @@
   # The depot's Steamworks-SDK fingerprint (`propnix pin` writes it; ci/gbe-interface-check.sh reads it).
   # Row data only — nothing here consumes it — but a row carrying it must still be accepted.
   steamApiInterfaces ? null,
+  # The Unity facts `propnix pin` reads off the depot's player binary and file list (pin/unity.rs):
+  # the player's version string and changeset, and the scripting backend (mono | il2cpp). Row data
+  # consumed at EVAL time by lib/modules/unity.nix (which selects the Mono runtime and the native
+  # player by them); surfaced through passthru, never the derivation env, so an existing FOD's
+  # drvPath is unmoved by their arrival on its row.
+  unityVersion ? null,
+  unityChangeset ? null,
+  unityScripting ? null,
 }:
 runCommand (lib.strings.sanitizeDerivationName "${pname}")
   {
@@ -102,7 +110,15 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}")
     # Eval-only identity for consumers (the steam-emu entitlement projection reads dlcAppId/depotId/title
     # off the derivation): passthru never enters the derivation env, so exposing these cannot churn an
     # existing FOD's drvPath — which is exactly why `version` is surfaced here rather than inherited above.
-    passthru = { inherit version dlcAppId; };
+    passthru = {
+      inherit
+        version
+        dlcAppId
+        unityVersion
+        unityChangeset
+        unityScripting
+        ;
+    };
   }
   ''
     set -euo pipefail

@@ -413,15 +413,19 @@ impl VersionsFile {
 
 /// Keys the tool may INSERT (not just update): each is declared (with a null default) in ITS OWN store's
 /// fetcher signature — `depsBuildId` in fetchGogGalaxyBuild's, the two sha fields (the Steam cache trust
-/// anchors, pin/steamcache.rs) in fetchSteamDepot's — so inserting each onto rows of its store can never
-/// break evaluation. The per-store pairing is enforced by construction in `emit`, not here: anchors are
-/// staged only for Steam rows (`hashed.anchors`), depsBuildId only for GOG ones. Everything else stays
-/// update-only.
+/// anchors, pin/steamcache.rs) in fetchSteamDepot's, the three `unity*` facts (pin/unity.rs) in BOTH
+/// Galaxy-build and Steam-depot fetchers' — so inserting each onto rows of its store can never break
+/// evaluation. The per-store pairing is enforced by construction in `emit`, not here: anchors are
+/// staged only for Steam rows (`hashed.anchors`), depsBuildId only for GOG ones, the Unity facts only
+/// where a Unity player was actually read. Everything else stays update-only.
 const INSERTABLE: &[&str] = &[
     "depsBuildId",
     "depotKeySha256",
     "manifestSha256",
     "steamApiInterfaces",
+    "unityVersion",
+    "unityChangeset",
+    "unityScripting",
 ];
 
 /// The value a row field is written as. Every field the tool writes is a string — except
@@ -978,6 +982,31 @@ mod tests {
         f.apply_all(&[(loc, "steamApiInterfaces".into(), "[]".into())])
             .unwrap();
         assert!(f.render().contains("\"steamApiInterfaces\": []"));
+    }
+
+    #[test]
+    fn unity_facts_are_insertable_as_plain_strings() {
+        let p = write_tmp(FACTORIO);
+        let mut f = VersionsFile::load(&p).unwrap();
+        let loc = PinLoc::Payload {
+            fetcher: "gog".into(),
+            platform: "x86_64-windows".into(),
+            index: 0,
+        };
+        f.apply_all(&[
+            (loc.clone(), "unityVersion".into(), "6000.0.61f1".into()),
+            (loc.clone(), "unityChangeset".into(), "74a0adb02c31".into()),
+            (loc.clone(), "unityScripting".into(), "mono".into()),
+        ])
+        .unwrap();
+        let rendered = f.render();
+        assert!(rendered.contains("\"unityVersion\": \"6000.0.61f1\""), "{rendered}");
+        assert!(rendered.contains("\"unityChangeset\": \"74a0adb02c31\""), "{rendered}");
+        assert!(rendered.contains("\"unityScripting\": \"mono\""), "{rendered}");
+        // A re-fingerprint overwrites in place rather than refusing (insertable keys update too).
+        f.apply_all(&[(loc, "unityVersion".into(), "6000.0.62f1".into())])
+            .unwrap();
+        assert!(f.render().contains("\"unityVersion\": \"6000.0.62f1\""));
     }
 
     #[test]

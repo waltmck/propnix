@@ -20,6 +20,14 @@ let
 
   isAarch64 = pkgs.stdenv.hostPlatform.isAarch64;
   wineB = "wine"; # resolveStrategy's windows backend on both hosts
+  hkWin = dflt.hollow-knight.apply {
+    fetcher = "gog";
+    emulatedPlatform = "x86_64-windows";
+  };
+  hkNative = dflt.hollow-knight.apply {
+    fetcher = "gog";
+    emulatedPlatform = "aarch64-windows";
+  };
   linuxB = if isAarch64 then "box64" else "native";
 
   # 1. The expected triple per game under the DEFAULT config (all fetchers enabled, registry order).
@@ -50,7 +58,9 @@ let
     # emulates the platform it ends up on.
     factorio = if isAarch64 then "steam/aarch64-linux/native" else "steam/x86_64-linux/native";
     fallout-nv = "gog/i386-windows/${wineB}";
-    hollow-knight = "steam/x86_64-linux/${linuxB}"; # linux-first ranking (benchmarks: box64 ahead of wine+FEX)
+    # The native ARM64 Windows platform (modules/unity-player.nix pins it from the x64 rows) is ranked
+    # first and runs on aarch64 only; x86_64 takes the Linux build natively.
+    hollow-knight = if isAarch64 then "gog/aarch64-windows/${wineB}" else "steam/x86_64-linux/${linuxB}";
     hollow-knight-silksong = "gog/x86_64-windows/${wineB}";
     homeworld-rm = "gog/i386-windows/${wineB}";
     iron-lung = "gog/x86_64-windows/${wineB}";
@@ -121,14 +131,100 @@ let
           ];
         }).hollow-knight.config.fetcher;
     unreachable-pair-throws = throws gogOnly.stellaris.config.emulatedPlatform;
-    sanctioned-fallback = triple gogOnly.hollow-knight == "gog/x86_64-windows/${wineB}";
+    sanctioned-fallback =
+      triple gogOnly.hollow-knight
+      == (if isAarch64 then "gog/aarch64-windows/${wineB}" else "gog/x86_64-windows/${wineB}");
     explicit-beats-list =
-      triple (gogOnly.hollow-knight.apply { fetcher = "steam"; }) == "steam/x86_64-linux/${linuxB}";
+      triple (gogOnly.hollow-knight.apply { fetcher = "steam"; })
+      == (if isAarch64 then "steam/aarch64-windows/${wineB}" else "steam/x86_64-linux/${linuxB}");
     platform-apply-reresolves-fetcher =
       triple (dflt.hollow-knight.apply { emulatedPlatform = "x86_64-windows"; })
       == "gog/x86_64-windows/${wineB}";
     fetcher-apply-reresolves-platform =
-      triple (dflt.hollow-knight.apply { fetcher = "steam"; }) == "steam/x86_64-linux/${linuxB}";
+      triple (dflt.hollow-knight.apply { fetcher = "steam"; })
+      == (if isAarch64 then "steam/aarch64-windows/${wineB}" else "steam/x86_64-linux/${linuxB}");
+    # ── the Unity facts (modules/unity.nix) come off the SELECTED row and re-derive with the axes ──
+    unity-facts-derive-from-the-row =
+      let
+        hk = (dflt.hollow-knight.apply { fetcher = "gog"; emulatedPlatform = "x86_64-windows"; }).config.unity;
+      in
+      hk.version == "6000.0.61f1" && hk.changeset == "74a0adb02c31" && hk.scripting == "mono";
+    unity-stream-is-derived =
+      dflt.repo.config.unity.stream == "2022.3"
+      && dflt.hollow-knight.config.unity.stream == "6000.0"
+      && dflt.stellaris.config.unity.version == null
+      && dflt.stellaris.config.unity.stream == null;
+    # A game module may state a fact the pin lacks (`lastWins`), and `.apply` may override it.
+    unity-facts-are-overridable =
+      (dflt.stellaris.apply { unity.version = "2021.3.1f1"; }).config.unity.stream == "2021.3";
+    # ── the native ARM64 Windows platform (modules/unity-player.nix) ──
+    # The pair is PINNED from the x64 rows wherever their recorded player version is packaged — Hollow
+    # Knight's two Windows fetchers — and nowhere else (REPO: 2022.3 has no ARM64 player; Silksong: an
+    # internal Unity branch build, which no public player can serve; Stellaris: not Unity).
+    native-platform-is-pinned-from-the-x64-rows =
+      let
+        fi = dflt.hollow-knight.config.fetchInfo;
+      in
+      fi.gog."aarch64-windows" == fi.gog."x86_64-windows"
+      && fi.steam."aarch64-windows" == fi.steam."x86_64-windows"
+      && dflt.repo.config.fetchInfo.steam."aarch64-windows" == null
+      && dflt.hollow-knight-silksong.config.fetchInfo.gog."aarch64-windows" == null
+      && dflt.stellaris.config.fetchInfo.steam."aarch64-windows" == null;
+    # `unity.player.enable = false` is the opt-out: the pair is gone.
+    native-platform-opt-out =
+      (dflt.hollow-knight.apply { unity.player.enable = false; }).config.fetchInfo.gog."aarch64-windows" == null;
+    # Runnable on aarch64 only: the resolver never selects it on x86_64, and an explicit selection there
+    # evaluates but is refused at build (meta.broken) — the same contract as aarch64-linux content.
+    native-platform-runnable-only-on-aarch64 =
+      hkNative.config.backend == wineB && hkNative.meta.broken == !isAarch64 && !hkWin.meta.broken;
+    # The facts come off the pinned rows exactly as off the x64 ones.
+    native-platform-carries-the-facts =
+      hkNative.config.unity.version == "6000.0.61f1" && hkNative.config.unity.stream == "6000.0";
+    # On the native platform the player tree serves the build and the ARM64EC Mono tree stays out; the
+    # x64 platform is the reverse (on aarch64; on x86_64 the x64 platform has neither tree).
+    native-player-serves-the-native-platform =
+      let
+        names = g: map (l: l.name) g.config.extraLowers;
+        hasTree = t: g: lib.any (lib.hasInfix t) (names g);
+      in
+      hkNative.config.unity.player.active
+      && hasTree "unity-player" hkNative
+      && !(hasTree "unity-mono" hkNative)
+      && !hkWin.config.unity.player.active
+      && !(hasTree "unity-player" hkWin)
+      && (hasTree "unity-mono" hkWin == isAarch64);
+    # Every pinned native pair records a Unity version emulators/unity-player packages (the module pins it
+    # from the rows under exactly that condition, so a `propnix pin` bump to a release without a row drops
+    # the pair rather than breaking it — and the HK expectations above then fail, naming it).
+    native-player-versions-are-packaged = lib.all (
+      g:
+      lib.all (
+        f:
+        let
+          rows = g.config.fetchInfo.${f}."aarch64-windows";
+        in
+        rows == null
+        || lib.any (r: dflt.unityPlayer.versions ? ${r.unityVersion or ""}) rows
+        || throw "propnix: ${g.config.pname} (${f}/aarch64-windows) is pinned without a packaged player version"
+      ) (lib.attrNames g.config.fetchInfo)
+    ) (lib.attrValues dflt.games);
+    # Every row that records `unityVersion` records the changeset and scripting backend with it, and the
+    # rows of one (game, platform) name one version.
+    unity-facts-are-consistent = lib.all (
+      g:
+      lib.all (
+        f:
+        lib.all (
+          p:
+          let
+            rows = g.config.fetchInfo.${f}.${p} or null;
+            withFacts = lib.filter (r: r ? unityVersion) (if rows == null then [ ] else rows);
+          in
+          lib.all (r: r ? unityChangeset && r ? unityScripting) withFacts
+          && lib.length (lib.unique (map (r: r.unityVersion) withFacts)) <= 1
+        ) (lib.attrNames g.config.fetchInfo.${f})
+      ) (lib.attrNames g.config.fetchInfo)
+    ) (lib.attrValues dflt.games);
     # ── two fetchers pinning ONE platform (shadow-of-mordor, baldurs-gate-3, skyrim-se) ──
     # The `platformPreference` ratchet counts PINNED PLATFORMS, not pinned pairs, so a game in this shape
     # states no ranking and the store is decided purely by the user's `preferredFetchers` order. Both
@@ -180,13 +276,19 @@ let
     # x86_64 by the fex backend having no x86_64-host interpreter at all. (Writing this as
     # `== isAarch64` — expecting the x86_64 side to be fine — is what broke CI: the second claim was
     # overlooked because this check only ever gets run by hand on the aarch64 dev host.)
-    allowbroken-default-refuses = (dflt.hollow-knight.apply { backend = "fex"; }).meta.broken;
+    allowbroken-default-refuses = (dflt.hollow-knight.apply {
+          backend = "fex";
+          emulatedPlatform = "x86_64-linux";
+        }).meta.broken;
     # …and the reason each host reports must be the one that applies THERE, which is the whole job of
     # mk-thin-build's claim selection. Pinned per host because the failure mode is silent: the wrong
     # reason still refuses the build, it just explains it with another machine's wall.
     allowbroken-reason-is-about-this-host =
       let
-        r = (dflt.hollow-knight.apply { backend = "fex"; }).meta.brokenReason;
+        r = (dflt.hollow-knight.apply {
+          backend = "fex";
+          emulatedPlatform = "x86_64-linux";
+        }).meta.brokenReason;
       in
       if isAarch64 then
         lib.hasInfix "guest Mono init" r
@@ -195,11 +297,13 @@ let
     allowbroken-suppresses-game-entry =
       (dflt.hollow-knight.apply {
         backend = "fex";
+        emulatedPlatform = "x86_64-linux"; # the wall is the Linux build's; HK now defaults to aarch64-windows
         allowBroken = true;
       }).meta.broken == false;
     allowbroken-keeps-the-reason =
       (dflt.hollow-knight.apply {
         backend = "fex";
+        emulatedPlatform = "x86_64-linux"; # the wall is the Linux build's; HK now defaults to aarch64-windows
         allowBroken = true;
       }).meta ? brokenReason;
     allowbroken-suppresses-face-guard =
@@ -243,7 +347,7 @@ let
     overridescope-reinstantiates =
       triple
         ((mk { }).overrideScope (final: prev: { propnixConfig.preferredFetchers = [ "gog" ]; }))
-        .hollow-knight == "gog/x86_64-windows/${wineB}";
+        .hollow-knight == (if isAarch64 then "gog/aarch64-windows/${wineB}" else "gog/x86_64-windows/${wineB}");
   };
   guardErrors = lib.concatLists (
     lib.mapAttrsToList (n: ok: lib.optional (!ok) "guard failed: ${n}") guards

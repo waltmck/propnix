@@ -4,22 +4,25 @@
 # states only what is SPECIFIC to it. Each scalar knob is `{ value; reason; }` so a non-default choice
 # justifies itself.
 #
-# Shape: `{ lib, prefixLower, galaxyStub ? null }: { platform, wine }: { … }`. The OUTER args are the
+# Shape: `{ lib, prefixLower, galaxyStubs ? { } }: { platform, wine }: { … }`. The OUTER args are the
 # store-path derivations its mount table references (the read-only `prefixLower` system tree; the GOG
-# Galaxy no-op stub tree) — interpolated into mount rows directly at build time, with no runtime env
-# indirection (and no way for a stray env var to redirect a source). The INNER args come from the app
-# config: `platform` = the app's emulatedPlatform (platform-dependent defaults, e.g. i386 → wined3d) and
-# `wine` = the RESOLVED fixed-point tuning — this layer is a MODULE-SYSTEM config-function, so mount rows
-# derived from other knobs (`galaxyStubDlls`, `extraSystem32`) recompute when those knobs are overridden.
+# Galaxy no-op stub trees, one per PE target) — interpolated into mount rows directly at build time, with
+# no runtime env indirection (and no way for a stray env var to redirect a source). The INNER args come
+# from the app config: `platform` = the app's emulatedPlatform (platform-dependent defaults, e.g. i386 →
+# wined3d; the key into the per-target stubs — `aarch64-windows` is the native ARM64 Unity player's) and
+# `wine` = the RESOLVED fixed-point tuning — this layer is a MODULE-SYSTEM config-function, so mount
+# rows derived from other knobs (`galaxyStubDlls`, `extraSystem32`) recompute when those knobs are
+# overridden.
 # Injected via the scope (backends/wine/default.nix takes `wineDefaults`); override the scope attr to
 # re-base all games.
 {
   lib,
   prefixLower,
-  # Graceful no-op GOG Galaxy SDK stub tree (a store path). Wired on BOTH hosts (its DLLs are x86_64/i386
-  # PEs matching the GAME, never the host); null only if a scope declines to provide it, in which case the
-  # de-Galaxy mount rows are omitted.
-  galaxyStub ? null,
+  # Graceful no-op GOG Galaxy SDK stub trees, one per PE target (`winPkgs.<target>.galaxyStub`, a store
+  # path each): the stub must match the PROCESS that imports it — an x64 process loads the x86_64 one
+  # whatever the host, a native ARM64 player the aarch64 one. Empty only if a scope declines to provide
+  # them, in which case the de-Galaxy mount rows are omitted.
+  galaxyStubs ? { },
 }:
 { platform, wine }:
 let
@@ -51,8 +54,20 @@ let
   # So i386 titles get NO rows, and declaring the knob there is a legible ERROR rather than a silent
   # no-op. The offline guarantee for a 32-bit GOG title is `online = false` instead — a kernel
   # network-namespace unshare, strictly stronger than trusting a stub to be a no-op.
+  # Which target's stub serves a row: `Galaxy.dll` is the 32-bit SDK name, and the one i386 copy a 64-bit
+  # title binds (prison-architect) is a file its process never loads; every other name is the platform's.
+  # A target this host's toolchain set lacks (aarch64-windows on an x86_64 host) takes the x64 stub: the
+  # package is `meta.broken` there (the backend's `runnable` contribution), and the fallback only keeps
+  # the configuration evaluable — the CI matrix evaluates every pinned pair on both systems.
+  stubFor =
+    rel:
+    let
+      t = if baseNameOf rel == "Galaxy.dll" then "i386-windows" else platform;
+    in
+    galaxyStubs.${t} or galaxyStubs."x86_64-windows"
+      or (throw "propnix wine tuning: no Galaxy stub tree for the ${t} target (wine.galaxyStubDlls entry '${rel}')");
   galaxyMounts =
-    if galaxyStub == null || config.galaxyStubDlls == [ ] then
+    if galaxyStubs == { } || config.galaxyStubDlls == [ ] then
       { }
     else
       lib.throwIf (platform == "i386-windows")
@@ -63,7 +78,7 @@ let
               rel:
               lib.nameValuePair "drive_c/game/${rel}" {
                 type = "mount";
-                source = "${galaxyStub}/${baseNameOf rel}";
+                source = "${stubFor rel}/${baseNameOf rel}";
                 mode = "ro";
               }
             ) config.galaxyStubDlls

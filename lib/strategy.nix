@@ -8,9 +8,9 @@
 # The platform TABLE lives here too (`platforms` / `platformToNeed`), so the axis's vocabulary and the
 # backend selection that reads it cannot drift: modules/app-options.nix builds its `emulatedPlatform` enum
 # and its fetch matrix from this list. `runnable` has two consumers — that same resolver, which skips a
-# platform this host cannot execute, and the thin backend, which turns one into a `meta.broken`
-# contribution so an EXPLICITLY selected unrunnable pair still evaluates (the CI matrix forces every pinned
-# pair on both systems) and is refused only at build time.
+# platform this host cannot execute, and the backends, which turn one into a `meta.broken` contribution
+# so an EXPLICITLY selected unrunnable pair still evaluates (the CI matrix forces every pinned pair on
+# both systems) and is refused only at build time.
 # Extending the platform axis is ONE edit: a `platforms` entry plus its `platformToNeed` row.
 { lib }:
 rec {
@@ -18,6 +18,7 @@ rec {
   platforms = [
     "x86_64-windows"
     "i386-windows"
+    "aarch64-windows"
     "aarch64-linux"
     "x86_64-linux"
     "i386-linux"
@@ -34,6 +35,14 @@ rec {
       "i386-windows" = {
         os = "windows";
         arch = "i386";
+      };
+      # A Windows title run as a NATIVE ARM64 process: the same store build as x86_64-windows with the
+      # engine's binaries replaced by their ARM64 counterparts — today a Unity title on Unity's own ARM64
+      # player (lib/modules/unity-player.nix pins this pair from the x64 rows). wine on an aarch64 host;
+      # nothing on x86_64, which has no ARM-on-x86 emulator.
+      "aarch64-windows" = {
+        os = "windows";
+        arch = "aarch64";
       };
       "x86_64-linux" = {
         os = "linux";
@@ -93,13 +102,15 @@ rec {
 
   # Can `system` actually run this platform's content? The `emulatedPlatform` resolver filters the game's
   # own quality ranking through this (so a game may rank a host-specific native build first without
-  # stranding the other host), and the thin backend turns a false here into `meta.broken` for the
-  # explicit-override path. The one false case today: aarch64 Linux content on x86_64 — propnix ships no
-  # ARM-on-x86 emulator, and running one would be strictly worse than the game's own x86_64 build.
+  # stranding the other host), and the backends turn a false here into `meta.broken` for the
+  # explicit-override path. x86 content of either width runs on both hosts (natively on x86_64, under an
+  # emulator on aarch64); anything else runs only on its own architecture — aarch64 content, Windows or
+  # Linux, on x86_64 is the false case, because propnix ships no ARM-on-x86 emulator and running one would
+  # be strictly worse than the game's own x86_64 build.
   runnable =
     platform: system:
     let
       need = platformToNeed platform;
     in
-    need.os == "windows" || isX86Guest need || need.arch == hostArchOf system;
+    isX86Guest need || need.arch == hostArchOf system;
 }

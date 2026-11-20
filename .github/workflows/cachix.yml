@@ -165,9 +165,13 @@ jobs:
           - name: graphics
             attrs: dxvk vkd3d
           - name: galaxy-stub
-            attrs: galaxyStub
+            attrs: galaxyStub winPkgs.aarch64ec-windows.galaxyStub
           - name: unity-mono
             attrs: unityMono
+          # The plain-ARM64 target: what a NATIVE ARM64 process (Unity's ARM64 player under wine,
+          # lib/modules/unity-player.nix) loads in place of the x64/ARM64EC pieces above.
+          - name: arm64-native
+            attrs: winPkgs.aarch64-windows.galaxyStub winPkgs.aarch64-windows.dxvk winPkgs.aarch64-windows.vkd3d winPkgs.aarch64-windows.unityMono winPkgs.aarch64-windows.gbeFork
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/build-and-push

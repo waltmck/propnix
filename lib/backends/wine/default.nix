@@ -10,9 +10,13 @@
   lib,
   stdenv, # host arch only — whether an x86 EMULATOR is in the prefix at all (see the x87 env below)
   knobTypes,
+  strategy, # lib/strategy.nix — `runnable`, for the meta.broken contribution below
   wineDefaults, # the applied defaults.nix: { platform, wine }: tuning defs (scope-injected — override the scope attr to re-base all games)
   mkWineApp,
   mkFallbackGl, # builders/gl-fallback.nix: the baked GL/Vulkan stack of last resort (its header has the why)
+  winPkgs, # the per-target Windows package set: DXVK/vkd3d for the platform's architecture (below)
+  dxvk, # the host-default pair, for a platform whose target this host's set lacks (below)
+  vkd3d,
 }:
 {
   modules = [
@@ -75,11 +79,22 @@
         // cfg.env;
       # The app's `broken` record plus the caller's escape hatch, which mkLauncherPackage reads as the
       # third field: `allowBroken` suppresses the meta.broken refusal for a deliberate test of a known
-      # wall (app-options documents it). Wine contributes no brokenness of its own — it is the one
-      # backend that exists on both hosts — so the record passes through otherwise unchanged.
-      broken = cfg.broken // {
-        allow = cfg.allowBroken;
-      };
+      # wall (app-options documents it). Wine itself exists on both hosts; what it cannot do on x86_64 is
+      # run an ARM64 Windows process (the aarch64-windows platform), and `runnable` says so — a BUILD
+      # refusal, because the package must still EVALUATE (the CI matrix forces every pinned pair on both
+      # systems). The same mechanism as the thin backends'.
+      broken =
+        let
+          unrunnable = !(strategy.runnable cfg.emulatedPlatform stdenv.hostPlatform.system);
+        in
+        cfg.broken
+        // {
+          allow = cfg.allowBroken;
+        }
+        // lib.optionalAttrs unrunnable {
+          systems = lib.unique (cfg.broken.systems ++ [ stdenv.hostPlatform.system ]);
+          reason = "emulatedPlatform '${cfg.emulatedPlatform}' cannot run on ${stdenv.hostPlatform.system} — a native ARM64 Windows process needs an aarch64 host (propnix ships no ARM-on-x86 emulator). Pick a platform this host can run, or drop the explicit `.apply { emulatedPlatform = … }` and let the resolver choose.";
+        };
       # `extraBinds` is thin-only (view-relative dst; wine's binds are profile-home-relative) — refuse it
       # legibly instead of silently dropping the rows.
       saveBinds =
@@ -87,6 +102,24 @@
           "propnix (${cfg.pname}): extraBinds is thin-only (view-relative dst semantics) — express the row as `wine.mounts` on the wine backend."
           cfg.saveBinds;
       exe = cfg.exe;
+      # D3D translation for the PLATFORM's process architecture, never the host's: on aarch64 an x64
+      # process loads the ARM64EC DXVK/vkd3d and a native ARM64 one (the aarch64-windows platform,
+      # modules/unity-player.nix) the plain-ARM64 builds; on x86_64 the x86_64 builds. An i386 process
+      # defaults to wined3d and loads neither; its paths are still emitted, as ever. A target this host's
+      # set lacks (aarch64-windows on x86_64) takes the host pair: the package is broken there (above) and
+      # the fallback only keeps the configuration evaluable.
+      d3d =
+        let
+          t =
+            if cfg.emulatedPlatform == "aarch64-windows" then
+              "aarch64-windows"
+            else if stdenv.hostPlatform.isAarch64 then
+              "aarch64ec-windows"
+            else
+              "x86_64-windows";
+        in
+        if winPkgs ? ${t} then { inherit (winPkgs.${t}) dxvk vkd3d; } else { inherit dxvk vkd3d; };
+      platform = cfg.emulatedPlatform;
       resolvedConfig = cfg.wine; # pre-resolved tuning (defaults layer + game + `.apply`, merged by evalModules)
       dlc = cfg.dlc.available;
       inherit enabledDlc;

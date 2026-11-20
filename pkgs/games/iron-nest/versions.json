@@ -12,7 +12,10 @@
           "os": "windows",
           "lang": "en",
           "kind": "game",
-          "generation": 2
+          "generation": 2,
+          "unityVersion": "6000.3.21f1",
+          "unityChangeset": "c02631ffc030",
+          "unityScripting": "il2cpp"
         }
       ]
     }

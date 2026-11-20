@@ -1,0 +1,40 @@
+# Full verification of emulators/unity-player against Unity's live CDN: every row is DOWNLOADED (~300 MB
+# each), hashed, extracted and checked — the player derivation's own build does exactly that (SRI hash of
+# the module, the expected `Variations/` entry, PE machine types, the version string) — so a module Unity
+# re-publishes or withdraws is found here before a user's build fails on it. Weekly and on request; the
+# cheap API/HEAD gate (ci/unity-player-check.sh) runs on every push in eval.yml.
+#
+# NOTHING IS PUSHED. The module is Unity's proprietary binary (unfree, `allowSubstitutes = false`): this
+# workflow uses no cachix action, and the derivations are never named in cachix.yml.
+name: unity-player-verify
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: download + extract every player row
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: API and CDN gate
+        run: ci/unity-player-check.sh
+      - name: build every player derivation (the live download)
+        run: |
+          set -euo pipefail
+          attrs=$(nix eval --json '.#unityPlayer' --apply 'u:
+            builtins.concatLists (map (t: builtins.concatLists (map (v: map (x: "${t}.${v}.${x}") u.variants) (builtins.attrNames u.versions))) (builtins.attrNames u.targets))')
+          for a in $(jq -r '.[]' <<<"$attrs"); do
+            echo "== unityPlayer.$a"
+            nix build --no-link --print-build-logs ".#unityPlayer.$a"
+          done

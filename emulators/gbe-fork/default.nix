@@ -26,13 +26,12 @@
 # gone. `pkgsCross.gnu32` gets there with a natively-running compiler on BOTH hosts; the only thing the
 # x86_64 builder needs is the check-phase normalization below, not a different package set.
 #
-# The WINDOWS PE shims are upstream's PREBUILT release artifacts, pinned to the SAME tag as the source so a
-# game's two flavours can never disagree about which Steamworks surface they implement. A from-source mingw
-# build of the Windows file set was written and then REMOVED: its only consumer was a patch answering
-# Valve's pre-SteamStub `STEAM_DRM_IPC` handshake for Civ V, and that title turned out to be unrunnable for
-# an unrelated reason (a CEG-stripped executable — see pkgs/games/civilization-5), leaving ~400 lines of
-# mingw protobuf/curl/mbedtls plumbing with nothing to serve. `git log` has it if a title ever needs
-# patched Windows bytes.
+# The x64 and x86 WINDOWS PE shims are upstream's PREBUILT release artifacts, pinned to the SAME tag as the
+# source so a game's flavours can never disagree about which Steamworks surface they implement. The one
+# Windows architecture upstream publishes nothing for, plain ARM64 (a native ARM64 Unity player under
+# wine), is built from source by ./shim-win.nix with ./win-deps.nix — the Windows twin of ./shim.nix,
+# reached through `winPkgs.aarch64-windows.gbeFork` (lib/default.nix) rather than through this file, and
+# threaded this file's pin so it is the same release.
 #
 # WHY NOT ONE DERIVATION CONTAINING EVERYTHING. It would cost every steam.emu game the whole set. The
 # per-ABI attrs are LAZY and games index them directly (lib/modules/steam-emu.nix), so a wine-only title

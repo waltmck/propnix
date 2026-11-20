@@ -69,6 +69,10 @@
   # materializes the replacement lib AT that path with `steam_settings/` + `steam_interfaces.txt` copied
   # beside it — so unioning this tree over the game replaces the lib and seats its settings in one move.
   mirror ? { },
+  # Directories that hold a mirror but no declared lib — a native-player placement (modules/steam-emu.nix
+  # `placementOf`): `{ "<mirror dir>" = "<declared dir>"; }`. Each gets the declared directory's settings
+  # and scanned interface list, so gbe_fork's beside-the-library probe finds them where the lib now is.
+  settingsAliases ? { },
   # The STEAMSTUB arm of the same placement, keyed by the SAME paths as `mirror`:
   # `{ "<path>" = { proxy; realName; extra; extraName; }; }`. A path that appears here gets THREE files in
   # its directory instead of one — the proxy AT the shipped path, the gbe_fork lib under `realName` (the
@@ -380,6 +384,16 @@ runCommandLocal "${pname}-${toString appId}"
       cp --no-preserve=mode ${lib.escapeShellArg "${dir}/steam_interfaces.txt"} ${lib.escapeShellArg "${dir}/steam_settings/steam_interfaces.txt"}
     '') (lib.attrNames jobDirs)}
 
+
+    # The settings aliases (see the param): a mirror directory with no declared lib takes the declared
+    # directory's settings and list, after the per-directory block above has produced them.
+    ${lib.concatStrings (
+      lib.mapAttrsToList (dir: from: ''
+        install -d ${lib.escapeShellArg "${dir}/steam_settings"}
+        cp -r --no-preserve=mode ${lib.escapeShellArg "${from}/steam_settings/."} ${lib.escapeShellArg "${dir}/steam_settings/"}
+        cp --no-preserve=mode ${lib.escapeShellArg "${from}/steam_interfaces.txt"} ${lib.escapeShellArg "${dir}/steam_interfaces.txt"}
+      '') settingsAliases
+    )}
 
     # The union-replacement mirrors (see the `mirror` param): the replacement lib at the shipped path. Its
     # settings + interfaces were placed beside it above (the root ones for a root-level entry, the

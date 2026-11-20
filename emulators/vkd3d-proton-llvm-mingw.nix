@@ -1,9 +1,9 @@
-# vkd3d-proton-arm64ec.nix — vkd3d-proton (Direct3D 12 → Vulkan) built as NATIVE ARM64EC PE DLLs.
-#
-# Why: this is the D3D12 sibling of dxvk-arm64ec.nix. Building the D3D12→Vulkan translation as ARM64EC
-# means it runs NATIVE (only the game stays under FEX), the Hangover-recommended path and the enabler for
-# D3D12 titles (PLAN2 M3). Mirrors dxvk-arm64ec.nix exactly: same llvm-mingw toolchain, same meson
-# cross-file, same --wrap-mode nodownload / patchShebangs / dontStrip discipline.
+# vkd3d-proton-llvm-mingw.nix — vkd3d-proton (Direct3D 12 → Vulkan) built as NATIVE PE DLLs for an ARM
+# Windows target with llvm-mingw: ARM64EC (`winPkgs.aarch64ec-windows.vkd3d`) or plain ARM64
+# (`winPkgs.aarch64-windows.vkd3d`); the D3D12 sibling of dxvk-llvm-mingw.nix, mirroring it exactly — same
+# toolchain record, same meson cross-file, same --wrap-mode nodownload / patchShebangs / dontStrip
+# discipline. Building the D3D12→Vulkan translation native (only the game stays under FEX on the EC
+# stack) is the Hangover-recommended path and the enabler for D3D12 titles (PLAN2 M3).
 #
 # ARM64EC support is ALREADY UPSTREAM in the pinned 2.14.1 (nixpkgs `vkd3d-proton.src`); NO source patch is
 # needed for EC correctness. Verified against this toolchain (arm64ec-w64-mingw32-clang, LLVM 22):
@@ -19,10 +19,11 @@
 #     <emmintrin.h>/<mmintrin.h> path is never reached. Nothing to patch.
 #   * meson only special-cases cpu_family=='x86' (32-bit stdcall fixup / libatomic); our cross-file is
 #     cpu_family='aarch64', so that branch is inert, exactly as in DXVK.
+# Plain aarch64 clang defines __aarch64__ and none of the x86 macros, so those paths never arise there.
 # The toolchain's ARM64EC linking is made to work by the builtins-archive re-index baked into
 # ./llvm-mingw (RESEARCH §22) — same as DXVK.
 #
-#   nix build .#vkd3d   # -> $out/{d3d12,d3d12core}.dll (both 0xA641)
+#   nix build .#vkd3d   # -> $out/{d3d12,d3d12core}.dll (the host's default target)
 {
   stdenv,
   writeText,
@@ -33,20 +34,21 @@
   python3,
   wine64Packages,
   vkd3d-proton,
-  llvmMingw,
+  toolchain, # the target's lib/win-toolchain.nix record (the scope injects it)
+  target,
 }:
 let
-  # meson cross-file targeting arm64ec via llvm-mingw — IDENTICAL to dxvk-arm64ec.nix. cpu_family MUST be
-  # 'aarch64' (meson has no 'arm64ec'; this also keeps vkd3d's 32-bit x86 branch off). No -resource-dir
-  # override is needed because the EC builtins archive is fixed in place inside llvmMingw.
-  crossFile = writeText "vkd3d-proton-arm64ec-cross.txt" ''
+  # meson cross-file for the target via llvm-mingw — IDENTICAL to dxvk-llvm-mingw.nix. cpu_family is
+  # 'aarch64' for both ARM targets (meson has no 'arm64ec'; this also keeps vkd3d's 32-bit x86 branch off).
+  # No -resource-dir override is needed because the EC builtins archive is fixed in place inside llvm-mingw.
+  crossFile = writeText "vkd3d-proton-${target}-cross.txt" ''
     [binaries]
-    c       = '${llvmMingw}/bin/arm64ec-w64-mingw32-clang'
-    cpp     = '${llvmMingw}/bin/arm64ec-w64-mingw32-clang++'
-    ar      = '${llvmMingw}/bin/llvm-ar'
-    strip   = '${llvmMingw}/bin/arm64ec-w64-mingw32-strip'
-    windres = '${llvmMingw}/bin/arm64ec-w64-mingw32-windres'
-    dlltool = '${llvmMingw}/bin/arm64ec-w64-mingw32-dlltool'
+    c       = '${toolchain.cc}'
+    cpp     = '${toolchain.cxx}'
+    ar      = '${toolchain.ar}'
+    strip   = '${toolchain.strip}'
+    windres = '${toolchain.windres}'
+    dlltool = '${toolchain.dlltool}'
 
     [properties]
     needs_exe_wrapper = true
@@ -59,7 +61,7 @@ let
   '';
 in
 stdenv.mkDerivation {
-  pname = "vkd3d-proton-arm64ec";
+  pname = "vkd3d-proton-${target}";
   version = "2.14.1";
   src = vkd3d-proton.src; # pinned vkd3d-proton 2.14.1 (fetchSubmodules: bundles dxil-spirv +
   # khronos/{Vulkan,SPIRV}-Headers, so nothing is downloaded at build time)
@@ -74,8 +76,8 @@ stdenv.mkDerivation {
     # It runs NATIVE on the build host. The default `pkgs.wine` won't even evaluate on aarch64 (it pulls the
     # i686 package set); wine64Packages.minimal does, ships bin/widl, and is available from cache.
     wine64Packages.minimal
-    llvmMingw
-  ];
+  ]
+  ++ toolchain.nativeBuildInputs;
 
   # Only build-metadata plumbing — no arm64ec/source fix is required (see header). vkd3d embeds a build id
   # via meson vcs_tag(); fetchFromGitHub stripped .git but saved the describe output to .nixpkgs-auxfiles/,
@@ -94,7 +96,7 @@ stdenv.mkDerivation {
 
   configurePhase = ''
     runHook preConfigure
-    meson setup build.ec \
+    meson setup build \
       --cross-file ${crossFile} \
       --buildtype release -Db_ndebug=if-release \
       --wrap-mode nodownload
@@ -103,7 +105,7 @@ stdenv.mkDerivation {
 
   buildPhase = ''
     runHook preBuild
-    ninja -C build.ec
+    ninja -C build
     runHook postBuild
   '';
 
@@ -113,15 +115,16 @@ stdenv.mkDerivation {
     runHook preInstall
     mkdir -p "$out"
     for _d in d3d12 d3d12core; do
-      _f="$(find build.ec -name "$_d.dll" -print -quit)"
+      _f="$(find build -name "$_d.dll" -print -quit)"
       if [ -n "$_f" ]; then cp "$_f" "$out/$_d.dll"; else echo "WARN: $_d.dll not built"; fi
     done
+    ${toolchain.checkPe} "$out"/*.dll
     runHook postInstall
   '';
 
   # PE outputs: nix's ELF strip won't touch them, but be explicit — never risk dropping the ARM64X
-  # load-config/CHPE sections (same rationale as dxvk-arm64ec.nix / wine-hangover's dontStrip).
+  # load-config/CHPE sections (same rationale as dxvk-llvm-mingw.nix / wine-hangover's dontStrip).
   dontStrip = true;
 
-  meta.description = "vkd3d-proton (D3D12 → Vulkan) as native ARM64EC PE DLLs (llvm-mingw), for wine+FEX on aarch64";
+  meta.description = "vkd3d-proton (D3D12 → Vulkan) as native ${target} PE DLLs (llvm-mingw)";
 }

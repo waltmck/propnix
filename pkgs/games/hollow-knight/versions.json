@@ -12,7 +12,10 @@
           "os": "windows",
           "lang": "en",
           "kind": "game",
-          "generation": 2
+          "generation": 2,
+          "unityVersion": "6000.0.61f1",
+          "unityChangeset": "74a0adb02c31",
+          "unityScripting": "mono"
         }
       ]
     },
@@ -58,7 +61,10 @@
             "SteamParties002",
             "SteamUser023",
             "SteamUtils010"
-          ]
+          ],
+          "unityVersion": "6000.0.61f1",
+          "unityChangeset": "74a0adb02c31",
+          "unityScripting": "mono"
         }
       ],
       "x86_64-linux": [
@@ -102,7 +108,10 @@
             "SteamParties002",
             "SteamUser023",
             "SteamUtils010"
-          ]
+          ],
+          "unityVersion": "6000.0.61f1",
+          "unityChangeset": "74a0adb02c31",
+          "unityScripting": "mono"
         }
       ]
     }

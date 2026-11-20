@@ -136,6 +136,11 @@ jobs:
       # hole after a release, as happened twice before this existed.
       - name: cache coverage
         run: ci/cache-audit.sh '${{ matrix.system }}'
+      # Every native-player row of emulators/unity-player against Unity's release API and CDN (one API
+      # call + one HEAD per row; the weekly unity-player-verify.yml does the full download).
+      - name: unity-player rows exist upstream
+        if: matrix.system == 'x86_64-linux'
+        run: ci/unity-player-check.sh
       # The README's supported-games tables are generated data living in prose, so they rot silently —
       # a reader cannot tell a stale cell from a true one. Both hosts' columns come from one evaluation,
       # so this runs once rather than per matrix leg.

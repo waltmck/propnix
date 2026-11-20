@@ -13,19 +13,27 @@ etw-profiler.c, mono-log-common.c: the Windows SDK header spellings as the SDK s
 MSVC-only inline forms the message-compiler output assumes, for clang. boehm-gc.c: the pointer types
 the collector's current headers declare. mixed_callstack_plugin.c: a forward declaration with the
 definition's linkage. oop.c: part of the Windows build (Makefile.am win32_sources), its x64
-dynamic-function-table access compiled only for x64 (the ARM64 port registers its own tables).
+dynamic-function-table access compiled only for x64 proper — on neither ARM64 build: plain ARM64
+(__aarch64__) nor ARM64EC (__arm64ec__, whose compiler presents x64's macros). The ARM64 port registers
+its own tables, and the x64 path's mini.h include trips the GC guard there.
+valgrind.h: a plain-ARM64 Windows branch (mingw-w64 defines __MINGW64__ for every 64-bit target, so
+the amd64 branch and its x86 client-request asm would otherwise be taken) with no client requests; the
+ARM64EC build takes its own branch, from the runtime patch. mini-arm64.c: on plain ARM64 the port's
+non-MSVC stack-probe registration names mingw's x64 probe (___chkstk_ms), which has no AArch64
+definition; a branch trampoline binds that name to mingw's AArch64 probe (__chkstk — the same contract,
+x15 = frame size in 16-byte units, as the JIT emits). The ARM64EC build registers its own probe (the
+runtime patch).
 
 diff --git a/configure.ac b/configure.ac
 index 196e0df1..24a5e0bd 100644
 --- a/configure.ac
 +++ b/configure.ac
-@@ -178,12 +178,34 @@ case "$host" in
+@@ -178,12 +178,33 @@ case "$host" in
  			RID="win-x64"
  			COREARCH="x64"
  			;;
 +		aarch64-*-*)
-+			support_boehm=no
-+			with_gc=sgen
++			# Plain ARM64: the Windows-ARM64 port as Unity's own ARM64 player loads it; Boehm stays on (it is the Unity runtime).
 +			RID="win-arm64"
 +			COREARCH="arm64"
 +			;;
@@ -54,15 +62,16 @@ index 196e0df1..24a5e0bd 100644
  		LDFLAGS="$LDFLAGS $WIN32_LDFLAGS"
  		libmono_cflags="-mms-bitfields -mwindows"
  		libmono_ldflags="-mms-bitfields -mwindows"
-@@ -2137,7 +2159,16 @@ if test "x$support_boehm" = "xyes"; then
+@@ -2137,7 +2159,17 @@ if test "x$support_boehm" = "xyes"; then
  	# TODO: How much of this do we want?
  	#		ac_configure_args="$ac_configure_args --enable-thread-local-alloc=no --enable-parallel-mark=no --enable-verify-defines=yes --enable-gc-threads=yes --with-libatomic-ops=no --enable-no-threads-discovery=yes --enable-single-obj-compilation=yes --enable-gcj-support=yes --enable-threads=$libgc_threads --enable-munmap=yes --enable-mmap=yes --enable-ignore-dynamic-loading=yes --enable-dont-register-main-static-data=yes"
  
 -	ac_configure_args="$ac_configure_args --with-libatomic-ops=no"
 +	case "$host" in
-+		arm64ec-*mingw*)
++		aarch64-*mingw*|arm64ec-*mingw*)
 +			# The bundled libatomic_ops has no ARM64EC backend (it picks its x86 inline-assembly
-+			# sysdeps from __x86_64__); bdwgc's compiler intrinsics path needs nothing from it.
++			# sysdeps from __x86_64__); bdwgc's compiler intrinsics path needs nothing from it, on
++			# either ARM target — one configuration for both.
 +			ac_configure_args="$ac_configure_args --with-libatomic-ops=none"
 +			;;
 +		*)
@@ -72,12 +81,12 @@ index 196e0df1..24a5e0bd 100644
  
  	gc_msg=""
  	LIBGC_CPPFLAGS=
-@@ -2146,6 +2177,14 @@ if test "x$support_boehm" = "xyes"; then
+@@ -2146,6 +2176,14 @@ if test "x$support_boehm" = "xyes"; then
  	case "x$libgc" in
  		xincluded)
  			LIBGC_CPPFLAGS='-I$(top_srcdir)/external/bdwgc/include -I$(top_srcdir)/external/bdwgc/libatomic_ops/src'
 +			case "$host" in
-+				arm64ec-*mingw*)
++				aarch64-*mingw*|arm64ec-*mingw*)
 +					# boehm-gc.c includes bdwgc's private headers; with the sub-configure on compiler
 +					# intrinsics (--with-libatomic-ops=none above) the runtime's compile must say so too,
 +					# or gc_atomic_ops.h pulls libatomic_ops' x86 sysdeps.
@@ -201,7 +210,7 @@ index 92036b11..b4650e24 100644
  
  
 -#ifdef _WIN64
-+#if defined(_WIN64) && !defined(__arm64ec__) /* the x64 dynamic function tables; the ARM64 port keeps its own */
++#if defined(_WIN64) && !defined(__aarch64__) && !defined(__arm64ec__) /* the x64 dynamic function tables; the ARM64 port keeps its own */
  #include <mono/mini/mini.h>
  extern GList* g_dynamic_function_table_begin;
  extern SRWLOCK g_dynamic_function_table_lock;
@@ -210,7 +219,7 @@ index 92036b11..b4650e24 100644
  }
  
 -#ifdef _WIN64
-+#if defined(_WIN64) && !defined(__arm64ec__) /* the x64 dynamic function tables; the ARM64 port keeps its own */
++#if defined(_WIN64) && !defined(__aarch64__) && !defined(__arm64ec__) /* the x64 dynamic function tables; the ARM64 port keeps its own */
  gboolean TryAcquireSpinWait(PSRWLOCK lock, unsigned int spinWait)
  {
      do
@@ -219,7 +228,7 @@ index 92036b11..b4650e24 100644
  mono_unity_lock_dynamic_function_access_tables64(unsigned int spinWait) 
  {
 -#ifdef _WIN64
-+#if defined(_WIN64) && !defined(__arm64ec__) /* the x64 dynamic function tables; the ARM64 port keeps its own */
++#if defined(_WIN64) && !defined(__aarch64__) && !defined(__arm64ec__) /* the x64 dynamic function tables; the ARM64 port keeps its own */
      if (spinWait >= 0x7fffffff) {
          AcquireSRWLockExclusive(&g_dynamic_function_table_lock);
      }
@@ -228,7 +237,7 @@ index 92036b11..b4650e24 100644
  mono_unity_unlock_dynamic_function_access_tables64(void) 
  {
 -#ifdef _WIN64
-+#if defined(_WIN64) && !defined(__arm64ec__) /* the x64 dynamic function tables; the ARM64 port keeps its own */
++#if defined(_WIN64) && !defined(__aarch64__) && !defined(__arm64ec__) /* the x64 dynamic function tables; the ARM64 port keeps its own */
      ReleaseSRWLockExclusive(&g_dynamic_function_table_lock);
  #else
      return;
@@ -237,7 +246,7 @@ index 92036b11..b4650e24 100644
      GList* current) 
  {
 -#ifdef _WIN64
-+#if defined(_WIN64) && !defined(__arm64ec__) /* the x64 dynamic function tables; the ARM64 port keeps its own */
++#if defined(_WIN64) && !defined(__aarch64__) && !defined(__arm64ec__) /* the x64 dynamic function tables; the ARM64 port keeps its own */
      if (current != NULL)
          return read_glist_next(current);
      else
@@ -246,7 +255,7 @@ index 92036b11..b4650e24 100644
      gsize* functionTableSize)
  {
 -#ifdef _WIN64
-+#if defined(_WIN64) && !defined(__arm64ec__) /* the x64 dynamic function tables; the ARM64 port keeps its own */
++#if defined(_WIN64) && !defined(__aarch64__) && !defined(__arm64ec__) /* the x64 dynamic function tables; the ARM64 port keeps its own */
      if (!tableEntry || !moduleStart || !moduleEnd || !functionTable || !functionTableSize)
          return FALSE;
  
@@ -276,3 +285,33 @@ index 155e832d..f0140033 100644
  #endif
  #include "mono-logger-internals.h"
  #include "mono-proclib.h"
+diff --git a/mono/utils/valgrind.h b/mono/utils/valgrind.h
+--- a/mono/utils/valgrind.h
++++ b/mono/utils/valgrind.h
+@@ -128,6 +128,12 @@
+ #  define PLAT_x86_darwin 1
+ #elif defined(__APPLE__) && defined(__x86_64__)
+ #  define PLAT_amd64_darwin 1
++#elif defined(_WIN32) && defined(__aarch64__) && !defined(__arm64ec__)
++/* Windows on ARM64: mingw-w64 defines __MINGW64__ for every 64-bit target, which the amd64 branch
++   below would take; there are no client requests for this platform. */
++#  if !defined(NVALGRIND)
++#    define NVALGRIND 1
++#  endif
+ #elif (defined(__MINGW32__) && !defined(__MINGW64__)) \
+       || defined(__CYGWIN32__) \
+       || (defined(_WIN32) && defined(_M_IX86))
+diff --git a/mono/mini/mini-arm64.c b/mono/mini/mini-arm64.c
+--- a/mono/mini/mini-arm64.c
++++ b/mono/mini/mini-arm64.c
+@@ -31,4 +31,10 @@
+ #include <mono/metadata/marshal-ilgen.h>
+ 
+ #include "interp/interp.h"
++
++#if defined(HOST_WIN32) && defined(__aarch64__) && !defined(__arm64ec__) && !defined(_MSC_VER)
++/* mingw's AArch64 stack probe is `__chkstk` (compiler-rt): x15 = frame size in 16-byte units, x16/x17
++   scratch — the contract the JIT's prolog emits. The registration below names the x64 probe; bind it. */
++__asm__ (".text\n.p2align 2\n.globl ___chkstk_ms\n___chkstk_ms:\n\tb __chkstk\n");
++#endif
+ 

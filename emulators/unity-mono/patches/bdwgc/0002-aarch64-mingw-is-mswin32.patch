@@ -1,0 +1,31 @@
+Subject: [PATCH] gcconfig: a mingw AArch64 target is a Windows (MSWIN32) platform
+
+The AArch64 machine detection declares every host it does not list NOSYS (a bare-metal profile whose stack
+bottom is newlib's __stack_base__), and the Windows detection recognises AArch64 only by MSVC's _M_ARM64.
+A mingw AArch64 compiler defines neither _M_ARM64 nor a listed host, so the collector was configured for
+no OS at all and referenced a symbol nothing on Windows defines. Windows is excluded from the NOSYS rule
+as it already is for ARM32, and the Windows block takes __aarch64__ as it takes _M_ARM64. ARM64EC is
+untouched: that compiler presents x64's macros (__x86_64__, no __aarch64__), and the collector is X86_64
+there.
+
+diff --git a/include/private/gcconfig.h b/include/private/gcconfig.h
+--- a/include/private/gcconfig.h
++++ b/include/private/gcconfig.h
+@@ -148,7 +148,7 @@
+ # if defined(__aarch64__)
+ #    define AARCH64
+ #    if !defined(LINUX) && !defined(DARWIN) && !defined(FREEBSD) \
+-        && !defined(NN_BUILD_TARGET_PLATFORM_NX) && !defined(__QNX__)
++        && !defined(NN_BUILD_TARGET_PLATFORM_NX) && !defined(__QNX__) && !defined(_WIN32)
+ #      define NOSYS
+ #      define mach_type_known
+ #    endif
+@@ -540,7 +540,7 @@
+ #       define X86_64
+ #     elif defined(_M_ARM)
+ #       define ARM32
+-#     elif defined(_M_ARM64)
++#     elif defined(_M_ARM64) || defined(__aarch64__)
+ #       define AARCH64
+ #     else /* _M_IX86 */
+ #       define I386

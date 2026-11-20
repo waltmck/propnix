@@ -4,11 +4,15 @@
 # so one spec covers every combo it has pins for; selection resolves from `platformPreference` (the game's
 # quality ranking, below) × the user's `preferredFetchers`, and `.apply { … }` overrides either axis.
 #
-#   * steam / x86_64-linux   — Steam Linux build via box64 (native aarch64 GL/SDL bridged in). The
-#                              PREFERRED platform: benchmarks measure it a bit ahead of the wine path.
-#   * gog   / x86_64-windows — GOG Galaxy Windows build via wine (aarch64 → FEX + ARM64EC DXVK). The
-#                              sanctioned fallback — a gog-only `preferredFetchers` gets this automatically
-#                              (GOG has no HK Linux pin).
+#   * gog|steam / aarch64-windows — the Windows build on Unity's own NATIVE ARM64 player with our ARM64
+#                              Mono runtime (lib/modules/unity-player.nix pins this pair from the x64 rows):
+#                              the whole process native under wine, nothing emulated. The PREFERRED
+#                              platform; aarch64 hosts only.
+#   * steam / x86_64-linux   — Steam Linux build via box64 (native aarch64 GL/SDL bridged in); the
+#                              default on x86_64, where it runs natively.
+#   * gog   / x86_64-windows — GOG Galaxy Windows build via wine (aarch64 → FEX + ARM64EC DXVK + the
+#                              ARM64EC Mono runtime). A gog-only `preferredFetchers` on x86_64 gets this
+#                              (GOG has no HK Linux pin); on aarch64 it gets gog/aarch64-windows.
 #   * steam / x86_64-windows — Steam Windows build via wine (same wine path; steam.emu union-replaces
 #                              steam_api64.dll instead of stubbing the GOG Galaxy SDK — the "small tweak"
 #                              that differs by fetcher).
@@ -18,8 +22,8 @@
 # pinned pairs. Per-emulator tuning: `box64 = import ./box64-tuning.nix` (only forced by thin backends) and
 # `wine` (only forced by wine) — both set unconditionally, laziness makes the unused one free.
 #
-#   nix run .#hollow-knight                                                             # steam/linux (default resolution)
-#   nix run '.#hollow-knight.apply { emulatedPlatform = "x86_64-windows"; }'            # gog/windows (fetcher re-resolves)
+#   nix run .#hollow-knight                                                             # aarch64: gog/aarch64-windows (native); x86_64: steam/linux
+#   nix run '.#hollow-knight.apply { emulatedPlatform = "x86_64-windows"; }'            # gog/windows, the x64 player under FEX (the A/B)
 #   nix run '.#hollow-knight.apply { fetcher = "steam"; emulatedPlatform = "x86_64-windows"; }'   # steam/windows
 {
   lib,
@@ -47,11 +51,18 @@ mkApp (
     gamescope.scaler = "integer";
     icon.symbolic = ./hollow-knight-symbolic.svg;
 
+    # The two Windows rows also pin `aarch64-windows` (lib/modules/unity-player.nix: their recorded player
+    # version, 6000.0.61f1, is packaged), so three platforms are pinned.
     fetchInfo = (lib.importJSON ./versions.json).fetchInfo;
-    # The game's platform QUALITY ranking (required: two platforms are pinned). Linux-first: on aarch64 the
-    # native-Linux build under box64 benchmarks a bit ahead of the Windows build under wine+FEX/DXVK, and on
-    # x86_64 it runs natively. The Windows rank makes gog-only users fall back to gog/x86_64-windows.
+    # The game's platform QUALITY ranking (required: more than one platform is pinned). The native ARM64
+    # process first — nothing in it is emulated, and the intro video plays, which it does not on the x64
+    # player under FEX (the player decodes it in-process; wine's media path is the same builtin code in
+    # both, so that gap is FEX's) — which only an aarch64 host can run (the resolver skips it elsewhere);
+    # then the Linux build, which runs natively on x86_64 and under box64 on aarch64 a bit ahead of the
+    # x64 Windows build under wine+FEX/DXVK; then that Windows build, which makes gog-only users fall back
+    # to gog/x86_64-windows on x86_64.
     platformPreference = [
+      "aarch64-windows"
       "x86_64-linux"
       "x86_64-windows"
     ];
@@ -81,11 +92,15 @@ mkApp (
       "hollow_knight_Data/Plugins/x86_64/steam_api64.dll"
     ];
 
-    # Unity 6 (the player's version string: 6000.0.61f1), Mono scripting backend. On aarch64 the Windows
-    # combos run the stream's ARM64EC Mono runtime (emulators/unity-mono) in place of the shipped x64 one,
-    # so the game's C# is JIT-compiled to native ARM64 rather than emulated; the Linux combo under box64 is
-    # unaffected (lib/modules/unity-mono.nix).
-    unity.mono.stream = "6000.0";
+    # Unity 6, Mono scripting backend (the pin records the player's version — `unityVersion` on each row).
+    # The aarch64-windows platform runs on Unity's own NATIVE ARM64 player for that release (emulators/
+    # unity-player) with our native ARM64 Mono runtime: the whole process is ARM64 under wine, nothing
+    # is emulated (lib/modules/unity-player.nix). The game's own code is pure IL; its only native pieces
+    # are the Steam shim, which steam-emu places in `Plugins/ARM64/` as the ARM64 gbe_fork, and the GOG
+    # Galaxy stub, bound from the ARM64 target set — both keyed by the platform. HK ≥1.5 reads input
+    # through the Unity Input System, so the vendored x64 InControlNative.dll is never asked for. The
+    # x86_64-windows platform is the x64 player under FEX with the ARM64EC runtime
+    # (lib/modules/unity-mono.nix); the Linux combo under box64 is unaffected by either.
 
     # Save: HK's Unity persistentDataPath, bound out to the persistent propnix save dir. dst is
     # HOME-relative on both backends — the Windows and Linux builds just keep it under different

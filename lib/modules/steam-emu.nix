@@ -62,6 +62,7 @@
   # shims from upstream's release of the same tag. Each is self-contained: nix's cc-wrapper records a
   # RUNPATH covering every dependency, so the thin backends inject nothing on its behalf.
   gbeFork,
+  winPkgs, # the per-target Windows package set: the ARM64 shim for a native-player process (below)
 }:
 { config, ... }:
 let
@@ -91,19 +92,67 @@ let
       "i386-linux" = "${gbeFork.linuxShims.x86}/lib/libsteam_api.so";
       "x86_64-windows" = null;
       "i386-windows" = null;
+      "aarch64-windows" = null;
     }
     .${cfg.emulatedPlatform}
       or (throw "propnix (${cfg.pname}): steam.emu has no gbe_fork shim for emulatedPlatform '${cfg.emulatedPlatform}' — add that ABI to emulators/gbe-fork, or set `steam.emu.enable = false` for this platform.");
   # The PE shims are upstream prebuilt bytes in their own derivation — again by passthru, so a wine game
-  # pulls the two DLLs and nothing else.
+  # pulls the two DLLs and nothing else. The aarch64-windows platform (a native ARM64 process,
+  # modules/unity-player.nix) loads no x64 PE: its `steam_api64.dll` is the from-source ARM64 build
+  # (`winPkgs.aarch64-windows.gbeFork`, emulators/gbe-fork/shim-win.nix). On a host whose set lacks that
+  # target (x86_64) the x64 prebuilt stands in: the package is `meta.broken` there, and the fallback only
+  # keeps the configuration evaluable.
   winShimFor =
     p:
-    {
-      "steam_api64.dll" = "${gbeFork.winPrebuilt}/share/gbe_fork/win/x64/steam_api64.dll";
-      "steam_api.dll" = "${gbeFork.winPrebuilt}/share/gbe_fork/win/x86/steam_api.dll";
-    }
-    .${baseNameOf p}
-    or (throw "propnix (${cfg.pname}): steam.emu.libPaths entry '${p}' has an unrecognized basename — expected steam_api.dll / steam_api64.dll / *.so.");
+    let
+      name = baseNameOf p;
+    in
+    if name == "steam_api64.dll" && cfg.emulatedPlatform == "aarch64-windows" && winPkgs ? "aarch64-windows" then
+      "${winPkgs."aarch64-windows".gbeFork}/lib/steam_api64.dll"
+    else
+      {
+        "steam_api64.dll" = "${gbeFork.winPrebuilt}/share/gbe_fork/win/x64/steam_api64.dll";
+        "steam_api.dll" = "${gbeFork.winPrebuilt}/share/gbe_fork/win/x86/steam_api.dll";
+      }
+      .${name}
+      or (throw "propnix (${cfg.pname}): steam.emu.libPaths entry '${p}' has an unrecognized basename — expected steam_api.dll / steam_api64.dll / *.so.");
+  # WHERE a mirror lands. A native ARM64 Unity player resolves native plugins from `<Data>/Plugins/ARM64/`,
+  # never from the x64 plugin directory a title ships, so the mirror of a `Plugins/<x64 arch>/` path moves
+  # to the ARM64 directory of the same `Plugins/`; a root-level path stays (the exe directory is on every
+  # loader's search path). The SCAN still reads the shipped lib at the declared path — that is where the
+  # interfaces the game names are — and the mirror's directory inherits the declared one's settings
+  # (`settingsAliases`, lib/builders/steam-offline-entitlement.nix).
+  placementOf =
+    p:
+    let
+      parts = lib.splitString "/" p;
+      i = lib.lists.findFirstIndex (c: c == "Plugins") null parts;
+      archDirs = [
+        "x86_64"
+        "x64"
+        "x86"
+        "ARM64"
+        "arm64"
+      ];
+    in
+    if
+      cfg.emulatedPlatform != "aarch64-windows"
+      || i == null
+      || i + 2 >= lib.length parts
+      || !(lib.elem (lib.elemAt parts (i + 1)) archDirs)
+    then
+      p
+    else
+      lib.concatStringsSep "/" (lib.take (i + 1) parts ++ [ "ARM64" ] ++ lib.drop (i + 2) parts);
+  settingsAliases = lib.listToAttrs (
+    lib.concatMap (
+      p:
+      let
+        q = placementOf p;
+      in
+      lib.optional (q != p && builtins.dirOf p != ".") (lib.nameValuePair (builtins.dirOf q) (builtins.dirOf p))
+    ) dllPaths
+  );
   # The SteamStub arm of the same placement (`steam.emu.steamStub`), one entry per declared `.dll` path.
   # gbe_fork's in-memory wrapper patcher is architecture-matched to the shim it rides with; the proxy is
   # built per (arch, shipped name) because its forwarder table is generated from THAT shim's exports.
@@ -191,10 +240,13 @@ let
     mirror =
       lib.throwIfNot (unknownPaths == [ ])
         "propnix (${cfg.pname}): steam.emu.libPaths entries with unrecognized suffix (need .so or .dll): ${toString unknownPaths}"
-        (lib.genAttrs dllPaths winShimFor);
+        (lib.listToAttrs (map (p: lib.nameValuePair (placementOf p) (winShimFor p)) dllPaths));
+    inherit settingsAliases;
     # OPT-IN, per title: a proxy in front of every mirrored dll is only correct for a payload whose exe is
     # actually SteamStub-wrapped, and it is one more moving part everywhere else.
-    stubProxies = lib.optionalAttrs cfg.steam.emu.steamStub (lib.genAttrs dllPaths winStubFor);
+    stubProxies = lib.optionalAttrs cfg.steam.emu.steamStub (
+      lib.listToAttrs (map (p: lib.nameValuePair (placementOf p) (winStubFor p)) dllPaths)
+    );
     steamOffline = cfg.steam.emu.offline;
     scanner = gbeFork.generateInterfaces;
     oracle = gbeFork.interfaceOracle;

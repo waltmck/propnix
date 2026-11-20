@@ -23,6 +23,10 @@
   mkSteamOfflineEntitlement,
   gbeFork,
   mkUnityMonoTree,
+  unityMono, # emulators/unity-mono's ARM64EC runtimes (null on x86_64 hosts)
+  winPkgs, # the per-target Windows package set (lib/default.nix): what a native-player process loads
+  unityPlayer, # emulators/unity-player: Unity's native ARM64 player per release (unfree; pure eval here)
+  mkUnityPlayerTree,
   propnixConfig, # the validated instantiation config (lib/default.nix): { preferredFetchers = [ … ]; }
 }:
 spec:
@@ -45,16 +49,34 @@ let
       knobTypes
       mkSteamOfflineEntitlement
       gbeFork
+      winPkgs
       ;
   };
 
-  # The `unity.mono.*` namespace: a declared Unity stream puts emulators/unity-mono's ARM64EC runtime over
-  # the payload on aarch64 wine hosts (modules/unity-mono.nix).
-  unityMono = import ./modules/unity-mono.nix {
+  # The `unity.*` facts of a Unity title (player version, changeset, scripting backend), read off the
+  # selected fetch row as `propnix pin` recorded them (modules/unity.nix).
+  unityFacts = import ./modules/unity.nix { inherit lib knobTypes; };
+  # The `unity.mono.*` namespace: the pinned stream's ARM64EC runtime over the payload on aarch64 wine
+  # hosts (modules/unity-mono.nix).
+  unityMonoModule = import ./modules/unity-mono.nix {
     inherit
       lib
       stdenv
       mkUnityMonoTree
+      unityMono
+      ;
+  };
+  # The `unity.player.*` namespace: the title's native ARM64 platform (`aarch64-windows`, pinned from the
+  # x64 rows where Unity's player is packaged) served by that player and our ARM64 runtime — the whole
+  # process native under wine on aarch64 (modules/unity-player.nix).
+  unityPlayerModule = import ./modules/unity-player.nix {
+    inherit
+      lib
+      knobTypes
+      fetchers
+      winPkgs
+      unityPlayer
+      mkUnityPlayerTree
       ;
   };
 
@@ -64,7 +86,9 @@ let
       modules = [
         appOptions
         steamEmu
-        unityMono
+        unityFacts
+        unityMonoModule
+        unityPlayerModule
       ]
       ++ lib.concatMap (b: b.modules) (lib.attrValues backends)
       ++ [ spec ]

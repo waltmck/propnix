@@ -270,4 +270,24 @@ noncomment() { grep -n "$1" "$2" | grep -v ':[[:space:]]*#' || true; }
 grep -q 'state=open' "$here/pin-issue.sh" || fail "the lookup must constrain to state=open"
 echo "  ok  17. no reopen path, no search-index lookup, state=open enforced"
 
-echo "pin-issue-test: all 17 transitions OK"
+# ── 18. a Unity version move says whether the native player follows (PIN_UNITY_PLAYERS) ─────────────
+cat > "$work/unity.json" <<'EOF'
+{ "game": "hollow-knight", "upToDate": false, "blocked": false, "detail": null,
+  "frozen": false, "pinnedTo": null, "policyReason": null,
+  "changes": [ { "where": "fetchInfo.gog.x86_64-windows[0]", "pname": "hollow-knight-win",
+                 "key": "unityVersion", "from": "6000.0.61f1", "to": "6000.0.70f1", "version": "1.5.78" } ] }
+EOF
+body=$(PIN_UNITY_PLAYERS="6000.0.61f1" "$here/pin-issue.sh" render hollow-knight "$work/unity.json")
+grep -q 'moves to \*\*6000.0.70f1\*\*, which `emulators/unity-player` does \*\*not\*\* package' <<<"$body" \
+  || fail "an unpackaged Unity version must be called out as missing a player row"
+body=$(PIN_UNITY_PLAYERS="6000.0.61f1 6000.0.70f1" "$here/pin-issue.sh" render hollow-knight "$work/unity.json")
+grep -q 'moves to \*\*6000.0.70f1\*\*, which `emulators/unity-player` packages' <<<"$body" \
+  || fail "a packaged Unity version must be reported as followed by the player"
+body=$("$here/pin-issue.sh" render hollow-knight "$work/unity.json")
+grep -q 'moves to \*\*6000.0.70f1\*\* — check that' <<<"$body" \
+  || fail "without PIN_UNITY_PLAYERS the note must only ask for a check, not claim a verdict"
+body=$(PIN_UNITY_PLAYERS="6000.0.61f1" "$here/pin-issue.sh" render factorio "$work/check.json")
+grep -q 'Unity moves' <<<"$body" && fail "a pin with no unityVersion change must carry no Unity note"
+echo "  ok  18. a Unity version move reports the player row status"
+
+echo "pin-issue-test: all 18 transitions OK"

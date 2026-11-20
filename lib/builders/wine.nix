@@ -38,6 +38,14 @@
   pname,
   appid,
   name ? pname,
+  # The D3D translation layers the launcher hands wine, for the PROCESS's architecture (the backend
+  # entry chooses from `winPkgs`); the scope's host-default pair otherwise.
+  d3d ? {
+    inherit dxvk vkd3d;
+  },
+  # The app's emulatedPlatform: only the informational `backend` string below reads it (an
+  # aarch64-windows process runs with no emulator in the path).
+  platform ? null,
   # The game tree(s): head = the primary tree (C:\game, the launch cwd). A wine build is normally ONE tree;
   # extra trees (co-base depots) union read-only above it exactly like DLC — never silently dropped.
   payloads,
@@ -297,8 +305,9 @@ let
   splashIcon = if iconTree != null then "${iconTree}/share/propnix/${iconName}.png" else null;
 
   # Informational: which emulation the scope wired for this host (aarch64 = wine+FEX/ARM64EC, x86_64 =
-  # native wine). The launcher does NOT branch on this — its behaviour is arch-identical.
-  backend = if stdenv.hostPlatform.isAarch64 then "winefex" else "wine";
+  # native wine; a native ARM64 process on aarch64 runs with no emulator in the path at all). The launcher
+  # does NOT branch on this — its behaviour is arch-identical.
+  backend = if stdenv.hostPlatform.isAarch64 && platform != "aarch64-windows" then "winefex" else "wine";
 
   # The unified `env` folds into seal.setEnv — but the launcher OWNS some vars (env.rs skips/recomputes
   # them, or they'd break the sealed profile), so those are an eval-time error, not a silent no-op.
@@ -402,8 +411,8 @@ let
         # (`${prefixLower}/drive_c/windows`, …), which is all the launcher needs — it warms the ASSEMBLED
         # prefix's PE modules from inside the mount ns, never the store tree. (`deny_unknown_fields`: adding it
         # back here without the matching launcher field is a hard load error.)
-        dxvk = "${dxvk}";
-        vkd3d = "${vkd3d}";
+        dxvk = "${d3d.dxvk}";
+        vkd3d = "${d3d.vkd3d}";
         # `tar` for the linked propnix_mount to extract overlay `skeleton` tars (sparse + xattr aware).
         tar = "${gnutar}/bin/tar";
         # The nested compositor the game runs inside (gamescope.rs): `bin/gamescope` + its WSI layer's `share`.

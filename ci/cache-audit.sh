@@ -119,13 +119,38 @@ sort -u -o "$covered_drvs" "$covered_drvs"
 # Assign first, THEN split: `mapfile` reports success even when the command feeding it failed, which is
 # how an empty package list would otherwise be audited to a clean pass.
 games_json=$(nixq --apply 'builtins.attrNames' ".#legacyPackages.$sys.games") || exit 1
+# The scope's top-level derivations PLUS the per-target Windows PE set (`winPkgs.<target>.<pkg>`,
+# lib/win-toolchain.nix): a nested attr is as much a package of ours as a top-level one, and would
+# otherwise escape the policy unseen. The scope-machinery names inside each target set (callPackage,
+# newScope, the toolchain record) are not derivations and drop out of the same filter.
 attrs_json=$(nixq --apply '
-  s: let l = builtins.attrNames s; in builtins.filter (n:
-    let v = builtins.tryEval (s.${n}.type or null); in v.success && v.value == "derivation") l
+  s: let
+    isDrv = v: let r = builtins.tryEval (v.type or null); in r.success && r.value == "derivation";
+    top = builtins.filter (n: isDrv s.${n}) (builtins.attrNames s);
+    win = builtins.concatMap (t:
+      builtins.concatMap (p: if isDrv s.winPkgs.${t}.${p} then [ "winPkgs.${t}.${p}" ] else [ ])
+        (builtins.attrNames s.winPkgs.${t})
+    ) (builtins.attrNames (s.winPkgs or { }));
+  in top ++ win
 ' ".#legacyPackages.$sys") || exit 1
 mapfile -t games < <(jqr '.[]' <<<"$games_json")
 mapfile -t attrs < <(jqr '.[]' <<<"$attrs_json")
 [ ${#attrs[@]} -gt 0 ] || die "the scope enumerated NO derivations — the audit would pass vacuously"
+
+# Unity's native player (emulators/unity-player) is proprietary and must never be credited to a cachix
+# job: every derivation of the set is unfree, and no workflow attr names the set. Asserted explicitly,
+# because the set is nested (`unityPlayer.<target>.<version>.<variant>`) and would otherwise escape the
+# enumeration above unseen in either direction.
+players_json=$(nixq --apply '
+  u: builtins.concatLists (map (t: builtins.concatLists (map (v: map (x: {
+    attr = "unityPlayer.${t}.${v}.${x}"; unfree = u.${t}.${v}.${x}.meta.unfree or false;
+  }) u.variants) (builtins.attrNames u.versions))) (builtins.attrNames u.targets))
+' ".#legacyPackages.$sys.unityPlayer") || exit 1
+jq -e 'length > 0 and all(.unfree)' <<<"$players_json" >/dev/null ||
+  die "emulators/unity-player must be unfree in every row, but: $(jq -c '[.[] | select(.unfree | not) | .attr]' <<<"$players_json")"
+for a in "${covered[@]}"; do
+  case "$a" in unityPlayer*) die "$workflow names '$a' — Unity's player is proprietary and is never pushed to the cache" ;; esac
+done
 
 gaps=() unknown=()
 for a in "${attrs[@]}"; do

@@ -2101,7 +2101,7 @@ pub fn hash_depot(
     branch: &str,
     auth: Auth,
     opts: &crate::pin::gog::HashOpts,
-) -> Result<(String, nar::Stats, Vec<FileEntry>, PinAnchors), Box<dyn std::error::Error>> {
+) -> Result<HashedDepot, Box<dyn std::error::Error>> {
     // Request codes are single-use and short-lived, so they are fetched together immediately before
     // use. Asking for the previous manifest's code in the same session is what makes the rollback
     // check cost one small extra GET rather than a second login. No cache anchors here on purpose:
@@ -2184,8 +2184,20 @@ pub fn hash_depot(
     let mut last_pct = 0u64;
     let progress = opts.progress;
     let mut next = || dedup.next(|| pf.next_chunk());
+    // The Unity player binary, if the depot ships one, is scanned for its version as it streams past:
+    // a copy of just that file (tens of MB) rides beside the hash, so a re-pin records the fact for free.
+    let mut unity: Option<crate::pin::unity::Facts> = None;
     let (sri, stats) = nar::nar_hash(&tree, |idx, w| {
-        steam_write(&files[*idx], &mut next, &mut seen, w)?;
+        let f = &files[*idx];
+        if crate::pin::unity::is_player(&f.path) {
+            let mut tee = crate::pin::unity::Tee::new(w);
+            steam_write(f, &mut next, &mut seen, &mut tee)?;
+            if unity.is_none() {
+                unity = crate::pin::unity::scan_player(&tee.buf);
+            }
+        } else {
+            steam_write(f, &mut next, &mut seen, w)?;
+        }
         if progress {
             let pct = seen
                 .checked_mul(100)
@@ -2207,7 +2219,26 @@ pub fn hash_depot(
     // A supersede is deliberately last: worst case on failure is the cache briefly holding both manifests.
     // (No-op when this run took the cache path — nothing new was written — but harmless.)
     crate::pin::steamcache::supersede_manifests(depot_id, &[manifest_id]);
-    Ok((sri, stats, files, anchors))
+    let scripting = crate::pin::unity::scripting_of(files.iter().map(|f| f.path.as_str()));
+    Ok(HashedDepot {
+        sri,
+        stats,
+        anchors,
+        unity,
+        scripting,
+    })
+}
+
+/// What hashing a depot yields: the NAR hash and its statistics, the cache anchors the FOD can later
+/// take the loginless path with, and the Unity facts read off the stream.
+pub struct HashedDepot {
+    pub sri: String,
+    pub stats: nar::Stats,
+    pub anchors: PinAnchors,
+    /// The player's version and changeset, when the depot ships a Unity player binary.
+    pub unity: Option<crate::pin::unity::Facts>,
+    /// The scripting backend the file list implies, when the depot is a Unity build.
+    pub scripting: Option<crate::pin::unity::Scripting>,
 }
 
 /// Download a pinned depot to `dir` — the same pipeline as `hash_depot`, with files as the sink.
@@ -2495,7 +2526,7 @@ pub fn hash_depot_any(
     previous: Option<u64>,
     branch: &str,
     opts: &crate::pin::gog::HashOpts,
-) -> Result<(String, nar::Stats, Vec<FileEntry>, PinAnchors), Box<dyn std::error::Error>> {
+) -> Result<HashedDepot, Box<dyn std::error::Error>> {
     let creds = credentials_from_store(&opts.credential_dir, opts.steam_account.as_deref())?;
     crate::pin::try_accounts(
         &creds,
@@ -3129,10 +3160,20 @@ pub fn acquire_any(
     )
 }
 
-/// The depot's SDK fingerprint: fetch ONLY its steam_api libraries (`write_depot` with a path filter —
-/// a few hundred KiB out of a multi-GB depot), scan each, union. A depot that ships none (a DLC or
-/// data-only depot) fingerprints as the empty list — recorded as such, which is distinct from a row
-/// pinned before this field existed.
+/// A depot's fingerprint: what `fingerprint_depot_any` reads off its shipped libraries.
+pub struct Fingerprint {
+    /// Every interface revision its steam_api libraries name (empty for a depot shipping none — a DLC
+    /// or data-only depot — recorded as such, which is distinct from a row pinned before the field existed).
+    pub interfaces: Vec<String>,
+    /// The Unity player's version and changeset, when the depot ships one.
+    pub unity: Option<crate::pin::unity::Facts>,
+    /// The scripting backend the manifest's file list implies, when the depot is a Unity build.
+    pub scripting: Option<crate::pin::unity::Scripting>,
+}
+
+/// The depot's fingerprint: fetch ONLY its steam_api libraries and its Unity player binary
+/// (`write_depot` with a path filter — a few hundred KiB, or tens of MB for the player, out of a
+/// multi-GB depot), scan each. The scripting backend needs no bytes at all: it is read off the manifest.
 pub fn fingerprint_depot_any(
     app_id: u32,
     depot_id: u32,
@@ -3140,41 +3181,65 @@ pub fn fingerprint_depot_any(
     branch: &str,
     anchors: Option<(&str, &str)>,
     opts: &crate::pin::gog::HashOpts,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+) -> Result<Fingerprint, Box<dyn std::error::Error>> {
     let access = acquire_any(app_id, depot_id, manifest_id, branch, anchors, opts)?;
     let agent = http_agent();
     let files = access.manifest(&agent, manifest_id)?.files;
+    let scripting = crate::pin::unity::scripting_of(files.iter().map(|f| f.path.as_str()));
     let paths: Vec<String> = files
         .iter()
-        .filter(|f| f.size != u64::MAX && is_steam_api_lib(&f.path))
+        .filter(|f| {
+            f.size != u64::MAX && (is_steam_api_lib(&f.path) || crate::pin::unity::is_player(&f.path))
+        })
         .map(|f| f.path.clone())
         .collect();
     if paths.is_empty() {
-        eprintln!("      fingerprint: depot ships no steam_api library");
-        return Ok(Vec::new());
+        eprintln!("      fingerprint: depot ships no steam_api library and no Unity player");
+        return Ok(Fingerprint {
+            interfaces: Vec::new(),
+            unity: None,
+            scripting,
+        });
     }
     let dir = std::env::temp_dir().join(format!(
         "propnix-fingerprint-{depot_id}-{}",
         std::process::id()
     ));
     std::fs::create_dir_all(&dir)?;
-    // Quiet: the progress bar belongs to the hash that ran just before this; the fetch is tiny.
+    // Quiet: the progress bar belongs to the hash that ran just before this; the fetch is small.
     let quiet = opts.quiet();
-    let scanned = (|| -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let scanned = (|| -> Result<Fingerprint, Box<dyn std::error::Error>> {
         write_depot(access, manifest_id, &dir, &quiet, &paths)?;
         let mut set = std::collections::BTreeSet::new();
+        let mut unity = None;
         for p in &paths {
             let bytes = std::fs::read(dir.join(p))
                 .map_err(|e| format!("reading fetched {p}: {e}"))?;
-            set.extend(scan_steam_api_interfaces(&bytes));
+            if is_steam_api_lib(p) {
+                set.extend(scan_steam_api_interfaces(&bytes));
+            } else if unity.is_none() {
+                unity = crate::pin::unity::scan_player(&bytes);
+            }
         }
-        Ok(set.into_iter().collect())
+        Ok(Fingerprint {
+            interfaces: set.into_iter().collect(),
+            unity,
+            scripting,
+        })
     })();
     let _ = std::fs::remove_dir_all(&dir);
     let fp = scanned?;
     eprintln!(
-        "      fingerprint: {} interface revision(s) from {}",
-        fp.len(),
+        "      fingerprint: {} interface revision(s){} from {}",
+        fp.interfaces.len(),
+        match &fp.unity {
+            Some(u) => format!(
+                ", Unity {} ({})",
+                u.version,
+                u.changeset.as_deref().unwrap_or("no changeset")
+            ),
+            None => String::new(),
+        },
         paths.join(", ")
     );
     Ok(fp)

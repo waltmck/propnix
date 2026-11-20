@@ -2,8 +2,9 @@
 # over the payload: `<runtimePath>` (by default MonoBleedingEdge/EmbedRuntime/mono-2.0-bdwgc.dll) and
 # nothing else, for lib/modules/unity-mono.nix to union into the game dir above the payloads.
 #
-# The tree is built per game, from the payload's own bytes, and checks the declaration it embodies:
-#   1. The player's version string must begin with the declared stream. UnityPlayer.dll carries
+# The tree is built per game, from the payload's own bytes, and checks the pinned facts it embodies:
+#   1. The player's version string must equal the pinned `unity.version` (and so begin with the stream
+#      the runtime is packaged for). UnityPlayer.dll carries
 #      `<major>.<minor>.<patch><type><n> (<hash>)` as UTF-16 from 2022.3 on and as ASCII in older
 #      players (whose UTF-16 copy is `<version>_<hash>`); the anchored, hash-suffixed form is tried
 #      first because the players also carry decoy version-like strings (`5.0.0a1`, `2018.3.0a1`). A runtime
@@ -22,7 +23,8 @@
 }:
 {
   pname,
-  stream,
+  stream, # `<major>.<minor>` of `version` — which packaged runtime to use
+  version, # the pinned `unity.version` the player must report, verbatim
   payloads, # the game's payload store trees; the player and the shipped runtime are looked up in each
   playerPath, # game-dir-relative path of UnityPlayer.dll
   runtimePath, # game-dir-relative path of the runtime the player loads
@@ -31,7 +33,7 @@ let
   known = lib.attrNames unityMono.streams;
   runtime =
     unityMono.streams.${stream}
-      or (throw "propnix (${pname}): unity.mono.stream = \"${stream}\" names no packaged stream — emulators/unity-mono has ${lib.concatStringsSep ", " known}");
+      or (throw "propnix (${pname}): the pinned Unity version's stream \"${stream}\" is not packaged — emulators/unity-mono has ${lib.concatStringsSep ", " known}");
 in
 runCommand "${pname}-unity-mono-${stream}-arm64ec"
   {
@@ -41,7 +43,12 @@ runCommand "${pname}-unity-mono-${stream}-arm64ec"
     ];
     playerCandidates = map (p: "${p}/${playerPath}") payloads;
     runtimeCandidates = map (p: "${p}/${runtimePath}") payloads;
-    inherit stream runtime runtimePath;
+    inherit
+      stream
+      version
+      runtime
+      runtimePath
+      ;
   }
   ''
     player=""; shipped=""
@@ -62,10 +69,17 @@ runCommand "${pname}-unity-mono-${stream}-arm64ec"
       [ -n "$ver" ] && break
     done
     [ -n "$ver" ] || { echo "propnix (${pname}): no Unity version string in $player"; exit 1; }
+    # The pinned fact must be what the player says: a row that records another version would select a
+    # runtime for the wrong release line, and a player from another line faults at launch.
+    pinnedVersion=''${ver% (*}
+    [ "$pinnedVersion" = "$version" ] || {
+      echo "propnix (${pname}): the player is Unity $pinnedVersion, but the pin records unityVersion = $version."
+      echo "         Re-run \`propnix pin ${pname} --fingerprint\` to record what the payload actually ships."
+      exit 1
+    }
     playerStream=$(printf '%s' "$ver" | cut -d. -f1-2)
     [ "$playerStream" = "$stream" ] || {
-      echo "propnix (${pname}): the player is Unity $ver (stream $playerStream), but unity.mono.stream declares $stream."
-      echo "         A runtime from another stream does not fit this player; declare \"$playerStream\" (packaged: ${lib.concatStringsSep ", " known})."
+      echo "propnix (${pname}): the player is Unity $ver (stream $playerStream), but the runtime is the $stream one."
       exit 1
     }
 

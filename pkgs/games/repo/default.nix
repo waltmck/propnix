@@ -29,10 +29,9 @@ mkApp {
   exe = "REPO.exe";
   # Full-color icon auto-extracted from the exe's PE resources (icon.auto default).
 
-  # Unity 2022.3 (the player's version string, above), Mono scripting backend: on aarch64 the stream's
+  # Unity 2022.3 (the pin records the player's version), Mono scripting backend: on aarch64 the stream's
   # ARM64EC Mono runtime (emulators/unity-mono) replaces the shipped x64 one in the game dir, so the
   # game's C# is JIT-compiled to native ARM64 rather than emulated (lib/modules/unity-mono.nix).
-  unity.mono.stream = "2022.3";
 
   # `online` stays at its default (true): a co-op game built on Photon (a hosted relay plus voice
   # chat), so a netns would remove the game. `.apply { online = false; }` gives a single-player,

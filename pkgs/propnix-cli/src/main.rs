@@ -98,11 +98,13 @@ struct PinArgs {
     /// Only report whether upstream has moved, as JSON. Anonymous — needs no credential.
     #[arg(long, conflicts_with_all = ["recompute", "latest", "new", "stdout"])]
     check: bool,
-    /// Record each Steam row's `steamApiInterfaces` — the interface revisions its shipped steam_api
-    /// libraries name — WITHOUT moving any pin. Fetches only those libraries (login-free where the
-    /// row's cache anchors are warm). `pin` and `pin --new` record the field as they go; this
-    /// backfills rows pinned before it existed, or re-derives one from real bytes on demand. Rows no
-    /// stored account can fetch are reported blocked (exit 4) after every other row is written.
+    /// Record the facts read off each row's payload WITHOUT moving any pin: a Steam row's
+    /// `steamApiInterfaces` (the interface revisions its shipped steam_api libraries name), and every
+    /// Unity build's `unityVersion`/`unityChangeset`/`unityScripting` (either store). Fetches only the
+    /// files it reads (login-free on Steam where the row's cache anchors are warm; GOG's file list is
+    /// anonymous, the player's chunks need a token). `pin` and `pin --new` record the fields as they go;
+    /// this backfills rows pinned before a field existed, or re-derives one from real bytes on demand.
+    /// Rows no stored account can fetch are reported blocked (exit 4) after every other row is written.
     #[arg(long, conflicts_with_all = ["check", "recompute", "latest", "new", "stdout"])]
     fingerprint: bool,
     /// Write the new document to stdout instead of rewriting versions.json in place.
@@ -501,7 +503,7 @@ fn cmd_pin(a: PinArgs) -> Result<(), Box<dyn std::error::Error>> {
         land(&opts, &doc, false, false)?;
         if !blocked.is_empty() {
             return Err(Box::new(pin::Blocked::NotOwned(format!(
-                "{} Steam row(s) could not be fingerprinted by any stored account: {}",
+                "{} row(s) could not be fingerprinted by any stored account: {}",
                 blocked.len(),
                 blocked.join("; ")
             ))));
@@ -797,7 +799,7 @@ fn cmd_hash(what: HashCmd) -> Result<(), Box<dyn std::error::Error>> {
             // such a build is refused with the current repository build named. (`propnix pin` passes
             // `UseCurrent` instead — it MAINTAINS the recorded value rather than asserting it.)
             let deps = deps_build_id.map(gog::DepsPin::Expect);
-            let (sri, stats, plan) = gog::hash_build(
+            let h = gog::hash_build(
                 &product_id,
                 &build_id,
                 &os,
@@ -806,6 +808,7 @@ fn cmd_hash(what: HashCmd) -> Result<(), Box<dyn std::error::Error>> {
                 deps.as_ref(),
                 &opts,
             )?;
+            let (sri, stats, plan) = (h.sri, h.stats, h.plan);
             eprintln!(
                 "  installDirectory={:?} {} files, {} dirs, {} content bytes",
                 plan.install_directory, stats.files, stats.dirs, stats.content_bytes
@@ -838,7 +841,7 @@ fn cmd_hash(what: HashCmd) -> Result<(), Box<dyn std::error::Error>> {
                 opts.gog_account.as_deref(),
                 opts.steam_account.as_deref(),
             )?;
-            let (sri, stats, _, _anchors) = if anonymous {
+            let h = if anonymous {
                 steam::hash_depot(
                     app,
                     depot,
@@ -851,6 +854,7 @@ fn cmd_hash(what: HashCmd) -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 steam::hash_depot_any(app, depot, manifest, None, &branch, &opts)?
             };
+            let (sri, stats) = (h.sri, h.stats);
             eprintln!(
                 "  {} files, {} dirs, {} content bytes",
                 stats.files, stats.dirs, stats.content_bytes

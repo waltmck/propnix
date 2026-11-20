@@ -86,6 +86,13 @@
   # (`withDlc`). The DLC rides the same base `buildId`/`productId` (GOG bundles DLC depots into the base
   # build), so pin those plus this `dlcId`. null → the normal base-game fetch.
   dlcId ? null,
+  # The Unity facts `propnix pin` reads off the build's player binary and file list (pin/unity.rs):
+  # the player's version string and changeset, and the scripting backend (mono | il2cpp). Row data
+  # consumed at EVAL time by lib/modules/unity.nix; surfaced through passthru, never the derivation
+  # env, so an existing FOD's drvPath is unmoved by their arrival on its row.
+  unityVersion ? null,
+  unityChangeset ? null,
+  unityScripting ? null,
 }:
 # GOG `version` strings are free-form (spaces, parens, dates, e.g. "1.0(A)"); sanitize for the store name.
 # The download is determined by buildId, not this string — it's provenance / the derivation name only.
@@ -96,6 +103,16 @@ runCommand (lib.strings.sanitizeDerivationName "${pname}-${version}")
     meta = {
       license = lib.licenses.unfree;
       sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
+    };
+
+    # Eval-only identity for consumers (passthru never enters the derivation env).
+    passthru = {
+      inherit
+        version
+        unityVersion
+        unityChangeset
+        unityScripting
+        ;
     };
 
     nativeBuildInputs = [

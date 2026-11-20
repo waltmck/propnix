@@ -94,21 +94,74 @@ pkgs.lib.makeScope pkgs.newScope (
       llvmMingw = if isAarch64 then llvmMingw else null; # aarch64: the x64 runtime slot gets an ARM64EC build
     };
     prefixLower = callPackage ../emulators/wine-prefix-lower.nix { }; # RO system tree; FEX DLLs only on aarch64 (fexdlls ? null); CLR from wineMono
-    # Unity's Mono runtime (`mono-2.0-bdwgc.dll`) as ARM64EC PEs, one per Unity stream, for Windows Unity
-    # titles under wine+FEX: a game declares its stream (`unity.mono.stream`, lib/modules/unity-mono.nix)
-    # and the stream's build is unioned over the payload. aarch64 only; null on x86_64, where the shipped
-    # x64 runtime runs natively.
-    unityMono = if isAarch64 then callPackage ../emulators/unity-mono { inherit llvmMingw; } else null;
-    dxvk =
-      if isAarch64 then
-        callPackage ../emulators/dxvk-arm64ec.nix { } # native ARM64EC PE
-      else
-        callPackage ../emulators/dxvk-x86_64.nix { dxvk = pkgs.dxvk; }; # nixpkgs mingwW64 PE, flattened
-    vkd3d =
-      if isAarch64 then
-        callPackage ../emulators/vkd3d-proton-arm64ec.nix { }
-      else
-        callPackage ../emulators/vkd3d-proton-x86_64.nix { };
+    # ── Windows PE packages, PER TARGET PLATFORM: `winPkgs.<target>.<pkg>` is the same expression
+    #    instantiated with that target's cross toolchain (lib/win-toolchain.nix has the vocabulary —
+    #    x86_64-windows / i386-windows / aarch64-windows / aarch64ec-windows — and the per-host toolchain
+    #    split). A consumer indexes the set by the PROCESS platform it serves, which is the game's own
+    #    arch today and the native ARM64 player's when lib/modules/unity-player.nix swaps the engine.
+    #    Targets this host cannot produce (the ARM ones on x86_64) are absent; a package with no build for
+    #    a target is null there. The aliases below are the host's default-process-target views, which
+    #    every existing consumer and CI attr reads.
+    winToolchains = import ./win-toolchain.nix {
+      inherit lib pkgs;
+      llvmMingw = if isAarch64 then llvmMingw else null;
+    };
+    winPkgs = lib.mapAttrs (
+      target: toolchain:
+      lib.makeScope pkgs.newScope (ws: {
+        inherit target toolchain;
+        # Graceful no-op GOG Galaxy SDK stubs: every target, since the stub matches the importing process.
+        galaxyStub = ws.callPackage ../emulators/galaxy-stub { };
+        # DXVK / vkd3d-proton: the ARM targets from source with llvm-mingw; x86_64 as nixpkgs' mingwW64
+        # build, flattened — on x86_64 hosts only, the one place that process target is served (a
+        # cross-build of it on aarch64 would be a derivation no job caches, for a process this host never
+        # runs natively).
+        dxvk =
+          if lib.hasPrefix "aarch64" target then
+            ws.callPackage ../emulators/dxvk-llvm-mingw.nix { }
+          else if target == "x86_64-windows" && !isAarch64 then
+            callPackage ../emulators/dxvk-x86_64.nix { dxvk = pkgs.dxvk; }
+          else
+            null;
+        vkd3d =
+          if lib.hasPrefix "aarch64" target then
+            ws.callPackage ../emulators/vkd3d-proton-llvm-mingw.nix { }
+          else if target == "x86_64-windows" && !isAarch64 then
+            callPackage ../emulators/vkd3d-proton-x86_64.nix { }
+          else
+            null;
+        # Unity's Mono runtime (`mono-2.0-bdwgc.dll`), one build per Unity stream, for the ARM targets:
+        # ARM64EC replaces the shipped x64 runtime under wine+FEX (lib/modules/unity-mono.nix), plain
+        # ARM64 serves the native player. The x64 runtime is what games ship.
+        unityMono = if lib.hasPrefix "aarch64" target then ws.callPackage ../emulators/unity-mono { } else null;
+        # gbe_fork's Windows Steam-API shim: upstream's prebuilt release for the x86 targets
+        # (`share/gbe_fork/win/{x64,x86}/`, the layout lib/modules/steam-emu.nix indexes).
+        # The Steam shim: upstream's prebuilt x64/x86 PEs for the x86 targets (emulators/gbe-fork,
+        # `winPrebuilt`), and for plain ARM64 — which upstream ships no release for — the from-source twin of
+        # the Linux shims (shim-win.nix), its libraries built static for the target (win-deps.nix). ARM64EC
+        # has none: the hybrid stack runs x64 games, whose loader takes the x64 prebuilt.
+        gbeFork =
+          if target == "x86_64-windows" || target == "i386-windows" then
+            gbeFork.winPrebuilt
+          else if target == "aarch64-windows" then
+            ws.callPackage ../emulators/gbe-fork/shim-win.nix {
+              inherit (gbeFork.linuxShims.${if isAarch64 then "aarch64" else "x64"}) src version libssq;
+              winDeps = ws.callPackage ../emulators/gbe-fork/win-deps.nix { };
+              winPrebuilt = gbeFork.winPrebuilt;
+            }
+          else
+            null;
+      })
+    ) (lib.filterAttrs (_: t: t != null) winToolchains);
+    # The host's default process target for a Windows game's D3D layer: the hybrid ARM64EC DLLs beside the
+    # x64 game under wine+FEX on aarch64, nixpkgs' x64 DLLs on x86_64.
+    unityMono = winPkgs."aarch64ec-windows".unityMono or null;
+    # Unity's own native ARM64 Windows player per Unity version (emulators/unity-player; unfree, never
+    # cached) — what lib/modules/unity-player.nix swaps a title's x64 player for. Pure evaluation on every
+    # host; only an aarch64 wine build of an enabled title references a player.
+    unityPlayer = callPackage ../emulators/unity-player { };
+    dxvk = winPkgs.${if isAarch64 then "aarch64ec-windows" else "x86_64-windows"}.dxvk;
+    vkd3d = winPkgs.${if isAarch64 then "aarch64ec-windows" else "x86_64-windows"}.vkd3d;
     # The nested compositor every game runs inside (both arches, native), with its WSI layer in the same
     # output. Pass nixpkgs' gamescope explicitly (else callPackage resolves `gamescope` from this scope →
     # itself → infinite recursion).
@@ -219,10 +272,17 @@ pkgs.lib.makeScope pkgs.newScope (
     # The game-dir tree carrying a stream's ARM64EC Unity runtime over the payload (unityMono above),
     # checked against the payload's own player at build time; lib/modules/unity-mono.nix's output.
     mkUnityMonoTree = callPackage ./builders/unity-mono-tree.nix { };
+    # Its native-player sibling: the tree carrying Unity's ARM64 player, our ARM64 runtime and the
+    # declared ARM64 plugins over the payload (unityPlayer above); lib/modules/unity-player.nix's output.
+    mkUnityPlayerTree = callPackage ./builders/unity-player-tree.nix { };
     # The baked GL/Vulkan fallback stack (mesa + discovery paths) both backends hand the launcher; takes
     # the app's `mesa` knob (null → nixpkgs mesa as a fallback; a derivation → forced). See its header.
     mkFallbackGl = callPackage ./builders/gl-fallback.nix { };
-    wineDefaults = callPackage ./backends/wine/defaults.nix { }; # the base wine tuning layer; override to re-base all games
+    # The base wine tuning layer; override to re-base all games. The Galaxy stub trees per PE target, so a
+    # row binds the stub of the PROCESS that imports it (winPkgs above).
+    wineDefaults = callPackage ./backends/wine/defaults.nix {
+      galaxyStubs = lib.mapAttrs (_: s: s.galaxyStub) winPkgs;
+    };
 
     # ── icons ── three SOURCES, one output layout (hicolor theme + share/propnix/<id>.png splash):
     extractPeIcon = callPackage ./icons/from-pe.nix { }; # a Windows exe's PE resources, at their true sizes
@@ -251,18 +311,16 @@ pkgs.lib.makeScope pkgs.newScope (
 
     # Graceful no-op GOG Galaxy SDK DLLs (Galaxy64/Galaxy/pops_api), bound over a game's bundled copies so a
     # statically-imported online SDK never reaches GOG's services — the same offline policy as masking
-    # Steam's steam_api64.dll. ARCH-INDEPENDENT: the stubs are x86_64/i386 PEs matching the GAME, so both
-    # hosts want them. On aarch64 they build with the ARM64EC toolchain that leg already carries; on x86_64
-    # that toolchain does not exist (it is a prebuilt pinned to the aarch64-hosted release), so the stub
-    # falls back to nixpkgs' ordinary cross-mingw GCC — see emulators/galaxy-stub for the whole argument.
-    galaxyStub = callPackage ../emulators/galaxy-stub {
-      llvmMingw = if isAarch64 then llvmMingw else null;
-      mingwGccW64 = pkgs.pkgsCross.mingwW64.stdenv.cc;
-      mingwGcc32 = pkgs.pkgsCross.mingw32.stdenv.cc;
-      # nixpkgs' cross-mingw GCC is configured with the mcfgthread threading model, so its driver adds a
-      # bare `-lmcfgthread` that the bare cc wrapper cannot resolve on its own. Hand the lib dirs in.
-      mingwThreads64 = pkgs.pkgsCross.mingwW64.windows.mcfgthreads;
-      mingwThreads32 = pkgs.pkgsCross.mingw32.windows.mcfgthreads;
+    # Steam's steam_api64.dll. The x86 games' view: the x86_64 and i386 targets' stubs joined into one tree
+    # (`Galaxy64.dll`, `pops_api.dll`, `Galaxy.dll`), which both hosts build (emulators/galaxy-stub for the
+    # whole argument). A native ARM64 process reads `winPkgs.aarch64-windows.galaxyStub` instead.
+    galaxyStub = pkgs.symlinkJoin {
+      name = "galaxy-stub";
+      paths = [
+        winPkgs."x86_64-windows".galaxyStub
+        winPkgs."i386-windows".galaxyStub
+      ];
+      meta.description = "Graceful no-op GOG Galaxy SDK stubs (Galaxy64.dll/Galaxy.dll/pops_api.dll) for wine";
     };
   }
   // games # spread each game top-level as scope.<name> (so `inherit (scope) <name>` + cross-refs resolve)

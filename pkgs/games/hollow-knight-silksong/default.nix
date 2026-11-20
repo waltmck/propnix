@@ -54,10 +54,14 @@ mkApp {
   # the probe, the measured boots with the SDK live, and the mount-table hang this title was once blamed
   # for are in docs/research/silksong-galaxy-and-boot.md.
 
-  # Unity 6 (player 6000.0.50f1, a Unity-internal branch build), Mono scripting backend: on aarch64 the
-  # stream's ARM64EC Mono runtime (emulators/unity-mono) replaces the shipped x64 one in the game dir, as
-  # for Hollow Knight (lib/modules/unity-mono.nix).
-  unity.mono.stream = "6000.0";
+  # Unity 6 (a Unity-internal branch build of the player — the pin records its version,
+  # 6000.0.50f1-uum-100966-branch1), Mono scripting backend: on aarch64 the stream's ARM64EC Mono runtime
+  # (emulators/unity-mono) replaces the shipped x64 one in the game dir, as for Hollow Knight
+  # (lib/modules/unity-mono.nix). No NATIVE platform yet: Unity publishes no module for a branch build,
+  # and a public player loads only data whose per-type layout hashes match its own — the branch's
+  # PlayerSettings/PhysicsManager hashes match no public release's, retagged or not
+  # (docs/research/unity-arm64-player.md). A future patch of this title built on a public release gets
+  # the aarch64-windows pair automatically once that release has a row (lib/modules/unity-player.nix).
 
   wine = lib.mkMerge [
     (presets.unity.framePacing "Software\\Team Cherry\\Hollow Knight Silksong")

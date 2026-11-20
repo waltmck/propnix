@@ -34,10 +34,15 @@
 # a new title needs them. The ABI strategy + the C bodies each symbol aliases to are documented in
 # `src/galaxy_stub.c` (and pops in `src/pops_stub.c`).
 #
-# ARCH. The stub DLLs match the GAME's arch, not the host: a game's Galaxy64.dll is x86_64, so wine's loader
-# resolves the import against x86_64 (even on aarch64/ARM64EC, where the tiny stub then runs emulated — its
-# cost is nil). So these are x86_64 (+ i386) PEs. BOTH hosts wire this in — see lib/default.nix and
-# lib/builders/wine.nix.
+# ONE TARGET PER BUILD. The stub DLLs match the PROCESS that imports them, never the host: a game's x64 exe
+# resolves `Galaxy64.dll` as x64 (on aarch64 the tiny stub then runs emulated — its cost is nil), and a
+# native ARM64 player (lib/modules/unity-player.nix) resolves it as ARM64. So this expression is
+# instantiated once per target through `winPkgs.<target>` (lib/win-toolchain.nix has the vocabulary and the
+# per-host toolchain split); the 64-bit targets emit `Galaxy64.dll` + `pops_api.dll`, the i386 one
+# `Galaxy.dll`. The scope's `galaxyStub` joins the x86_64 and i386 trees into the layout every x86 game's
+# bind rows read (lib/backends/wine/defaults.nix). MSVC's 64-bit name mangling (PEAV/PEBV far encoding) is
+# the same on every 64-bit target, so one `.def` serves them all; the 32-bit names derive from it by the
+# pointer-encoding transform.
 #
 # 32-BIT CALLERS CANNOT USE THIS. The whole design rests on one uniform vtable of zero-argument slots
 # standing in for interfaces of unknown arity, which is only ABI-valid where the CALLER cleans the stack.
@@ -46,45 +51,16 @@
 # (docs/research/galaxy-sdk-offline.md). lib/backends/wine/defaults.nix therefore refuses
 # `galaxyStubDlls` on i386 titles, which use `online = false` for the offline guarantee.
 # Galaxy.dll is still built: prison-architect (a 64-bit exe) binds a 32-bit copy it never loads.
-#
-# The GalaxyFactory / api:: exports are MSVC-mangled (64-bit uses PEAV/PEBV far-encoding, 32-bit PAV/PBV),
-# aliased to the plain C bodies via a .def EXPORTS list generated below by `classify` (the 32-bit names are
-# derived from the 64-bit ones by the well-defined pointer-encoding transform).
-#
-# TOOLCHAIN, and why there are two. The stubs are plain C targeting x86_64 + i386 Windows — nothing here
-# is ARM64EC — so ANY mingw cross-compiler can build them. Which one we get depends on the host:
-#   * aarch64: `llvmMingw` already exists there (the ARM64EC toolchain wine/DXVK/vkd3d need), so building
-#     with it is free.
-#   * x86_64: that toolchain does NOT exist — `emulators/llvm-mingw` is `llvm-mingw-arm64ec`, a prebuilt
-#     pinned to the aarch64-HOSTED release and grafted with an ARM64EC exit-thunk patch whose clang build
-#     links multi-GB objects. Dragging it in to produce three tiny stubs would be absurd, so the x86_64 leg
-#     uses nixpkgs' ordinary cross-mingw GCC (`pkgsCross.mingwW64` / `pkgsCross.mingw32`), which is cached.
 {
   lib,
   runCommand,
-  # The ARM64EC toolchain: present on aarch64, null on x86_64.
-  llvmMingw ? null,
-  # nixpkgs cross-mingw GCCs, used when llvmMingw is absent. Derivations, not paths.
-  mingwGccW64 ? null,
-  mingwGcc32 ? null,
-  # mcfgthreads import libs for those GCCs (their driver emits a bare -lmcfgthread).
-  mingwThreads64 ? null,
-  mingwThreads32 ? null,
   python3,
+  toolchain, # the target's lib/win-toolchain.nix record (the scope injects it)
+  target,
 }:
 let
-  useLlvm = llvmMingw != null;
-  cc64 =
-    if useLlvm then
-      "${llvmMingw}/bin/x86_64-w64-mingw32-clang"
-    else
-      "${mingwGccW64}/bin/x86_64-w64-mingw32-gcc -L${mingwThreads64}/lib";
-  cc32 =
-    if useLlvm then
-      "${llvmMingw}/bin/i686-w64-mingw32-clang"
-    else
-      "${mingwGcc32}/bin/i686-w64-mingw32-gcc -L${mingwThreads32}/lib";
-  llvmAr = lib.optionalString useLlvm "${llvmMingw}/bin/llvm-ar";
+  is32 = target == "i386-windows";
+  useLlvm = toolchain.kind == "llvm";
 
   # Pin the C/symbol sources to a CONTENT-ADDRESSED store path (keyed only by src/'s bytes, not the flake
   # source), so unrelated repo edits never rebuild the stub — only touching src/ does.
@@ -106,13 +82,12 @@ let
     name = "reindex-ar.py";
   };
 in
-runCommand "galaxy-stub"
+runCommand "galaxy-stub-${target}"
   {
-    nativeBuildInputs = [
-      llvmMingw
-      python3
-    ];
-    meta.description = "Graceful no-op GOG Galaxy SDK stubs (Galaxy64.dll/Galaxy.dll/pops_api.dll) for wine";
+    nativeBuildInputs = toolchain.nativeBuildInputs ++ [ python3 ];
+    meta.description = "Graceful no-op GOG Galaxy SDK stubs (${
+      if is32 then "Galaxy.dll" else "Galaxy64.dll/pops_api.dll"
+    }) for wine, ${target}";
   }
   ''
     set -euo pipefail
@@ -151,30 +126,39 @@ runCommand "galaxy-stub"
       echo "$sym32 = $impl" >> galaxy32.def
     done < ${srcDir}/symbols64.txt
 
-    # ── 64-bit stubs (Galaxy64.dll, pops_api.dll) ──────────────────────────────────────────────────
-    ${cc64} -O2 -shared -o "$out/Galaxy64.dll" ${srcDir}/galaxy_stub.c galaxy64.def
-    ${cc64} -O2 -shared -o "$out/pops_api.dll" ${srcDir}/pops_stub.c
-
-    # ── 32-bit stub (Galaxy.dll) — reindex the i386 builtins only if they actually need it ────────────
-    # Skipped when the archive has no duplicate members (true on the pinned release). Kept gated,
-    # not unconditional: re-archiving is not free of risk — doing it to the ARM64EC builtins on this
-    # same toolchain DESTROYS EC symbol resolution, because it flattens the `obj.arm64ec/` member
-    # paths upstream uses to disambiguate (RESEARCH §22).
-    rt_args=()
-    ${lib.optionalString useLlvm ''
-      i386_rt="$(ls ${toString llvmMingw}/lib/clang/*/lib/windows/libclang_rt.builtins-i386.a | head -1)"
-      if [ "$(${llvmAr} t "$i386_rt" | sort | uniq -d | wc -l)" != 0 ]; then
-        echo "i386 builtins have duplicate member names — reindexing for __alloca"
-        mkdir -p rt386
-        python3 ${reindexPy} "$i386_rt" rt386
-        ( cd rt386 && ${llvmAr} rcs libclang_rt.builtins-i386.a $(cat MANIFEST) )
-        rt_args=(-Wl,--start-group,"$PWD/rt386/libclang_rt.builtins-i386.a",--end-group)
+    ${
+      if !is32 then
+        ''
+          # ── 64-bit stubs (Galaxy64.dll, pops_api.dll) ────────────────────────────────────────────────
+          ${toolchain.cc} -O2 -shared -o "$out/Galaxy64.dll" ${srcDir}/galaxy_stub.c galaxy64.def
+          ${toolchain.cc} -O2 -shared -o "$out/pops_api.dll" ${srcDir}/pops_stub.c
+          ${toolchain.checkPe} "$out/Galaxy64.dll" "$out/pops_api.dll"
+        ''
       else
-        echo "i386 builtins index is upstream-correct — linking without the reindex workaround"
-      fi
-    ''}
-    # NB the whole block above is llvm-mingw-specific: it guards against a BROKEN ARCHIVE INDEX in
-    # that toolchain's i386 compiler-rt builtins. GCC's mingw32 has no such archive and no such bug,
-    # so the x86_64 leg links straight through with an empty rt_args.
-    ${cc32} -O2 -shared -o "$out/Galaxy.dll" ${srcDir}/galaxy_stub.c galaxy32.def "''${rt_args[@]}"
+        ''
+          # ── 32-bit stub (Galaxy.dll) — reindex the i386 builtins only if they actually need it ────────
+          # Skipped when the archive has no duplicate members (true on the pinned release). Kept gated,
+          # not unconditional: re-archiving is not free of risk — doing it to the ARM64EC builtins on this
+          # same toolchain DESTROYS EC symbol resolution, because it flattens the `obj.arm64ec/` member
+          # paths upstream uses to disambiguate (RESEARCH §22).
+          rt_args=()
+          ${lib.optionalString useLlvm ''
+            i386_rt="$(ls ${toolchain.root}/lib/clang/*/lib/windows/libclang_rt.builtins-i386.a | head -1)"
+            if [ "$(${toolchain.ar} t "$i386_rt" | sort | uniq -d | wc -l)" != 0 ]; then
+              echo "i386 builtins have duplicate member names — reindexing for __alloca"
+              mkdir -p rt386
+              python3 ${reindexPy} "$i386_rt" rt386
+              ( cd rt386 && ${toolchain.ar} rcs libclang_rt.builtins-i386.a $(cat MANIFEST) )
+              rt_args=(-Wl,--start-group,"$PWD/rt386/libclang_rt.builtins-i386.a",--end-group)
+            else
+              echo "i386 builtins index is upstream-correct — linking without the reindex workaround"
+            fi
+          ''}
+          # NB the whole block above is llvm-mingw-specific: it guards against a BROKEN ARCHIVE INDEX in
+          # that toolchain's i386 compiler-rt builtins. GCC's mingw32 has no such archive and no such bug,
+          # so the x86_64 host links straight through with an empty rt_args.
+          ${toolchain.cc} -O2 -shared -o "$out/Galaxy.dll" ${srcDir}/galaxy_stub.c galaxy32.def "''${rt_args[@]}"
+          ${toolchain.checkPe} "$out/Galaxy.dll"
+        ''
+    }
   ''

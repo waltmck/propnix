@@ -11,7 +11,7 @@
 //! recomputing the hash needs the credential.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::sync::Mutex;
 
 use serde_json::Value;
@@ -1430,38 +1430,7 @@ pub fn download_build(
     // has no use for its shape — chunks land wherever the CDN answers first.)
     let _ = tree(&plan)?;
 
-    let products: Vec<String> = plan
-        .files
-        .iter()
-        .map(|f| f.product.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let creds = gog_credentials(&opts.credential_dir, opts.gog_account.as_deref())?;
-    let cdn = crate::pin::try_accounts(
-        &creds,
-        |c| c.account.clone(),
-        gog_is_not_owned,
-        |tried, refusals: Vec<GogError>| {
-            // Preserve the class: if any account failed to authenticate, this is a credential problem, not
-            // a definitive "no account owns this" (that account might own it but could not log in).
-            let last = refusals.last().map(|e| e.to_string()).unwrap_or_default();
-            exhausted_gog(
-                format!(
-                    "no stored GOG account can fetch build {build_id} of {product_id}{} (tried: {}). \
-                     Last refusal: {last}",
-                    dlc_id.map(|d| format!(" DLC {d}")).unwrap_or_default(),
-                    tried.join(", ")
-                ),
-                &refusals,
-            )
-        },
-        |c| {
-            let cdn = Cdn::new(Some(c.refresh_token.clone()));
-            cdn.warm(&products)?;
-            Ok(cdn)
-        },
-    )?;
+    let cdn = cdn_for(&products_of(&plan), product_id, build_id, dlc_id, opts)?;
 
     let mut written = download::Written::default();
     // An empty directory is part of the tree the pin hashes, so it must exist even though no file creates it.
@@ -1578,7 +1547,7 @@ pub fn hash_build(
     dlc_id: Option<&str>,
     deps: Option<&DepsPin>,
     opts: &HashOpts,
-) -> Result<(String, nar::Stats, Plan), Box<dyn std::error::Error>> {
+) -> Result<HashedBuild, Box<dyn std::error::Error>> {
     let plan = plan(product_id, build_id, os, lang, dlc_id, deps)?;
     let total: u64 = plan.files.iter().map(|f| f.size).sum();
     let tree = tree(&plan)?;
@@ -1621,18 +1590,90 @@ pub fn hash_build(
     let items: Vec<(String, Chunk)> = fetch.iter().map(|&i| occ[i].clone()).collect();
     let sizes: Vec<u64> = fetch.iter().map(|&i| occ_sizes[i]).collect();
 
-    // TRY EVERY STORED ACCOUNT, like the fetcher does (see `pin::try_accounts` for the policy).
-    // `Cdn::warm` is what makes this cheap: `secure_link` IS the ownership gate, so resolving it here
-    // settles the question before a single content byte moves.
-    let products: Vec<String> = plan
-        .files
+    let cdn = cdn_for(&products_of(&plan), product_id, build_id, dlc_id, opts)?;
+
+    let cdn = std::sync::Arc::new(cdn);
+    let pf = crate::pin::engine::ordered(
+        cdn,
+        crate::pin::engine::Work { items, sizes },
+        opts.workers,
+        opts.window_bytes,
+        crate::pin::engine::Tuning::default(),
+    )?;
+
+    let mut seen = 0u64;
+    let mut last_pct = 0u64;
+    let progress = opts.progress;
+    // The Unity player binary, if the build ships one, is scanned for its version as it streams past:
+    // a copy of just that file (tens of MB) rides beside the hash, so a re-pin records the fact for free.
+    let mut unity: Option<crate::pin::unity::Facts> = None;
+    let (sri, stats) = nar::nar_hash(&tree, |idx, w| {
+        let f = &plan.files[*idx];
+        let is_player = crate::pin::unity::is_player(&f.path);
+        let mut tee = crate::pin::unity::Tee::new(w);
+        for _ in 0..f.chunks.len() {
+            let data = dedup
+                .next(|| pf.next_chunk())
+                .map_err(nar::NarError::Fetch)?;
+            seen += data.len() as u64;
+            if is_player {
+                tee.write_all(&data)?;
+            } else {
+                tee.inner_mut().write_all(&data)?;
+            }
+        }
+        if is_player && unity.is_none() {
+            unity = crate::pin::unity::scan_player(&tee.buf);
+        }
+        if progress {
+            let pct = seen
+                .checked_mul(100)
+                .and_then(|n| n.checked_div(total))
+                .unwrap_or(100);
+            if pct > last_pct {
+                last_pct = pct;
+                eprint!("\r  {pct:3}%  {} / {} MiB", seen >> 20, total >> 20);
+            }
+        }
+        Ok(())
+    })?;
+    if progress {
+        eprintln!();
+    }
+    let scripting = crate::pin::unity::scripting_of(plan.files.iter().map(|f| f.path.as_str()));
+    Ok(HashedBuild {
+        sri,
+        stats,
+        plan,
+        unity,
+        scripting,
+    })
+}
+
+/// The products whose `secure_link` a plan's chunks are served through, deduplicated.
+fn products_of(plan: &Plan) -> Vec<String> {
+    plan.files
         .iter()
         .map(|f| f.product.clone())
         .collect::<BTreeSet<_>>()
         .into_iter()
-        .collect();
+        .collect()
+}
+
+/// A CDN resolver that can serve these products — TRY EVERY STORED ACCOUNT, like the fetcher does (see
+/// `pin::try_accounts` for the policy). `Cdn::warm` is what makes this cheap: `secure_link` IS the
+/// ownership gate, so resolving it here settles the question before a single content byte moves. The
+/// Cdn holds the REFRESH token: an access token minted now would expire long before a large title
+/// finishes hashing. One implementation for hashing, downloading and the fingerprint's single-file fetch.
+fn cdn_for(
+    products: &[String],
+    product_id: &str,
+    build_id: &str,
+    dlc_id: Option<&str>,
+    opts: &HashOpts,
+) -> R<Cdn> {
     let creds = gog_credentials(&opts.credential_dir, opts.gog_account.as_deref())?;
-    let cdn = crate::pin::try_accounts(
+    crate::pin::try_accounts(
         &creds,
         |c| c.account.clone(),
         gog_is_not_owned,
@@ -1651,51 +1692,119 @@ pub fn hash_build(
             )
         },
         |c| {
-            // The Cdn holds the REFRESH token: an access token minted now would expire long before a
-            // large title finishes hashing.
             let cdn = Cdn::new(Some(c.refresh_token.clone()));
-            cdn.warm(&products)?;
+            cdn.warm(products)?;
             Ok(cdn)
         },
-    )?;
+    )
+}
 
-    let cdn = std::sync::Arc::new(cdn);
+/// ONE file of a planned build, in memory: its chunks fetched in manifest order and joined — a GOG file
+/// is exactly that (see `download_build`). For a shim-sized probe out of a multi-GB build (the Unity
+/// player binary, tens of MB); nothing touches disk. Only that file's product is warmed.
+fn fetch_file_bytes(
+    plan: &Plan,
+    idx: usize,
+    product_id: &str,
+    build_id: &str,
+    opts: &HashOpts,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let f = &plan.files[idx];
+    let cdn = cdn_for(&[f.product.clone()], product_id, build_id, None, opts)?;
+    let items: Vec<(String, Chunk)> = f.chunks.iter().map(|c| (f.product.clone(), c.clone())).collect();
+    let sizes: Vec<u64> = f.chunks.iter().map(|c| c.size).collect();
     let pf = crate::pin::engine::ordered(
-        cdn,
+        std::sync::Arc::new(cdn),
         crate::pin::engine::Work { items, sizes },
         opts.workers,
         opts.window_bytes,
         crate::pin::engine::Tuning::default(),
     )?;
-
-    let mut seen = 0u64;
-    let mut last_pct = 0u64;
-    let progress = opts.progress;
-    let (sri, stats) = nar::nar_hash(&tree, |idx, w| {
-        let f = &plan.files[*idx];
-        for _ in 0..f.chunks.len() {
-            let data = dedup
-                .next(|| pf.next_chunk())
-                .map_err(nar::NarError::Fetch)?;
-            seen += data.len() as u64;
-            w.write_all(&data)?;
-        }
-        if progress {
-            let pct = seen
-                .checked_mul(100)
-                .and_then(|n| n.checked_div(total))
-                .unwrap_or(100);
-            if pct > last_pct {
-                last_pct = pct;
-                eprint!("\r  {pct:3}%  {} / {} MiB", seen >> 20, total >> 20);
-            }
-        }
-        Ok(())
-    })?;
-    if progress {
-        eprintln!();
+    let mut out = Vec::with_capacity(f.size as usize);
+    for _ in 0..f.chunks.len() {
+        out.extend_from_slice(&pf.next_chunk()?);
     }
-    Ok((sri, stats, plan))
+    if out.len() as u64 != f.size {
+        return Err(format!(
+            "{}: fetched {} bytes, manifest says {}",
+            f.path,
+            out.len(),
+            f.size
+        )
+        .into());
+    }
+    Ok(out)
+}
+
+/// The Unity facts of a pinned build WITHOUT hashing it: the scripting backend from the (anonymous)
+/// file list, the player's version from a fetch of that one file. For `propnix pin --fingerprint`, the
+/// backfill of rows pinned before the facts were recorded. A build that ships no Unity player answers
+/// `(None, None)`; a DLC build never does (the caller skips DLC rows).
+pub fn fingerprint_build(
+    product_id: &str,
+    build_id: &str,
+    os: &str,
+    lang: &str,
+    opts: &HashOpts,
+) -> Result<
+    (
+        Option<crate::pin::unity::Facts>,
+        Option<crate::pin::unity::Scripting>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    // UseCurrent: the dependency repository's state is irrelevant to a probe of the game's own files,
+    // and `None` would refuse the builds that install a dependency into the game dir.
+    let plan = plan(
+        product_id,
+        build_id,
+        os,
+        lang,
+        None,
+        Some(&DepsPin::UseCurrent),
+    )?;
+    let _ = tree(&plan)?;
+    // The base product's files only: the dependency store's (`redist`) and GOG's support files are
+    // never a Unity player, and must not make a non-Unity title look like one.
+    let own = |f: &FileInfo| f.product == product_id;
+    let scripting = crate::pin::unity::scripting_of(
+        plan.files.iter().filter(|f| own(f)).map(|f| f.path.as_str()),
+    );
+    let Some(idx) = plan
+        .files
+        .iter()
+        .position(|f| own(f) && crate::pin::unity::is_player(&f.path))
+    else {
+        eprintln!("      fingerprint: build ships no Unity player");
+        return Ok((None, scripting));
+    };
+    let bytes = fetch_file_bytes(&plan, idx, product_id, build_id, &opts.quiet())?;
+    let facts = crate::pin::unity::scan_player(&bytes);
+    match &facts {
+        Some(f) => eprintln!(
+            "      fingerprint: Unity {} ({}) from {}",
+            f.version,
+            f.changeset.as_deref().unwrap_or("no changeset"),
+            plan.files[idx].path
+        ),
+        None => eprintln!(
+            "      fingerprint: {} carries no recognisable Unity version string",
+            plan.files[idx].path
+        ),
+    }
+    Ok((facts, scripting))
+}
+
+/// What hashing a build yields: the NAR hash and its statistics, the resolved plan (its dependency
+/// build id travels on it), and the Unity facts read off the stream.
+pub struct HashedBuild {
+    pub sri: String,
+    pub stats: nar::Stats,
+    pub plan: Plan,
+    /// The player's version and changeset, when the build ships a Unity player binary.
+    pub unity: Option<crate::pin::unity::Facts>,
+    /// The scripting backend the file list implies, when the build is a Unity title.
+    pub scripting: Option<crate::pin::unity::Scripting>,
 }
 
 #[cfg(test)]

@@ -30,7 +30,9 @@
 #
 # Requires: gh (authenticated via GH_TOKEN), jq. GH_REPO may name the repo when not run from a checkout.
 # Optional env, injected by the workflow so this script never evaluates nix itself: PIN_DETAIL (the
-# updater's own message) and PIN_MAINTAINERS (ready-to-render "@handle …" maintainer mentions).
+# updater's own message), PIN_MAINTAINERS (ready-to-render "@handle …" maintainer mentions) and
+# PIN_UNITY_PLAYERS (the Unity versions emulators/unity-player packages a native player for, space-
+# separated — so a pin that moves a title's Unity version can say whether the player follows).
 set -euo pipefail
 
 LABEL="${PROPNIX_PIN_LABEL:-pin-outdated}"
@@ -182,6 +184,20 @@ render_body() {
     printf '| pin | field | from | to | version |\n|---|---|---|---|---|\n'
     jq -r '.changes[] | "| `\(.where)` | `\(.key)` | `\(.from)` | `\(.to)` | \(.version // "—") |"' "$json"
     printf '\n'
+    # A Unity version move: the native ARM64 player (emulators/unity-player) follows the pin only through
+    # a row per release, and lib/tests/resolution.nix fails the update until the row exists. Said here,
+    # with the packaged versions the workflow hands over; without that list, only that it must be checked.
+    jq -r '.changes[] | select(.key == "unityVersion") | .to' "$json" | sort -u | while read -r uv; do
+      [ -n "$uv" ] || continue
+      if [ -z "${PIN_UNITY_PLAYERS+x}" ]; then
+        printf 'Unity moves to **%s** — check that `emulators/unity-player` has a row for it (the native ARM64 player follows the pin only through one).\n\n' "$uv"
+      else
+        case " $PIN_UNITY_PLAYERS " in
+          *" $uv "*) printf 'Unity moves to **%s**, which `emulators/unity-player` packages — the native ARM64 player follows the pin.\n\n' "$uv" ;;
+          *) printf 'Unity moves to **%s**, which `emulators/unity-player` does **not** package: add its row (the file header has the recipe), or the `config-resolution` gate fails the update until it exists.\n\n' "$uv" ;;
+        esac
+      fi
+    done
   else
     # A BLOCKED check resolved nothing, so there is no before/after to tabulate — the explanation above
     # is the whole story. Rendering an empty table would read as "nothing changed", which is the

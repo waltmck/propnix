@@ -112,6 +112,12 @@ jobs:
         run: |
           nix eval --json '.#ci.x86_64-linux.maintainers' > "$RUNNER_TEMP/pins/maintainers.json" \
             || echo '{}' > "$RUNNER_TEMP/pins/maintainers.json"
+      # The Unity versions a native ARM64 player is packaged for (emulators/unity-player): a pin that moves
+      # a title's Unity version gets told in its issue whether the player follows. Same best-effort rule.
+      - name: Look up packaged Unity players
+        run: |
+          nix eval --json '.#unityPlayer.versions' --apply builtins.attrNames > "$RUNNER_TEMP/pins/unity-players.json" \
+            || echo '[]' > "$RUNNER_TEMP/pins/unity-players.json"
 
       # Missing secrets are a SKIP, not a failure: a repo with only the GOG credential set should still
       # refresh its GOG games every week and quietly leave the Steam ones alone.
@@ -179,6 +185,7 @@ jobs:
             # as ready-to-render "@handle"s — pin-issue.sh stays free of any nix evaluation.
             PIN_DETAIL=$(jq -r --arg g "$game" '.[] | select(.game == $g) | .detail' "$out/summary.json") \
             PIN_MAINTAINERS=$(jq -r --arg g "$game" '.[$g] // [] | map("@" + .) | join(" ")' "$out/maintainers.json") \
+            PIN_UNITY_PLAYERS=$(jq -r 'join(" ")' "$out/unity-players.json") \
               ci/pin-issue.sh open-or-edit "$game" "$out/$game.check.json"
             echo "::endgroup::"
           done

@@ -5,9 +5,9 @@
         {
           "pname": "witcher-3-win",
           "productId": "1495134320",
-          "buildId": "60108119997011548",
-          "version": "5.01",
-          "outputHash": "sha256-owaNM4UArwgBm+tYEkM9IQuyJFOe8DBafxLD6/5YQsQ=",
+          "buildId": "60169728249993014",
+          "version": "5.01c",
+          "outputHash": "sha256-VCETPovgWo+Xs6UkK5kTKTdUqDcWqdYQG9mXWZ3ZbqU=",
           "outputHashMode": "recursive",
           "os": "windows",
           "lang": "en",

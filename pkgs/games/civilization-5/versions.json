@@ -300,11 +300,11 @@
       "pname": "civilization-5-8932",
       "appId": 8930,
       "depotId": 8932,
-      "manifestId": "1500173799562188053",
-      "version": "4390913",
-      "outputHash": "sha256-hX7+WtEWsKcCPajDq6+UhwV8RbMns2KoPwOti52flsY=",
+      "manifestId": "4917473860950460669",
+      "version": "26577625",
+      "outputHash": "sha256-IUZaZ8VFMYvOZzJt9HzK19cmCQdjKJfBWTxbWNgcFf0=",
       "depotKeySha256": "567b69ae04f0fe4c9f3ea98b365e2204def6eb68aa0be88e3ced51c575f9ba7b",
-      "manifestSha256": "21425d8f6eb36de596144e77e3ef25af8c13cb20bbe5b8e7a75917988660b093",
+      "manifestSha256": "ea0e8fe7a183e7794192e2add2d447bb7de666fa983adf6b0be0e03d342346e4",
       "title": "Sid Meier's Civilization V (windows executables — pinned ONLY as the icon source, Steam)",
       "steamApiInterfaces": []
     }

@@ -133,7 +133,11 @@ pkgs.lib.makeScope pkgs.newScope (
         # Unity's Mono runtime (`mono-2.0-bdwgc.dll`), one build per Unity stream, for the ARM targets:
         # ARM64EC replaces the shipped x64 runtime under wine+FEX (lib/modules/unity-mono.nix), plain
         # ARM64 serves the native player. The x64 runtime is what games ship.
-        unityMono = if lib.hasPrefix "aarch64" target then ws.callPackage ../emulators/unity-mono { } else null;
+        unityMono =
+          if lib.hasPrefix "aarch64" target then
+            ws.callPackage ../emulators/unity-mono { inherit unityMonoPins; }
+          else
+            null;
         # gbe_fork's Windows Steam-API shim: upstream's prebuilt release for the x86 targets
         # (`share/gbe_fork/win/{x64,x86}/`, the layout lib/modules/steam-emu.nix indexes).
         # The Steam shim: upstream's prebuilt x64/x86 PEs for the x86 targets (emulators/gbe-fork,
@@ -156,6 +160,8 @@ pkgs.lib.makeScope pkgs.newScope (
     # The host's default process target for a Windows game's D3D layer: the hybrid ARM64EC DLLs beside the
     # x64 game under wine+FEX on aarch64, nixpkgs' x64 DLLs on x86_64.
     unityMono = winPkgs."aarch64ec-windows".unityMono or null;
+    # Source metadata is available on both hosts, so x86_64 pin refreshes also validate ARM64EC coverage.
+    unityMonoPins = import ../emulators/unity-mono/sources.nix { };
     # Unity's own native ARM64 Windows player per Unity version (emulators/unity-player; unfree, never
     # cached) — what lib/modules/unity-player.nix swaps a title's x64 player for. Pure evaluation on every
     # host; only an aarch64 wine build of an enabled title references a player.

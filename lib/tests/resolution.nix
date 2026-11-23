@@ -28,6 +28,21 @@ let
     fetcher = "gog";
     emulatedPlatform = "aarch64-windows";
   };
+  # Controlled pin facts: stream parsing and missing-runtime errors must not depend on a game's
+  # current upstream release. Keep real fetch arguments so the refusal is also tested through drvPath.
+  unityFixture =
+    version: scripting:
+    hkWin.apply {
+      fetchInfo.gog."x86_64-windows" = map (
+        row:
+        row
+        // {
+          unityVersion = version;
+          unityScripting = scripting;
+        }
+      ) hkWin.config.fetchInfo.gog."x86_64-windows";
+    };
+  unpackagedUnity = unityFixture "9999.1.0f1" "mono";
   linuxB = if isAarch64 then "box64" else "native";
 
   # 1. The expected triple per game under the DEFAULT config (all fetchers enabled, registry order).
@@ -150,10 +165,37 @@ let
       in
       hk.version == "6000.0.61f1" && hk.changeset == "74a0adb02c31" && hk.scripting == "mono";
     unity-stream-is-derived =
-      dflt.repo.config.unity.stream == "2022.3"
-      && dflt.hollow-knight.config.unity.stream == "6000.0"
+      (unityFixture "2022.3.1f1" "mono").config.unity.stream == "2022.3"
+      && (unityFixture "6000.0.1f1" "mono").config.unity.stream == "6000.0"
+      && (unityFixture "6000.3.1f1" "mono").config.unity.stream == "6000.3"
       && dflt.stellaris.config.unity.version == null
       && dflt.stellaris.config.unity.stream == null;
+    # Check every pinned Windows fetcher, including those not selected by default. Forcing the list
+    # spine runs the module's coverage check without evaluating any overlay derivations or payloads.
+    # Its error names the game, pin version and missing stream on either host.
+    unity-mono-pins-are-packaged = lib.all (
+      g:
+      lib.all (
+        f:
+        g.config.fetchInfo.${f}."x86_64-windows" == null
+        || builtins.seq (builtins.length
+          (g.apply {
+            fetcher = f;
+            emulatedPlatform = "x86_64-windows";
+          }).config.extraLowers
+        ) true
+      ) (lib.attrNames g.config.fetchInfo)
+    ) (lib.attrValues dflt.games);
+    unity-mono-unpackaged-pin-throws = throws unpackagedUnity.drvPath;
+    unity-mono-source-framework = import ./unity-mono.nix { inherit lib; scope = dflt; };
+    unity-mono-packaged-pin-evaluates =
+      (builtins.tryEval (unityFixture "2022.3.1f1" "mono").drvPath).success;
+    unity-mono-6000-3-pin-evaluates =
+      (builtins.tryEval (unityFixture "6000.3.1f1" "mono").drvPath).success;
+    unity-mono-explicit-opt-out-evaluates =
+      (builtins.tryEval (unpackagedUnity.apply { unity.mono.enable = false; }).drvPath).success;
+    unity-mono-il2cpp-needs-no-runtime =
+      (builtins.tryEval (unityFixture "9999.1.0f1" "il2cpp").drvPath).success;
     # A game module may state a fact the pin lacks (`lastWins`), and `.apply` may override it.
     unity-facts-are-overridable =
       (dflt.stellaris.apply { unity.version = "2021.3.1f1"; }).config.unity.stream == "2021.3";

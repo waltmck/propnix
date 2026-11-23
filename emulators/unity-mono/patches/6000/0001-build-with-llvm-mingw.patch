@@ -1,4 +1,4 @@
-Subject: [PATCH] Build the 6000.0 runtime as ARM64EC with llvm-mingw
+Subject: [PATCH] Build Unity 6 runtimes as ARM64EC with llvm-mingw
 
 configure.ac: `aarch64-*-*` and `arm64ec-*-*` hosts (RID win-arm64, COREARCH arm64: Unity's Windows-ARM64
 port sources, -lntdll -luuid; Boehm stays on for arm64ec, the Unity runtime being the Boehm build) and
@@ -12,7 +12,7 @@ scripts/update_submodules.sh call dropped (the tree is assembled from pinned sou
 etw-profiler.c, mono-log-common.c: the Windows SDK header spellings as the SDK ships them, and the
 MSVC-only inline forms the message-compiler output assumes, for clang. boehm-gc.c: the pointer types
 the collector's current headers declare. mixed_callstack_plugin.c: a forward declaration with the
-definition's linkage. oop.c: part of the Windows build (Makefile.am win32_sources), its x64
+definition's linkage. oop.c: its x64
 dynamic-function-table access compiled only for x64 proper — on neither ARM64 build: plain ARM64
 (__aarch64__) nor ARM64EC (__arm64ec__, whose compiler presents x64's macros). The ARM64 port registers
 its own tables, and the x64 path's mini.h include trips the GC guard there.
@@ -138,18 +138,6 @@ index 196e0df1..24a5e0bd 100644
  AC_MONO_OUTPUT()
  
  if test x$host_win32 = xyes; then
-diff --git a/mono/metadata/Makefile.am b/mono/metadata/Makefile.am
-index 28f26b28..a532d49d 100644
---- a/mono/metadata/Makefile.am
-+++ b/mono/metadata/Makefile.am
-@@ -13,6 +13,7 @@ win32_sources = \
- 	w32semaphore-win32.c \
- 	w32event-win32.c \
- 	w32process-win32.c \
-+	oop.c \
- 	w32socket-win32.c \
- 	w32error-win32.c
- 
 diff --git a/mono/metadata/boehm-gc.c b/mono/metadata/boehm-gc.c
 index 4a012db8..3f65df05 100644
 --- a/mono/metadata/boehm-gc.c
@@ -304,7 +292,7 @@ diff --git a/mono/utils/valgrind.h b/mono/utils/valgrind.h
 diff --git a/mono/mini/mini-arm64.c b/mono/mini/mini-arm64.c
 --- a/mono/mini/mini-arm64.c
 +++ b/mono/mini/mini-arm64.c
-@@ -31,4 +31,10 @@
+@@ -31,6 +31,12 @@
  #include <mono/metadata/marshal-ilgen.h>
  
  #include "interp/interp.h"
@@ -315,3 +303,5 @@ diff --git a/mono/mini/mini-arm64.c b/mono/mini/mini-arm64.c
 +__asm__ (".text\n.p2align 2\n.globl ___chkstk_ms\n___chkstk_ms:\n\tb __chkstk\n");
 +#endif
  
+ /*
+  * Documentation:

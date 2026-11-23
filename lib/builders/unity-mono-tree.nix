@@ -30,10 +30,7 @@
   runtimePath, # game-dir-relative path of the runtime the player loads
 }:
 let
-  known = lib.attrNames unityMono.streams;
-  runtime =
-    unityMono.streams.${stream}
-      or (throw "propnix (${pname}): the pinned Unity version's stream \"${stream}\" is not packaged — emulators/unity-mono has ${lib.concatStringsSep ", " known}");
+  runtime = unityMono.forVersion version;
 in
 runCommand "${pname}-unity-mono-${stream}-arm64ec"
   {

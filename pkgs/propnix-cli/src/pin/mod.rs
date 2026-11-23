@@ -21,6 +21,7 @@ pub mod retry;
 pub mod steam;
 pub mod steamcache;
 pub mod unity;
+pub mod unity_mono;
 pub mod versions;
 
 use std::collections::BTreeMap;

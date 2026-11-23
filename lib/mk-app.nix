@@ -24,6 +24,7 @@
   gbeFork,
   mkUnityMonoTree,
   unityMono, # emulators/unity-mono's ARM64EC runtimes (null on x86_64 hosts)
+  unityMonoPins, # host-independent source pins, also used to validate updates on x86_64
   winPkgs, # the per-target Windows package set (lib/default.nix): what a native-player process loads
   unityPlayer, # emulators/unity-player: Unity's native ARM64 player per release (unfree; pure eval here)
   mkUnityPlayerTree,
@@ -64,6 +65,7 @@ let
       stdenv
       mkUnityMonoTree
       unityMono
+      unityMonoPins
       ;
   };
   # The `unity.player.*` namespace: the title's native ARM64 platform (`aarch64-windows`, pinned from the

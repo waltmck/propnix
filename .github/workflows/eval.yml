@@ -148,6 +148,32 @@ jobs:
         if: ${{ matrix.system == 'x86_64-linux' }}
         run: ci/readme-tables.sh
 
+  # Build the actual runtimes on PRs too: evaluating a derivation cannot detect rejected patches,
+  # compiler errors, or an invalid DLL. The master cache workflow builds these same roots there.
+  # No game downloads or credentials are needed; checkPhase validates both Windows PE targets.
+  unity-mono:
+    name: Unity Mono (${{ matrix.target }})
+    needs: memo
+    if: needs.memo.outputs.skip != 'true' && !(github.event_name == 'push' && github.ref == 'refs/heads/master')
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-windows, aarch64ec-windows]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - uses: cachix/cachix-action@v16
+        with:
+          name: propnix
+          skipPush: 'true'
+      - name: Build and validate every packaged stream
+        run: nix build --no-link --keep-going --print-build-logs '.#legacyPackages.aarch64-linux.winPkgs.${{ matrix.target }}.unityMono'
+
   # The Steam-SDK-vs-gbe_fork gate: every Steam pin carries `steamApiInterfaces` (the interface
   # revisions its shipped steam_api libraries name, written by `propnix pin` at pin time), and each must
   # be SERVED by the pinned gbe_fork — asked of the shim itself by running it (gbeFork.interfaceOracle,

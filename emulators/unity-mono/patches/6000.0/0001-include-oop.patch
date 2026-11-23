@@ -1,0 +1,14 @@
+Subject: [PATCH] Include the out-of-process helpers in the 6000.0 Windows build
+
+6000.0 has not yet added oop.c to common_sources. Later Unity 6 streams include it
+upstream; this compatibility patch belongs only to the older stream.
+
+diff --git a/mono/metadata/Makefile.am b/mono/metadata/Makefile.am
+--- a/mono/metadata/Makefile.am
++++ b/mono/metadata/Makefile.am
+@@ -14,4 +14,5 @@ win32_sources = \
+ 	w32event-win32.c \
+ 	w32process-win32.c \
++	oop.c \
+ 	w32socket-win32.c \
+ 	w32error-win32.c

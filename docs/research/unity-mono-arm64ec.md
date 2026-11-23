@@ -182,23 +182,27 @@ feasibility spike in an incremental tree.
 
 ## Packaging (emulators/unity-mono)
 
-- One derivation per stream (`unityMono.streams."2022.3"`, `"6000.0"`; `.#unityMono` links both and is
+- One derivation per stream (`unityMono.streams."2022.3"`, `"6000.0"`, `"6000.3"`; `.#unityMono` links them and is
   the cachix job), each pinning Unity's `unity-<stream>-mbe` branch head, its `external/bdwgc` gitlink
   and bdwgc's `libatomic_ops` gitlink as `fetchFromGitHub` sources assembled into one tree. The product
   is `mono-2.0-bdwgc.dll` (stripped, ARM64EC-checked) plus its export list.
 - The patch families are the incremental trees' deltas, generated with `a/`/`b/` prefixes. 2022.3:
   wine-mono's seven merge requests verbatim (0001-0007, each header naming the MR, its author and
   merge date), then the build fixes (0008) and the ARM64EC layer (0009: the remainder of the tree over
-  the MR layer, which the worktree `wt-2022` holds as a commit). 6000.0: the build fixes (0001) and the
-  ARM64EC layer adapted onto Unity's own port (0002). The bdwgc patch is shared (`patches/bdwgc`): the
-  two revisions' `win32_threads.c` take the same hunks.
+  the MR layer, which the worktree `wt-2022` holds as a commit). Unity 6 shares `patches/6000`: the build
+  fixes (0001) and the ARM64EC layer adapted onto Unity's own port (0002). 6000.0 additionally takes
+  `patches/6000.0` to include `oop.c`; 6000.3 includes it upstream, and adding it twice breaks the ARM64
+  link. The bdwgc patches are shared (`patches/bdwgc`). Every patch applies with `--fuzz=0`.
 - The configure-time `scripts/update_submodules.sh` call is removed by each stream's build-fix patch;
   `autogen.sh` is not run (it clones every submodule), `AUTOPOINT=true autoreconf -i` after copying
   `mono/mini/Makefile.am.in` to `Makefile.am` replaces it, and autoreconf descends into
   `external/bdwgc` and its `libatomic_ops` (the latter present only for that descent; the collector is
   built on the compiler's atomics).
-- Game side: `unity.mono.stream` (lib/modules/unity-mono.nix) puts the stream's DLL over the payload as
-  an `extraLowers` tree (lib/builders/unity-mono-tree.nix) on aarch64 wine backends only. The tree's
+- Game side: `unity.stream`, derived from the selected pin's `unityVersion`, selects the runtime in
+  lib/modules/unity-mono.nix. An enabled Windows Mono pin whose stream is absent from
+  the source registry fails evaluation on both hosts, including the x86_64 pin updater;
+  IL2CPP builds do not require a Mono package. On aarch64 wine backends, the module puts the stream's
+  DLL over the payload as an `extraLowers` tree (lib/builders/unity-mono-tree.nix). The tree's
   derivation reads the payload: the player's version string must begin with the declared stream, and
   every `mono_*` name the player carries that the shipped runtime exports must be in the ARM64EC
   runtime's export list (`winedump -j export` reads the shipped x64 runtime; the EC list comes from the
@@ -213,3 +217,27 @@ feasibility spike in an incremental tree.
 - The packaged DLLs export the MONO_API surface (5295 and 5293 names); the incremental trees' DLLs
   additionally export 380 `GC_*` names, which no shipped runtime exports and no player binds.
 
+## Automatic stream packaging
+
+`unityMono.forVersion "6000.3.1f1"` selects the stream and produces its runtime derivation. The same
+factory serves both Windows targets. `policy.nix` supplies the branch, patch family and targets for a
+new stream; Unity 6 and later attempt the shared Unity 6 patches. Maintained exceptions live in
+`pins.nix` and may specify additional patch families.
+
+Source discovery happens during `propnix pin`, before either stdout or a file is written. Its Nix
+resolver (`lock-source.nix`) resolves the Mono branch, reads the exact bdwgc and libatomic_ops gitlinks,
+and records their revisions and NAR hashes in a top-level `unityMonoSources` map in the game's existing
+`versions.json`. Existing maintained streams need no new metadata. All pin-writing modes use this path;
+`--check` remains a metadata-only update check. A discovery failure aborts the pin transaction with an
+error requiring manual packaging. There is no separate packaging PR workflow.
+
+Normal flake evaluation stays pure: `sources.nix` merges the committed locks, checks for conflicting
+revisions, and ignores locks without a Windows Mono consumer. Pinning prunes obsolete locks too. The
+Nix runtime collection automatically includes the resulting streams, so the existing cache jobs and
+the PR build jobs compile them without a hand-maintained CI version list.
+
+`checkPhase` checks both DLLs' PE architecture, the ARM64EC metadata where applicable, the runtime's
+export count and essential Mono entry points. Patch, compile and check failures name the stream,
+target and phase and demand manual packaging. These checks validate the cross-built artifacts; game
+launch testing remains separate. The payload overlay also checks the game's actual Unity version and
+required exports when that game is built.

@@ -11,15 +11,11 @@ there.
 diff --git a/include/private/gcconfig.h b/include/private/gcconfig.h
 --- a/include/private/gcconfig.h
 +++ b/include/private/gcconfig.h
-@@ -148,7 +148,7 @@
- # if defined(__aarch64__)
+@@ -148,3 +148,3 @@
+-# if defined(__aarch64__)
++# if defined(__aarch64__) && !defined(_WIN32)
  #    define AARCH64
  #    if !defined(LINUX) && !defined(DARWIN) && !defined(FREEBSD) \
--        && !defined(NN_BUILD_TARGET_PLATFORM_NX) && !defined(__QNX__)
-+        && !defined(NN_BUILD_TARGET_PLATFORM_NX) && !defined(__QNX__) && !defined(_WIN32)
- #      define NOSYS
- #      define mach_type_known
- #    endif
 @@ -540,7 +540,7 @@
  #       define X86_64
  #     elif defined(_M_ARM)

@@ -12,16 +12,17 @@ diff --git a/win32_threads.c b/win32_threads.c
 index 0e0c97a..9e20ddf 100644
 --- a/win32_threads.c
 +++ b/win32_threads.c
-@@ -82,6 +82,9 @@ static ptr_t copy_ptr_regs(word *regs, const CONTEXT *pcontext);
- # else
- #   define PUSHED_REGS_COUNT 7
- # endif
-+#elif defined(X86_64) && defined(__arm64ec__)
+@@ -77,6 +77,9 @@
+ /* PUSHED_REGS_COUNT is the number of copied registers in copy_ptr_regs. */
+ static ptr_t copy_ptr_regs(word *regs, const CONTEXT *pcontext);
+-#if defined(I386)
++#if defined(X86_64) && defined(__arm64ec__)
 +  /* ARM64EC: the x64-mapped registers plus the ARM64-only ones (see copy_ptr_regs). */
 +# define PUSHED_REGS_COUNT 25
- #elif defined(X86_64) || defined(SHx)
- # define PUSHED_REGS_COUNT 15
- #elif defined(ARM32)
++#elif defined(I386)
+ # ifdef WOW64_THREAD_CONTEXT_WORKAROUND
+ #   define PUSHED_REGS_COUNT 9
+ # else
 @@ -1458,6 +1461,25 @@ static ptr_t copy_ptr_regs(word *regs, const CONTEXT *pcontext) {
  #     endif
        PUSH4(Edi,Esi,Ebx,Edx), PUSH2(Ecx,Eax), PUSH1(Ebp);

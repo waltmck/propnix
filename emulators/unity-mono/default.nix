@@ -13,11 +13,12 @@
 # THE STREAM IS THE UNIT. The player and its runtime are built together per Unity release line, and the
 # player binds to runtime internals that move between lines, so a runtime is correct only for players of
 # its own stream; lib/modules/unity-mono.nix holds a game's declaration against its player at build time.
-# Each stream pins Unity's mono branch (`unity-<stream>-mbe`) with its bdwgc submodule and carries its own
+# Each stream locks Unity's mono branch (`unity-<stream>-mbe`) with its bdwgc submodule and selects a
 # patch family. 2022.3 has no Windows-ARM64 port of its own and takes wine-mono's upstream arm64 work
 # (seven merge requests, verbatim) before the ARM64EC layer; 6000.0 carries Unity's own Windows-ARM64
-# port, onto which the layer is adapted. A new stream is a new pin plus a family; the port notes are in
-# docs/research/unity-mono-arm64ec.md.
+# port, onto which the layer is adapted. `propnix pin` automatically records new source locks;
+# policy.nix selects a family, and this builder fails if it cannot patch, compile, or validate the DLLs.
+# The port notes are in docs/research/unity-mono-arm64ec.md.
 #
 # SUSPEND. Boehm stops the world preemptively (SuspendThread + GetThreadContext). Under the ARM64EC
 # contract a thread in x64 code stops only at the emulator's next doorbell poll, so this runtime relies on
@@ -44,45 +45,20 @@
   # hybrid wine+FEX stack, plain ARM64 for a native player process (lib/modules/unity-player.nix).
   toolchain,
   target,
+  unityMonoPins,
 }:
 let
-  # The pins. `branch` is where Unity publishes the stream (Unity-Technologies/mono); the revision is the
+  # The registry (sources.nix, also used for validation on x86_64). `branch` is where Unity publishes the
+  # stream (Unity-Technologies/mono); the revision is the
   # branch head the patch family was made against, and `bdwgc` is that revision's `external/bdwgc`
   # gitlink (Unity-Technologies/bdwgc). `targets` lists the PE targets the stream is built for: every
   # stream has the ARM64EC runtime (the x64 player under wine+FEX), and a stream has the plain-ARM64 one
   # only where a native ARM64 Windows player exists to load it — Unity added that player in 2023.1, so
   # 2022.3 has no consumer for it and is not built.
-  streams = {
-    "2022.3" = {
-      branch = "unity-2022.3-mbe";
-      targets = [ "aarch64ec-windows" ];
-      mono = {
-        rev = "b8eb56fab45dd52845fabba7b7ddc9a80b2b0498";
-        hash = "sha256-QRpU0Wck/OEdWQuOeDdzxPeC69Y5LGMzGnI/4coJ+Gs=";
-      };
-      bdwgc = {
-        rev = "8167f758c8e8d9c4a276971629d0ca98e20759f3";
-        hash = "sha256-WxjDLmjeAMzn7EHlN13ENlffN8+sSJ7vPoW9jHtNJhg=";
-      };
-    };
-    "6000.0" = {
-      branch = "unity-6000.0-mbe";
-      targets = [
-        "aarch64-windows"
-        "aarch64ec-windows"
-      ];
-      mono = {
-        rev = "e3f5e86f047452d5ae757c195490df0059418621";
-        hash = "sha256-94Ku7xkvm0nobDRQD777K8+gy8dF+e+ifVZh1sJydEs=";
-      };
-      bdwgc = {
-        rev = "1113fefc4ba0e895767ac780d84e9e456fd624db";
-        hash = "sha256-pCEPVT7rpWsWcNnpeSblgiwW9ClL+UIXWdC4HJ9psnQ=";
-      };
-    };
-  };
+  streams = unityMonoPins;
 
-  # bdwgc's nested libatomic_ops submodule, the same commit in both streams. It is in the tree only so
+  # Legacy pins share this libatomic_ops revision; automatically locked streams record their gitlink.
+  # It is in the tree only so
   # autoreconf can descend into the AC_CONFIG_SUBDIRS entry bdwgc's configure.ac names; the build itself
   # uses the compiler's atomics (the configure.ac patch: --with-libatomic-ops=none, GC_BUILTIN_ATOMIC).
   libatomicOps = fetchFromGitHub {
@@ -97,10 +73,14 @@ let
   # Only ./patches keys a stream's build (like emulators/wine-mono): unrelated repo edits never perturb it.
   patchesFor =
     stream:
-    builtins.path {
-      path = ./patches + "/${stream}";
-      name = "unity-mono-${stream}-patches";
-    };
+    lib.throwIfNot (builtins.pathExists (./patches + "/${stream}"))
+      "propnix: Unity Mono patch family ${stream} is unavailable; manual packaging is required in emulators/unity-mono"
+      (
+        builtins.path {
+          path = ./patches + "/${stream}";
+          name = "unity-mono-${stream}-patches";
+        }
+      );
   bdwgcPatches = builtins.path {
     path = ./patches/bdwgc;
     name = "unity-mono-bdwgc-patches";
@@ -122,8 +102,17 @@ let
         repo = "bdwgc";
         inherit (pin.bdwgc) rev hash;
       };
-      inherit libatomicOps bdwgcPatches;
-      streamPatches = patchesFor stream;
+      libatomicOps =
+        if pin ? libatomicOps then
+          fetchFromGitHub {
+            owner = "Unity-Technologies";
+            repo = "libatomic_ops";
+            inherit (pin.libatomicOps) rev hash;
+          }
+        else
+          libatomicOps;
+      inherit bdwgcPatches;
+      streamPatches = map patchesFor ([ (pin.patchFamily or stream) ] ++ (pin.extraPatchFamilies or [ ]));
 
       nativeBuildInputs = toolchain.nativeBuildInputs ++ [
         autoconf
@@ -145,13 +134,15 @@ let
       '';
 
       postPatch = ''
-        for p in "$streamPatches"/*.patch; do
-          echo "applying $(basename "$p")"
-          patch -p1 --no-backup-if-mismatch < "$p"
+        for family in $streamPatches; do
+          for p in "$family"/*.patch; do
+            echo "applying $(basename "$family")/$(basename "$p")"
+            patch --batch --forward --fuzz=0 -p1 --no-backup-if-mismatch < "$p"
+          done
         done
         for p in "$bdwgcPatches"/*.patch; do
           echo "applying bdwgc/$(basename "$p")"
-          patch -d external/bdwgc -p1 --no-backup-if-mismatch < "$p"
+          patch --batch --forward --fuzz=0 -d external/bdwgc -p1 --no-backup-if-mismatch < "$p"
         done
         # The tree's scripts carry `#!/usr/bin/env …`, which does not exist in the sandbox.
         patchShebangs .
@@ -249,6 +240,28 @@ let
         runHook postBuild
       '';
 
+      # Nix's test phase: verify the actual cross-built products before installing them. A successful
+      # configure or static-only build is not a usable runtime, and a wrong-architecture DLL is fatal.
+      doCheck = true;
+      checkPhase = ''
+        runHook preCheck
+        dll=mono/mini/.libs/libmonoboehm-2.0.dll
+        [ -f "$dll" ] || { echo "no shared Mono runtime was produced" >&2; exit 1; }
+        helper=$(find support/.libs -maxdepth 1 -name '*.dll' | head -1)
+        [ -n "$helper" ] || { echo "no MonoPosixHelper DLL was produced" >&2; exit 1; }
+        ${toolchain.checkPe} "$dll" "$helper"
+        llvm-readobj --coff-exports "$dll" | awk '/^ *Name:/ { print $2 }' | sort -u > exports
+        [ "$(wc -l < exports)" -ge 1000 ] || { echo "Mono export table is incomplete" >&2; exit 1; }
+        for symbol in mono_jit_init_version mono_jit_cleanup mono_runtime_invoke mono_gc_collect mono_add_internal_call; do
+          grep -Fxq "$symbol" exports || { echo "missing Mono entry point: $symbol" >&2; exit 1; }
+        done
+        runHook postCheck
+      '';
+
+      failureHook = ''
+        echo "propnix: Unity Mono ${stream} (${target}) failed during ''${curPhase:-build}; manual packaging is required in emulators/unity-mono. See the build error above." >&2
+      '';
+
       # The product, under the name the player loads, plus its export list (`exports`, one name per line)
       # for the module's build-time check against the player. The image must be the TARGET's: a plain x64
       # PE would silently be the emulated runtime this package exists to replace, an ARM64EC one loads in
@@ -265,9 +278,7 @@ let
         install -m444 "$helper" "$out/MonoPosixHelper.dll"
         ${triple}-strip "$out/MonoPosixHelper.dll"
         ${toolchain.checkPe} "$out/mono-2.0-bdwgc.dll" "$out/MonoPosixHelper.dll"
-        llvm-readobj --coff-exports "$out/mono-2.0-bdwgc.dll" | awk '/^ *Name:/ { print $2 }' | sort -u > "$out/exports"
-        [ "$(wc -l < "$out/exports")" -ge 1000 ] \
-          || { echo "propnix: the runtime exports $(wc -l < "$out/exports") names — the export table is wrong"; exit 1; }
+        install -m444 exports "$out/exports"
         runHook postInstall
       '';
 
@@ -288,6 +299,13 @@ let
     };
 
   runtimes = lib.mapAttrs mkRuntime (lib.filterAttrs (_: pin: lib.elem target pin.targets) streams);
+  forVersion =
+    version:
+    let
+      stream = lib.versions.majorMinor version;
+    in
+    runtimes.${stream}
+      or (throw "propnix: Unity ${version} has no ${target} Mono source lock; re-pin the game or package the stream manually in emulators/unity-mono");
 in
 # One attribute for the whole set (`.#unityMono`: the cachix job builds every stream through it), with the
 # streams reachable by name for the module (`unityMono.streams."6000.0"`). A stream the target does not
@@ -296,7 +314,7 @@ runCommand "unity-mono-${target}"
   {
     passthru = {
       streams = runtimes;
-      inherit target;
+      inherit target forVersion;
     };
     meta = {
       description = "Unity Mono runtimes as ${target} PEs, one per Unity stream (${lib.concatStringsSep ", " (lib.attrNames runtimes)})";

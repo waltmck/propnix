@@ -588,6 +588,9 @@ fn land(
     to_stdout: bool,
     create_dir: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Source locking and game pins land together, including --stdout's validate-before-swap path.
+    let locked = pin::unity_mono::lock_document(&opts.repo, doc)?;
+    let doc = locked.as_str();
     if to_stdout {
         print!("{doc}");
         return Ok(());

@@ -46,7 +46,8 @@ let
         inherit system;
         config = {
           allowUnfree = true;
-          allowBroken = true;
+          # Read the normal support verdict: newer nixpkgs clears meta.broken when allowBroken
+          # permits it. This query reads metadata only, so it needs no permission to build those games.
         };
       };
       config = { };

@@ -63,10 +63,15 @@ let
   #
   # PIC is required because these archives are linked INTO a shared object; nixpkgs' static builds
   # normally assume a fully-static world where it is not.
+  # Use the shim's C++17 mode for both libraries. GCC 16 defaults to C++20; letting Abseil use that
+  # default makes its installed headers expose std::*_ordering to this C++17 consumer.
   staticPic =
     drv:
     drv.overrideAttrs (old: {
-      cmakeFlags = (old.cmakeFlags or [ ]) ++ [ "-DCMAKE_POSITION_INDEPENDENT_CODE=ON" ];
+      cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+        "-DCMAKE_POSITION_INDEPENDENT_CODE=ON"
+        "-DCMAKE_CXX_STANDARD=17"
+      ];
     });
   # `abseil-cpp` is only an alias that forwards `cxxStandard`; the `static` knob lives on the versioned
   # LTS package underneath it (nixpkgs keeps one per LTS branch deliberately — abseil treats every LTS as
@@ -203,9 +208,11 @@ stdenv.mkDerivation (finalAttrs: {
     # the line. Upstream names ~115 `absl_*` archives explicitly for exactly this reason; globbing the
     # prefix is the same thing without a list that silently rots on every abseil bump. `--start-group`
     # makes the order irrelevant, and `--exclude-libs,ALL` keeps every absorbed symbol out of `.dynsym`.
-    $CXX -shared -o libsteam_api.so -Wl,-soname=libsteam_api.so _obj/*.o \
+    # Libraries can have a separate `lib` output (protobuf does). Reject unresolved symbols here,
+    # including on cross builds, rather than shipping a shim that fails at dlopen.
+    $CXX -shared -o libsteam_api.so -Wl,-soname=libsteam_api.so -Wl,-z,defs _obj/*.o \
       -Wl,--start-group \
-        ${protobufStatic}/lib/*.a ${abseilStatic}/lib/*.a \
+        ${lib.getLib protobufStatic}/lib/*.a ${lib.getLib abseilStatic}/lib/*.a \
         -lpthread -ldl -lcurl -lmbedcrypto -lmbedtls -lmbedx509 \
         -lopus -lportaudio \
       -Wl,--end-group \

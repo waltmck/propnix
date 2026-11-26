@@ -234,10 +234,11 @@ let
     doInstallCheck = true;
     installCheckPhase = ''
       runHook preInstallCheck
-      out=$("$out/bin/gbe-interface-oracle" SteamUser023 SteamFoo001 SteamClient099 || true)
-      echo "$out"
-      grep -qx $'SteamUser023\tserved' <<<"$out" && grep -qx $'SteamFoo001\texit73' <<<"$out" \
-        && grep -qx $'SteamClient099\tnull' <<<"$out"
+      verdicts=$("$out/bin/gbe-interface-oracle" SteamUser023 SteamFoo001 SteamClient099 || true)
+      echo "$verdicts"
+      grep -qx $'SteamUser023\tserved' <<<"$verdicts"
+      grep -qx $'SteamFoo001\texit73' <<<"$verdicts"
+      grep -qx $'SteamClient099\tnull' <<<"$verdicts"
       runHook postInstallCheck
     '';
     meta.description = "asks the pinned gbe_fork shim, by running it, which Steamworks interface revisions it serves";

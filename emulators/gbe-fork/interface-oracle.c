@@ -127,9 +127,9 @@ int main(int argc, char **argv) {
     pid_t pid = fork();
     if (pid < 0) { perror("fork"); return 2; }
     if (pid == 0) {
-      /* the shim is chatty on stderr only with PRINT_DEBUG builds; silence anything else it says */
-      int devnull = open("/dev/null", 1);
-      if (devnull >= 0) { dup2(devnull, 1); dup2(devnull, 2); }
+      /* Keep stdout machine-readable, but preserve stderr for dlopen/init diagnostics. */
+      int devnull = open("/dev/null", O_WRONLY);
+      if (devnull >= 0) { dup2(devnull, STDOUT_FILENO); close(devnull); }
       probe(shim, scratch, rev);
     }
     int status = 0;

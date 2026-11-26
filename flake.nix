@@ -1,10 +1,10 @@
 {
   description = "propnix — reproducible Nix packaging of proprietary games/apps (GOG, MS Store) via wine (+FEX/ARM64EC on aarch64, native on x86_64), without muvm";
 
-  # Pinned to the exact nixpkgs 26.11 rev the preliminaries POCs built against (registry `flake:nixpkgs`),
-  # so the already-built emulator closure (wine-hangover, FEX-2607 DLLs, DXVK/vkd3d, llvm-mingw) is reused
-  # rather than rebuilt. Bump deliberately + re-verify (16K HK boot) per RESEARCH §22.
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/9bc02893134c733dd85de46ee4fb2fac696b5529";
+  # Keep the native runtime new enough to load the system graphics drivers: the host's Mesa 26.3 needs
+  # GLIBC_2.43 symbols that the previous pin's glibc 2.42 lacked. This revision supplies glibc 2.44.
+  # Re-verify the emulator builds and game startup when advancing the pin.
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/619c39f6eac5d1ed6b8f073a9414baf7034b2356";
 
   outputs =
     { self, nixpkgs }:

@@ -1,8 +1,8 @@
 # vkd3d-proton-x86_64.nix — vkd3d-proton (D3D12 → Vulkan) for the x86_64-linux host, as x86_64 PE DLLs.
 #
 # The x86_64 sibling of vkd3d-proton-arm64ec.nix. On x86_64 wine runs the game natively, so vkd3d is just
-# the standard x86_64 Windows build. We reuse nixpkgs' `pkgsCross.mingwW64.vkd3d-proton` cross build, with
-# two overrides:
+# the standard x86_64 Windows build. We reuse nixpkgs' `pkgsCross.mingw-msvcrt-x86_64.vkd3d-proton`
+# cross build, with two overrides:
 #   * stdenv → the WIN32 THREAD MODEL (exactly as nixpkgs' `dxvk` does), so the PE DLLs carry no
 #     libwinpthread dependency.
 #   * wine → `wine64Packages.minimal` (widl only). vkd3d-proton needs wine's `widl` at build; the DEFAULT
@@ -16,37 +16,27 @@
 {
   runCommand,
   pkgsCross,
-  overrideCC,
   wine64Packages,
 }:
 let
-  # Build mingw with the win32 thread model (no winpthreads runtime dep) — nixpkgs' own dxvk recipe.
-  useWin32ThreadModel =
-    stdenv:
-    overrideCC stdenv (
-      stdenv.cc.override (old: {
-        cc = old.cc.override {
-          threadsCross = {
-            model = "win32";
-            package = null;
-          };
-        };
-      })
-    );
+  # Match nixpkgs' DXVK recipe: GCC's thread library is now a package (or null), not a
+  # { model; package; } record. Overlay the cross set so every compiler stage uses win32 threads.
+  mingw = pkgsCross.mingw-msvcrt-x86_64.appendOverlays [
+    (_final: _prev: { threads = null; })
+  ];
 
   vkd3d64 =
-    (pkgsCross.mingwW64.vkd3d-proton.override {
-      stdenv = useWin32ThreadModel pkgsCross.mingwW64.stdenv;
+    (mingw.vkd3d-proton.override {
       wine = wine64Packages.minimal; # widl only; 64-bit → avoids the pkgsi686Linux (windows-host) throw
     }).overrideAttrs
       (old: {
         # winpthreads: meson's dependency('threads') puts `-pthread` on the link line, and the win32
         # thread-model toolchain ships no libpthread.a of its own — the link fails with "cannot find
-        # -lpthread". nixpkgs' dxvk_2 adds exactly this buildInput for Windows hosts
-        # (dxvk_2/package.nix: `++ lib.optionals hostPlatform.isWindows [ windows.pthreads ]`);
+        # -lpthread". nixpkgs' dxvk adds exactly this buildInput for Windows hosts
+        # (`++ lib.optionals hostPlatform.isWindows [ windows.pthreads ]`);
         # nixpkgs' vkd3d-proton — never cross-built by Hydra — misses it. The STATIC archive
         # (pthreads.nix: withStatic default) satisfies the `-static` link with no runtime DLL dep.
-        buildInputs = (old.buildInputs or [ ]) ++ [ pkgsCross.mingwW64.windows.pthreads ];
+        buildInputs = (old.buildInputs or [ ]) ++ [ mingw.windows.pthreads ];
         # vkd3d-proton inherits meta.platforms from `wine`; the 64-bit-Linux wine we substituted excludes
         # the x86_64-windows host this PE build targets. Restore it so checkMeta accepts the cross build.
         meta = (old.meta or { }) // {

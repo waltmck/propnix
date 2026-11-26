@@ -69,6 +69,41 @@ let
     fetchSubmodules = true;
     hash = "sha256-CbPDqE1H3d+obgmddkhZ9iaB8Kk3bQb9aN2OQogbGJE=";
   };
+
+  # Loading only libc misses mappings made after a guest fork. A cached /proc/self/mem fd in
+  # LargePageMap then reads the parent's bytes, corrupting the child's newly loaded ELF segments.
+  forkDlopenSource = builtins.toFile "fex-fork-dlopen.c" ''
+    #include <dlfcn.h>
+    #include <stdio.h>
+    #include <sys/wait.h>
+    #include <unistd.h>
+
+    int main(void) {
+      pid_t child = fork();
+      if (child < 0) { perror("fork"); return 1; }
+      if (child == 0) {
+        void *h = dlopen(LIBM_PATH, RTLD_NOW | RTLD_LOCAL);
+        if (!h) { fprintf(stderr, "dlopen: %s\n", dlerror()); _exit(1); }
+        double (*cosine)(double) = (double (*)(double))dlsym(h, "cos");
+        if (!cosine || cosine(0.0) != 1.0) _exit(1);
+        _exit(0);
+      }
+      int status;
+      if (waitpid(child, &status, 0) != child) { perror("waitpid"); return 1; }
+      if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "forked libm probe failed: wait status %d\n", status);
+        return 1;
+      }
+      printf("forked libm probe passed (%zu-bit)\n", sizeof(void *) * 8);
+      return 0;
+    }
+  '';
+  forkDlopenProbe =
+    cross:
+    cross.runCommandCC "fex-fork-dlopen" { } ''
+      $CC -std=gnu11 -O2 -DLIBM_PATH='"${lib.getLib cross.glibc}/lib/libm.so.6"' \
+        ${forkDlopenSource} -o "$out" -ldl
+    '';
 in
 (
     fex.overrideAttrs (old: {
@@ -132,6 +167,10 @@ in
             echo "fex-linux: dynamic $want-bit guest failed (exit $rc, output '$got', wanted '$want')" >&2
             exit 1
           fi
+        done
+
+        for guest in ${forkDlopenProbe pkgsCross.gnu64} ${forkDlopenProbe pkgsCross.gnu32}; do
+          FEX_ROOTFS=/ "$out/bin/FEX" "$guest"
         done
 
         for g in h64 h32; do

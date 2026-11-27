@@ -9,7 +9,7 @@
 # aarch64 runs natively on the free public-repo ARM runners — required, some builds EXECUTE wine):
 #
 #   wine (both systems; the multi-hour long pole, nixpkgs-only deps) ─────────┐
-#   toolchain (aarch64 llvmMingw; fast prebuilt fetch) ─→ arm64ec fan-out ────┼─→ prefix-lower
+#   toolchain (aarch64 llvmMingw; patched clang/lld) ─→ arm64ec fan-out ─────┼─→ prefix-lower
 #   tools (Rust launcher/cli + box64 / x86_64 dxvk+vkd3d; independent roots) ─→ gbe-interfaces
 #   fex-linux (aarch64 FEXInterpreter; independent root)                      │
 #
@@ -133,12 +133,13 @@ jobs:
           attrs: fexInterpreter
           cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-  # The aarch64 ARM64EC toolchain root: fast (prebuilt mstorsjo release + autoPatchelf), pushed before
-  # the fan-out below so its four consumers substitute it instead of each re-realizing it.
+  # The aarch64 ARM64EC toolchain root builds patched clang/lld and combines it with the prebuilt
+  # mstorsjo Windows libraries. A cold build exceeds an hour; push it before the fan-out below so
+  # its consumers substitute it instead of each rebuilding the compiler.
   toolchain:
     name: llvm-mingw (aarch64-linux)
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/build-and-push

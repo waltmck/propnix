@@ -24,6 +24,9 @@
   lib,
   rustPlatform,
   makeBinaryWrapper,
+  pkg-config,
+  aws-lc,
+  zstd,
   depotdownloader,
   gnutar,
 
@@ -74,7 +77,15 @@ rustPlatform.buildRustPackage {
   # decoders. No external network and no credentials, so this stays on and the package is a real CI gate.
   doCheck = true;
 
-  nativeBuildInputs = [ makeBinaryWrapper ];
+  nativeBuildInputs = [
+    makeBinaryWrapper
+    pkg-config
+  ];
+  # nixpkgs requires aws-lc-sys (rustls) and zstd-sys to use packaged libraries.
+  buildInputs = [
+    aws-lc
+    zstd
+  ];
   # `propnix cred add steam` drives DepotDownloader (the interactive Steam Guard login) and `tar` (to capture
   # its account.config). It is ONLY used to obtain the token — the depot download itself is this crate's own
   # (pin/engine.rs). PIN it anyway: the .NET isolated-storage path is part of the on-disk layout that

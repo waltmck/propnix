@@ -96,6 +96,18 @@ let
                 doCheck = false;
               })
             )
+            // {
+              # now.ck compares future zone rules with a table shipped at release time. As time
+              # passes, zones can become identical and the unmodified release fails its own test.
+              # Keep the suite enabled, but use the release date recorded in NEWS as "now".
+              tzdata = prev.tzdata.overrideAttrs (old: {
+                preCheck = (old.preCheck or "") + ''
+                  releaseDate=$(awk '/^Release .* - / { sub(/^Release .* - /, ""); print; exit }' NEWS)
+                  releaseTimestamp=$(date -d "$releaseDate" +%s)
+                  checkFlagsArray+=("CHECK_NOW_TIMESTAMP=$releaseTimestamp")
+                '';
+              });
+            }
           )
         )
       ];

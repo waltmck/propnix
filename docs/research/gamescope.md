@@ -92,6 +92,10 @@ backend runs on that server is untested.
 
 ## Child environment and lifecycle
 
+- The launcher unsets `DISPLAY` when starting gamescope's Wayland backend. The private X11 socket
+  namespace can reuse the host's display number (`:0`), causing gamescope's host-cursor snapshot to
+  read its own new Xwayland's default black X. Without the inherited `DISPLAY`, gamescope loads the
+  themed `left_ptr` instead. Gamescope still sets its nested `DISPLAY` for the game below.
 - gamescope UNSETS `WAYLAND_DISPLAY` (sets it only with `--expose-wayland`), sets `DISPLAY=:N`,
   `XDG_SESSION_TYPE=x11`, `ENABLE_GAMESCOPE_WSI=1`, unsets `SDL_VIDEODRIVER`, and overwrites
   `DXVK_HDR` with the host output's HDR state. With `WAYLAND_DISPLAY` unset, libwayland falls back

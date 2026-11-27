@@ -44,10 +44,10 @@
 //!     the game's frames, so it covers every graphics API alike (DXVK, vkd3d, wined3d/GL, native GL). A
 //!     FEX game's overlay also shows FEX's own stats (`mangohud_config_with_fex_stats`).
 //!
-//! gamescope's own environment is the session's (it is a host client), plus the GL/Vulkan fallback stack
-//! when the host has none (it composites with Vulkan; mangoapp draws with GL), and under bench
-//! `<mangohud>/bin` on PATH (gamescope finds `mangoapp` there) and, for a FEX game, the MANGOHUD_CONFIG
-//! that mangoapp inherits.
+//! gamescope's own environment is the session's without DISPLAY (it is a Wayland host client), plus the
+//! GL/Vulkan fallback stack when the host has none (it composites with Vulkan; mangoapp draws with GL).
+//! Under bench it also gets `<mangohud>/bin` on PATH (gamescope finds `mangoapp` there) and, for a FEX
+//! game, the MANGOHUD_CONFIG that mangoapp inherits.
 
 use crate::config::FallbackGl;
 use crate::settings::FpsMode;
@@ -84,6 +84,10 @@ pub struct Options<'a> {
 pub fn command(o: &Options) -> Command {
     let mut cmd = Command::new(format!("{}/bin/gamescope", o.root));
     cmd.args(["--backend", "wayland", "-f", "--no-hotkeys"]);
+    // In our private X11 socket namespace the host's DISPLAY (often :0) can name gamescope's own new
+    // Xwayland. Its host-cursor snapshot would then copy the default black X instead of loading the
+    // themed pointer. The Wayland backend needs no host DISPLAY; gamescope sets its own for the game.
+    cmd.env_remove("DISPLAY");
     if let (Some(w), Some(h)) = (dimension("PROPNIX_WIDTH"), dimension("PROPNIX_HEIGHT")) {
         cmd.arg("-W").arg(w.to_string()).arg("-H").arg(h.to_string());
     }
